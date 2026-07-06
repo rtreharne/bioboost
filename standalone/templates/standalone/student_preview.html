@@ -1,0 +1,267 @@
+{% extends "standalone/base.html" %}
+{% load static %}
+{% block title %}Practice | {{ course.title }}{% endblock %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
+{% endblock %}
+{% block app_nav_links %}
+  {% if is_demo_mode %}
+  {% elif is_student_practice %}
+    <a href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
+  {% else %}
+    <a href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% endif %}
+{% endblock %}
+{% block app_nav_menu_actions %}
+  {% if is_demo_mode %}
+  {% elif is_student_practice %}
+    <a class="button secondary app-nav-menu-action" href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
+  {% else %}
+    <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Exit student view</a>
+  {% endif %}
+{% endblock %}
+{% block app_header %}{% endblock %}
+{% block body_class %}{% if not is_embed_mode %} app-body--canvas-theme{% endif %}{% endblock %}
+{% block app_shell_class %} preview-app-shell{% endblock %}
+{% block app_footer %}{% endblock %}
+{% block content %}
+<section
+  class="preview-page{% if is_demo_mode or not is_student_practice %} preview-page--messenger{% endif %}"
+  data-student-preview
+  data-action-url-template="{{ action_url_template|default:'' }}"
+  data-course-id="{{ course.pk }}"
+  data-preview-mode="{% if is_demo_mode %}student-demo{% elif is_student_practice %}student-practice{% else %}student-preview{% endif %}"
+  data-demo-mode="{% if is_demo_mode %}true{% else %}false{% endif %}"
+  data-demo-course-key="{% if is_demo_mode %}{{ course.pk }}{% endif %}"
+  data-demo-embed-origin-token-url="{{ demo_embed_origin_token_url|default:'' }}"
+  data-hide-flag-actions="{% if hide_flag_actions %}true{% else %}false{% endif %}"
+  data-practice-validation-url="{{ practice_validation_url|default:'' }}"
+>
+  <div class="preview-launch-loader" hidden data-preview-launch-loader>
+    <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing Test Me">
+      <div class="preview-loading-dots" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <strong>Preparing Test Me</strong>
+      <p>Building your question set now...</p>
+    </div>
+  </div>
+  <aside class="preview-sidebar" {% if is_demo_mode or not is_student_practice %}data-preview-messenger-shell="true"{% endif %}>
+    <div class="preview-sidebar-head">
+      {% if is_demo_mode or not is_student_practice %}
+        <div class="preview-sidebar-title-row preview-messenger-sidebar-title-row">
+          <a
+            class="preview-messenger-brand"
+            href="{% if is_demo_mode %}{{ demo_home_url|default:'#' }}{% elif user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}"
+            aria-label="FOREVER PHYSICS"
+          >
+            <span class="preview-messenger-brand-wordmark">ForeverPhysics</span>
+          </a>
+          <button
+            class="preview-messenger-menu-trigger"
+            type="button"
+            aria-label="Sidebar menu"
+          >
+            <span aria-hidden="true">&#8942;</span>
+          </button>
+        </div>
+      {% else %}
+        <div class="preview-sidebar-title-row">
+          <h1>{{ course.title }}</h1>
+        </div>
+      {% endif %}
+      {% if not is_demo_mode and is_student_practice %}
+        <div class="preview-sidebar-utility-links" aria-label="Preview navigation">
+          <a class="preview-sidebar-utility-link" href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
+        </div>
+      {% endif %}
+      {% if not is_demo_mode and is_student_practice %}
+        <div class="preview-sidebar-validate-cta">
+          {% if practice_validation_cta.disabled %}
+            <button class="button secondary" type="button" disabled aria-disabled="true">{{ practice_validation_cta.label }}</button>
+          {% else %}
+            <a class="button secondary" href="{{ practice_validation_cta.url }}">{{ practice_validation_cta.label }}</a>
+          {% endif %}
+          {% if practice_validation_cta.note %}
+            <p class="preview-sidebar-validate-note">{{ practice_validation_cta.note }}</p>
+          {% endif %}
+          {% if practice_validation_cta.detail and practice_validation_cta.disabled %}
+            <p class="preview-sidebar-validate-copy">{{ practice_validation_cta.detail }}</p>
+          {% endif %}
+        </div>
+        <section class="preview-course-metrics-panel" data-preview-course-metrics></section>
+      {% endif %}
+    </div>
+    <div class="preview-block-switcher" aria-label="Course blocks" data-preview-conversation-list></div>
+  </aside>
+  {% if not is_demo_mode and is_student_practice %}
+    <button
+      class="preview-sidebar-toggle"
+      type="button"
+      aria-label="Hide preview sidebar"
+      aria-expanded="true"
+      data-preview-sidebar-toggle
+    >
+      <span class="preview-sidebar-toggle-icon" aria-hidden="true"></span>
+    </button>
+    <button
+      class="preview-sidebar-scrim"
+      type="button"
+      hidden
+      aria-label="Hide preview sidebar"
+      data-preview-sidebar-scrim
+    ></button>
+  {% endif %}
+
+  <section class="preview-chat-shell">
+    <div class="preview-chat-header">
+      {% if is_demo_mode or not is_student_practice %}
+        <button
+          class="preview-messenger-back"
+          type="button"
+          hidden
+          aria-label="Back to conversations"
+          data-preview-chat-back
+        >
+          <span aria-hidden="true">&#8249;</span>
+        </button>
+      {% endif %}
+      <div class="preview-chat-header-main">
+        <span class="preview-chat-header-avatar" aria-hidden="true" data-preview-chat-avatar></span>
+        <div class="preview-chat-header-copy">
+          <h2 class="preview-active-block-title"></h2>
+          {% if is_demo_mode or not is_student_practice %}
+            <p class="preview-active-block-meta" hidden data-preview-active-block-meta></p>
+          {% endif %}
+          <div class="preview-project-switcher" data-preview-project-switcher></div>
+        </div>
+      </div>
+      <div class="preview-chat-header-menu" data-preview-header-menu>
+        <button
+          class="preview-chat-header-menu-trigger preview-messenger-menu-trigger"
+          type="button"
+          aria-label="Chat options"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          data-preview-header-menu-trigger
+        >
+          <span aria-hidden="true">&#8942;</span>
+        </button>
+        <div class="preview-chat-header-menu-panel" role="menu" hidden data-preview-header-menu-panel>
+          <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="description">
+            Description
+          </button>
+          <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="objectives">
+            Learning objectives
+          </button>
+        </div>
+      </div>
+    </div>
+    <section class="preview-project-panel" hidden data-preview-project-panel></section>
+    <div class="preview-chat-transcript" aria-live="polite" aria-label="Chat transcript"></div>
+    <form class="preview-chat-form">
+      <p class="preview-chat-status" role="status" aria-live="polite"></p>
+      <div class="preview-waq-alignment" hidden data-waq-alignment>
+        <div class="preview-waq-alignment-head">
+          <span>Answer alignment</span>
+          <div class="preview-waq-alignment-meta">
+            <span class="preview-waq-alignment-loader" hidden data-waq-alignment-loader>
+              <span class="preview-waq-alignment-loader-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+              Checking...
+            </span>
+            <strong data-waq-alignment-label>Start typing</strong>
+          </div>
+        </div>
+        <div class="preview-waq-alignment-track" aria-hidden="true">
+          <span data-waq-alignment-fill></span>
+        </div>
+      </div>
+      <label class="preview-sr-only" for="preview-chat-input">Ask a related question</label>
+      <div class="preview-chat-composer">
+        <textarea id="preview-chat-input" rows="1" maxlength="500" placeholder="Ask a related question."></textarea>
+        <div class="preview-quiz-controls">
+          <button class="button" type="submit">Quiz</button>
+          <div class="preview-quiz-menu" data-quiz-menu>
+            <button
+              class="button secondary preview-quiz-menu-trigger"
+              type="button"
+              aria-label="Choose question type"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              data-quiz-menu-trigger
+            >
+              <span class="preview-quiz-menu-trigger-dots" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+            </button>
+            <div class="preview-quiz-menu-panel" role="menu" hidden data-quiz-menu-panel>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="mcq">
+                <span class="preview-quiz-menu-item-title">MCQ</span>
+                <span class="preview-quiz-menu-item-copy">Single answer</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="num">
+                <span class="preview-quiz-menu-item-title">Numeric</span>
+                <span class="preview-quiz-menu-item-copy">Calculated answer</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="coding">
+                <span class="preview-quiz-menu-item-title">Coding</span>
+                <span class="preview-quiz-menu-item-copy">Code comprehension</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="maq">
+                <span class="preview-quiz-menu-item-title">MAQ</span>
+                <span class="preview-quiz-menu-item-copy">Multiple answers</span>
+              </button>
+              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="waq">
+                <span class="preview-quiz-menu-item-title">WAQ</span>
+                <span class="preview-quiz-menu-item-copy">Written answer</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </form>
+  </section>
+  <div class="preview-objective-sheet" hidden data-preview-objective-sheet>
+    <button class="preview-objective-sheet-scrim" type="button" hidden data-preview-objective-sheet-scrim aria-label="Close guardrail panel"></button>
+    <section class="preview-objective-sheet-panel" aria-labelledby="preview-objective-sheet-title" role="dialog" aria-modal="true">
+      <div class="preview-objective-sheet-head">
+        <div>
+          <p class="preview-eyebrow">Teacher guardrail</p>
+          <h3 id="preview-objective-sheet-title">Add guardrail</h3>
+        </div>
+        <button class="preview-objective-sheet-close" type="button" aria-label="Close guardrail panel" data-preview-objective-sheet-close>&#10005;</button>
+      </div>
+      <p class="preview-objective-sheet-copy">Add an objective-specific rule to steer future question generation here and in the student app.</p>
+      <p class="preview-objective-sheet-objective" data-preview-objective-sheet-objective></p>
+      <div class="preview-objective-sheet-existing" hidden data-preview-objective-sheet-existing-wrap>
+        <span class="preview-objective-sheet-existing-label">Current guardrail</span>
+        <p data-preview-objective-sheet-existing></p>
+      </div>
+      <div class="preview-objective-sheet-field">
+        <label for="preview-objective-guardrail">Guardrail</label>
+        <textarea id="preview-objective-guardrail" rows="5" maxlength="700" placeholder="E.g. Use Roman numerals in stems, worked examples, and distractors for this objective." data-preview-objective-guardrail></textarea>
+      </div>
+      <p class="preview-objective-sheet-error" hidden data-preview-objective-sheet-error></p>
+      <div class="preview-objective-sheet-actions">
+        <button class="button" type="button" data-preview-objective-sheet-save>Save guardrail</button>
+      </div>
+    </section>
+  </div>
+</section>
+{{ preview_state|json_script:"student-preview-data" }}
+{% endblock %}
+{% block extra_body %}
+  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}"></script>
+  <script src="{% static 'standalone/js/student-preview.js' %}"></script>
+{% endblock %}

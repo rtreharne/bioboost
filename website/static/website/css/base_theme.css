@@ -1,0 +1,179 @@
+:root {
+  --font-main: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --accent: #111;
+  --black: #000;
+  --white: #fff;
+  --bg: #fff;
+  --text: #111;
+  --muted-text: #5c5c5c;
+  --gray-light: #f5f5f5;
+  --gray-mid: #d7d7d7;
+  --gray-copy: #5c5c5c;
+}
+
+/* === GLOBAL RESET === */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  background: var(--white);
+  color: var(--black);
+  font-family: var(--font-main) !important;
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* === PAGE LOADER === */
+.page-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--black);
+}
+
+.page-loader .spinner {
+  width: 42px;
+  height: 42px;
+  border: 3px solid var(--black);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.page-loader .loader-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.page-loader .loader-subtitle {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Ensure all form elements and buttons inherit the same font */
+body, input, button, select, textarea {
+  font-family: var(--font-main) !important;
+}
+
+/* === LINKS === */
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 0.2s, background 0.2s;
+}
+
+a:hover {
+  color: var(--white);
+  background: var(--accent);
+  text-decoration: none;
+}
+
+/* === BUTTONS === */
+button,
+a.button {
+  font-family: var(--font-main);
+  border-radius: 999px;
+  transition: background 0.2s, color 0.2s, opacity 0.2s, transform 0.2s;
+}
+
+button:hover,
+a.button:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.button-primary {
+  background: var(--accent);
+  color: var(--white);
+  border: 1px solid var(--accent);
+  padding: 0.8rem 1.6rem;
+  font-weight: 700;
+}
+
+.button-secondary {
+  background: var(--white);
+  color: var(--black);
+  border: 1px solid var(--black);
+  padding: 0.8rem 1.6rem;
+  font-weight: 600;
+}
+
+.button-secondary:hover {
+  background: var(--accent);
+  color: var(--white);
+}
+
+/* === INPUTS & SELECTS === */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+select,
+textarea {
+  font-family: var(--font-main);
+  border: 1px solid var(--black);
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  background: var(--white);
+  color: var(--black);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 119, 204, 0.15);
+}
+
+/* === TABLES === */
+table {
+  border: 1px solid var(--gray-mid);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+th {
+  background: var(--gray-light);
+  color: var(--black);
+}
+
+tr:hover {
+  background: rgba(0, 119, 204, 0.1);
+}
+
+/* === HEADERS === */
+h1, h2, h3, h4 {
+  font-family: var(--font-main);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+h1 {
+  font-size: 1.6rem;
+}
+
+h2 {
+  font-size: 1.3rem;
+  color: var(--accent);
+}

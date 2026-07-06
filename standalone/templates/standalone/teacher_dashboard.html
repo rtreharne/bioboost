@@ -1,0 +1,174 @@
+{% extends "standalone/base.html" %}
+{% load static %}
+{% block content %}
+<section class="teacher-dashboard workspace-page">
+  <div class="workspace-hero teacher-dashboard-hero">
+    <div class="workspace-hero-copy">
+      <h1>Teacher dashboard</h1>
+      <p class="lead">Build courses, upload source notes, manage enrolment, and prepare validation sessions.</p>
+    </div>
+    <div class="teacher-dashboard-hero-side">
+      <div class="workspace-actions">
+        <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
+        {% if user.is_superuser or user.role == "internal" %}
+          <a class="button secondary" href="{% url 'standalone:teacher_invite' %}">Invite teacher</a>
+        {% endif %}
+      </div>
+      <div
+        class="practice-average-panel"
+        aria-label="Background jobs status"
+        data-background-jobs-status
+        data-background-jobs-status-url="{% url 'standalone:background_job_status' %}"
+      >
+        <p class="practice-average-label">Background jobs</p>
+        <div class="block-chip-row">
+          <span class="block-chip status-chip {{ background_job_status.class_name }}" data-background-jobs-label>{{ background_job_status.label }}</span>
+          <span class="block-chip"{% if not background_job_status.running_job_label %} hidden{% endif %} data-background-jobs-running>{{ background_job_status.running_job_label }}</span>
+          <span class="block-chip"{% if not background_job_status.queued_count %} hidden{% endif %} data-background-jobs-queued>{% if background_job_status.queued_count %}{{ background_job_status.queued_count }} queued{% endif %}</span>
+        </div>
+        <p class="course-setting-help" data-background-jobs-detail>{{ background_job_status.detail }}</p>
+        <p class="course-setting-help"{% if not background_job_status.error %} hidden{% endif %} data-background-jobs-error>{{ background_job_status.error }}</p>
+      </div>
+    </div>
+  </div>
+
+  <section class="dashboard-course-section course-section-card" aria-labelledby="courses-heading" data-block-card>
+    <div
+      class="section-head compact dashboard-section-head course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="teacher-dashboard-courses-content"
+      aria-expanded="false"
+      aria-controls="teacher-dashboard-courses-content"
+      tabindex="0"
+      role="button"
+    >
+      <div>
+        <h2 id="courses-heading">Course workspace</h2>
+      </div>
+      <div class="workspace-actions course-section-actions">
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
+    </div>
+    <div id="teacher-dashboard-courses-content" class="block-card-content course-section-content" hidden>
+      <div class="dashboard-course-grid">
+      {% for course in courses %}
+        <article class="course-card dashboard-course-card">
+          <span class="course-card-status{% if course.is_active %} is-active{% endif %}">{% if course.is_active %}Active{% else %}Inactive{% endif %}</span>
+          <div class="dashboard-course-card-topline">
+            <h3>{{ course.title }}</h3>
+            <form
+              method="post"
+              action="{% if course.question_bank_builder_enabled %}{{ course.question_bank_builder_pause_url }}{% else %}{{ course.question_bank_builder_start_url }}{% endif %}"
+              class="inline-form"
+              data-builder-toggle-form
+            >
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{% url 'standalone:teacher_dashboard' %}">
+              <button
+                class="builder-toggle"
+                type="submit"
+                role="switch"
+                aria-checked="{% if course.question_bank_builder_enabled %}true{% else %}false{% endif %}"
+                aria-label="Toggle periodic question generation for {{ course.title }}"
+                title="{% if course.question_bank_builder_enabled %}Pause periodic question generation{% else %}Run or resume periodic question generation{% endif %}"
+                data-builder-toggle-button
+              >
+                <span class="builder-toggle-track" aria-hidden="true">
+                  <span class="builder-toggle-thumb"></span>
+                </span>
+                <span class="builder-toggle-label" data-builder-toggle-label>{% if course.question_bank_builder_enabled %}Builder on{% else %}Builder off{% endif %}</span>
+              </button>
+            </form>
+          </div>
+          <p class="course-setting-help" hidden data-builder-toggle-feedback></p>
+          <p>{{ course.summary|default:"No summary yet."|truncatechars:150 }}</p>
+          <div class="course-card-meta" aria-label="Course totals">
+            <span>{{ course.block_count }} blocks</span>
+            <span>{{ course.student_count }} students</span>
+            <span>{{ course.question_count }} questions</span>
+          </div>
+          <div class="practice-average-panel" aria-label="Course metrics">
+            <p class="practice-average-label">Course metrics</p>
+            <div class="practice-average-grid">
+              <span class="practice-average-metric"><span>Mastery</span><strong>{{ course.practice_mastery_average|floatformat:1 }}%</strong></span>
+              <span class="practice-average-metric"><span>Coverage</span><strong>{{ course.practice_coverage_average|floatformat:1 }}%</strong></span>
+            </div>
+          </div>
+          <div class="workspace-actions">
+            <a class="button secondary" href="{% url 'standalone:course_detail' course.pk %}">Open course</a>
+          </div>
+        </article>
+      {% empty %}
+        <div class="empty-state">
+          <p class="eyebrow">No courses yet</p>
+          <h2>Create your first course</h2>
+          <p>Start with a title, then add content blocks and source files for generation.</p>
+          <a class="button" href="{% url 'standalone:course_create' %}">Create course</a>
+        </div>
+      {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="dashboard-course-section course-section-card" aria-labelledby="validation-sessions-heading" data-block-card>
+    <div
+      class="section-head compact dashboard-section-head course-section-head course-section-toggle"
+      data-block-toggle
+      data-block-target="teacher-dashboard-validations-content"
+      aria-expanded="false"
+      aria-controls="teacher-dashboard-validations-content"
+      tabindex="0"
+      role="button"
+    >
+      <div>
+        <h2 id="validation-sessions-heading">Validation sessions</h2>
+      </div>
+      <div class="workspace-actions course-section-actions">
+        <span class="block-card-icon" aria-hidden="true"></span>
+      </div>
+    </div>
+    <div id="teacher-dashboard-validations-content" class="block-card-content course-section-content" hidden>
+      <div class="course-import-status-list">
+      {% for event in validation_events %}
+        <article class="course-import-status-row">
+          <span>
+            <strong>{{ event.course.title }} · Validation session</strong>
+            <small>
+              Digital invigilation • {{ event.starts_at|date:"j M Y, H:i" }} to {{ event.session_end_at|date:"j M Y, H:i" }}
+              {% if event.location %} • {{ event.location }}{% endif %}
+              • {{ event.question_count }} questions • {{ event.time_limit_minutes }} mins
+              {% if event.requires_booking and event.booking_deadline %} • Booking closes {{ event.booking_deadline|date:"j M Y, H:i" }}{% endif %}
+              • {{ event.booked_count }}/{{ event.capacity }} booked
+            </small>
+          </span>
+          <span class="workspace-actions">
+            <a class="button secondary" href="{% url 'standalone:course_detail' event.course.pk %}">Open course</a>
+            <a class="button secondary" href="{% url 'standalone:validation_room_display' event.pk %}">Room display</a>
+            {% if event.feedback_release_mode == "manual" %}
+              <form method="post" action="{% url 'standalone:validation_feedback_release' event.pk %}">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Release feedback</button>
+              </form>
+            {% endif %}
+            {% if event.can_be_deleted %}
+              <form method="post" action="{% url 'standalone:validation_event_delete' event.pk %}" onsubmit="return window.confirm('Delete this validation event?');">
+                {% csrf_token %}
+                <button class="button secondary" type="submit">Delete</button>
+              </form>
+            {% else %}
+              <button class="button secondary" type="button" disabled title="Students have already submitted validation for this session.">Delete locked</button>
+            {% endif %}
+          </span>
+        </article>
+      {% empty %}
+        <p>No validation sessions yet.</p>
+      {% endfor %}
+      </div>
+    </div>
+  </section>
+</section>
+{% endblock %}
+{% block extra_body %}
+  {{ block.super }}
+  <script src="{% static 'standalone/js/teacher-dashboard.js' %}"></script>
+{% endblock %}

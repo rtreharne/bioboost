@@ -1,0 +1,76 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NINE POINT EIGHT ONE</title>
+  <link rel="stylesheet" href="{% static 'website/css/base_theme.css' %}">
+  <link rel="stylesheet" href="{% static 'website/css/landing.css' %}">
+</head>
+<body>
+  <div id="page-loader" class="page-loader">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="loader-title">Loading...</div>
+    <div class="loader-subtitle">Preparing the experience.</div>
+  </div>
+
+  <div class="landing-wrapper">
+    <div class="hero-page">
+      <div class="logo-block logo-square">
+        <div class="logo-inner">
+          <span class="logo-line">NINE</span>
+          <span class="logo-line">POINT</span>
+          <span class="logo-line">EIGHT</span>
+          <span class="logo-line">ONE</span>
+        </div>
+      </div>
+
+      <p class="tagline">Unlimited A-Level Physics Practice Questions</p>
+      <p class="hero-subcopy">
+        Invite-based courses, chat-style practice, validation sessions, demo mode, and question banks in one platform.
+      </p>
+      <div class="hero-actions">
+        <a href="{{ cta_url }}" class="button-primary" data-home-cta>{{ cta_label }}</a>
+      </div>
+      <p class="hero-meta">
+        {% if user.is_authenticated %}
+          Continue into your workspace to manage courses, practice, and validation.
+        {% else %}
+          Sign in to enter the NINE POINT EIGHT ONE workspace.
+        {% endif %}
+      </p>
+    </div>
+  </div>
+
+  <footer class="landing-footer">
+    <span>NINE POINT EIGHT ONE</span>
+    <span>&copy; {{ year }} Fizzy Newt Ltd</span>
+  </footer>
+</body>
+
+<script>
+window.addEventListener("load", () => {
+  const loader = document.getElementById("page-loader");
+  if (loader) loader.classList.add("hidden");
+});
+
+function equalizeLogo() {
+  const lines = document.querySelectorAll('.logo-square .logo-line');
+  if (!lines.length) return;
+  let maxWidth = 0;
+  lines.forEach(line => {
+    line.style.transform = 'none';
+    const w = line.getBoundingClientRect().width;
+    if (w > maxWidth) maxWidth = w;
+  });
+  lines.forEach(line => {
+    const w = line.getBoundingClientRect().width;
+    const scale = maxWidth / w;
+    line.style.transform = `scaleX(${scale})`;
+  });
+}
+window.addEventListener('load', equalizeLogo);
+window.addEventListener('resize', equalizeLogo);
+</script>
+</html>

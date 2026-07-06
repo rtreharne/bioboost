@@ -1,0 +1,128 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}NINE POINT EIGHT ONE{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'standalone/css/app.css' %}">
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="app-body{% if is_demo_mode %} app-body--demo{% endif %}{% if is_embed_mode %} app-body--embed{% endif %}{% block body_class %}{% endblock %}">
+  {% block app_header %}
+    {% if not is_embed_mode and not is_demo_mode %}
+    <header class="app-header">
+      <nav class="app-nav">
+        <a class="app-brand" href="{% if is_demo_mode %}{{ demo_home_url|default:'#' }}{% elif user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}" aria-label="NINE POINT EIGHT ONE">
+          <span class="logo-block logo-square app-brand-logo" aria-hidden="true">
+            <span class="logo-inner">
+              <span class="logo-line">NINE</span>
+              <span class="logo-line">POINT</span>
+              <span class="logo-line">EIGHT</span>
+              <span class="logo-line">ONE</span>
+            </span>
+          </span>
+        </a>
+        {% if is_demo_mode %}
+          <div class="app-nav-demo">
+            <span class="app-mode-pill">{{ demo_mode_label|default:"Demo mode" }}</span>
+          </div>
+        {% elif user.is_authenticated %}
+          <div class="app-nav-links app-nav-links--desktop">
+            {% block app_nav_links %}{% endblock %}
+            <span class="app-user-status">Logged in as: {{ user.email|default:user.username }}</span>
+            <form method="post" action="{% url 'standalone:logout' %}" class="inline-form">
+              {% csrf_token %}
+              <button type="submit" class="nav-link-button">Log out</button>
+            </form>
+          </div>
+          <details class="app-nav-menu">
+            <summary class="app-nav-menu-trigger" aria-label="Open account menu">
+              <span></span>
+              <span></span>
+              <span></span>
+            </summary>
+            <div class="app-nav-menu-panel">
+              {% block app_nav_menu_actions %}{% endblock %}
+              <p class="app-nav-menu-label">Logged in as</p>
+              <p class="app-nav-menu-value">{{ user.email|default:user.username }}</p>
+              <form method="post" action="{% url 'standalone:logout' %}" class="inline-form">
+                {% csrf_token %}
+                <button type="submit" class="button secondary app-nav-menu-action">Log out</button>
+              </form>
+            </div>
+          </details>
+        {% else %}
+          <div class="app-nav-links app-nav-links--desktop">
+            <a href="{% url 'standalone:login' %}">Sign in</a>
+          </div>
+          <details class="app-nav-menu">
+            <summary class="app-nav-menu-trigger" aria-label="Open navigation menu">
+              <span></span>
+              <span></span>
+              <span></span>
+            </summary>
+            <div class="app-nav-menu-panel">
+              <a class="button secondary app-nav-menu-action" href="{% url 'standalone:login' %}">Sign in</a>
+            </div>
+          </details>
+        {% endif %}
+      </nav>
+    </header>
+    {% endif %}
+  {% endblock %}
+  <main class="app-shell{% block app_shell_class %}{% endblock %}">
+    {% if messages %}
+      <div class="message-stack">
+        {% for message in messages %}
+          <div class="flash">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% block app_footer %}
+    <footer class="app-footer" data-app-footer>
+      <div class="app-footer-inner">
+        <span class="app-footer-brand">NINE POINT EIGHT ONE</span>
+        <span class="app-footer-copy">Invite-based practice, validation, and question authoring.</span>
+      </div>
+    </footer>
+  {% endblock %}
+  <script>
+  (function () {
+    function equalizeSquareLogos() {
+      document.querySelectorAll('.logo-square').forEach(function (logo) {
+        var lines = logo.querySelectorAll('.logo-line');
+        var maxWidth = 0;
+        if (!lines.length) {
+          return;
+        }
+        lines.forEach(function (line) {
+          line.style.transform = 'none';
+          maxWidth = Math.max(maxWidth, line.getBoundingClientRect().width);
+        });
+        if (!maxWidth) {
+          return;
+        }
+        lines.forEach(function (line) {
+          var width = line.getBoundingClientRect().width;
+          if (!width) {
+            return;
+          }
+          line.style.transform = 'scaleX(' + (maxWidth / width) + ')';
+        });
+      });
+    }
+
+    if (document.readyState === 'complete') {
+      equalizeSquareLogos();
+    } else {
+      window.addEventListener('load', equalizeSquareLogos);
+    }
+    window.addEventListener('resize', equalizeSquareLogos);
+  }());
+  </script>
+  {% block extra_body %}{% endblock %}
+</body>
+</html>

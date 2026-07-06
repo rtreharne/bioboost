@@ -1,0 +1,199 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_list(name: str, default: str = "") -> list[str]:
+    value = os.getenv(name, default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def env_str(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    return int(value)
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    return float(value)
+
+
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "replace-me")
+DEBUG = env_bool("DJANGO_DEBUG", True)
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost")
+
+render_external_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+if render_external_hostname and render_external_hostname not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(render_external_hostname)
+
+CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+render_external_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+if render_external_url and render_external_url not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(render_external_url)
+
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "standalone",
+    "website",
+]
+
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+ROOT_URLCONF = "config.urls"
+
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = "config.wsgi.application"
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": env_str("SQLITE_PATH", str(BASE_DIR / "standalone.sqlite3")),
+        "OPTIONS": {
+            "timeout": max(1.0, env_float("SQLITE_TIMEOUT_SECONDS", 20.0)),
+        },
+    }
+}
+
+SQLITE_TIMEOUT_SECONDS = max(1.0, env_float("SQLITE_TIMEOUT_SECONDS", 20.0))
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+LANGUAGE_CODE = "en-gb"
+TIME_ZONE = "Europe/London"
+USE_I18N = True
+USE_TZ = True
+
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": (
+            "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if not DEBUG
+            else "django.contrib.staticfiles.storage.StaticFilesStorage"
+        )
+    },
+}
+
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+AUTH_USER_MODEL = "standalone.User"
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = env_str("MEDIA_ROOT", str(BASE_DIR / "media"))
+FILE_UPLOAD_TEMP_DIR = env_str("FILE_UPLOAD_TEMP_DIR", "")
+if FILE_UPLOAD_TEMP_DIR and not Path(FILE_UPLOAD_TEMP_DIR).exists():
+    FILE_UPLOAD_TEMP_DIR = ""
+FILE_UPLOAD_MAX_MEMORY_SIZE = env_int("FILE_UPLOAD_MAX_MEMORY_SIZE", 262144)
+PDF_IMPORT_MAX_FILE_SIZE_BYTES = env_int("PDF_IMPORT_MAX_FILE_SIZE_BYTES", 200 * 1024 * 1024)
+
+LOGIN_URL = "standalone:login"
+LOGIN_REDIRECT_URL = "standalone:dashboard"
+LOGOUT_REDIRECT_URL = "standalone:login"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_NUMERIC_MODEL = env_str("OPENAI_NUMERIC_MODEL", OPENAI_MODEL)
+OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL = env_str("OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL", "gpt-5.5")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+OPENAI_BLOCK_AVATAR_MODEL = env_str("OPENAI_BLOCK_AVATAR_MODEL", "gpt-image-1.5")
+CELERY_BROKER_URL = env_str("CELERY_BROKER_URL", "")
+CELERY_RESULT_BACKEND = env_str("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "replace-me@example.com")
+CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT", "8"))
+CHAT_RATE_WINDOW = int(os.getenv("CHAT_RATE_WINDOW", "60"))
+CHAT_MAX_QUESTION_LENGTH = int(os.getenv("CHAT_MAX_QUESTION_LENGTH", "500"))
+CHAT_MAX_HISTORY_ITEMS = int(os.getenv("CHAT_MAX_HISTORY_ITEMS", "6"))
+CHAT_MAX_HISTORY_MESSAGE_LENGTH = int(os.getenv("CHAT_MAX_HISTORY_MESSAGE_LENGTH", "300"))
+
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@ninepointeightone.local")
+
+STANDALONE_ENABLE_MAGIC_LINKS = env_bool("STANDALONE_ENABLE_MAGIC_LINKS", True)
+STANDALONE_ENABLE_SELF_ENROL = env_bool("STANDALONE_ENABLE_SELF_ENROL", True)
+STANDALONE_INVITE_EXPIRY_HOURS = int(os.getenv("STANDALONE_INVITE_EXPIRY_HOURS", "72"))
+STANDALONE_MAGIC_LINK_EXPIRY_HOURS = int(os.getenv("STANDALONE_MAGIC_LINK_EXPIRY_HOURS", "72"))
+QUESTION_BANK_BUILDER_LOOP_ENABLED = env_bool("QUESTION_BANK_BUILDER_LOOP_ENABLED", False)
+QUESTION_BANK_BUILDER_POLL_SECONDS = env_int("QUESTION_BANK_BUILDER_POLL_SECONDS", 60)
+QUESTION_BANK_BUILDER_LEASE_SECONDS = env_int("QUESTION_BANK_BUILDER_LEASE_SECONDS", 300)
+PRACTICE_VALIDATION_READY_THRESHOLD = env_int("PRACTICE_VALIDATION_READY_THRESHOLD", 1000)
+VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT = env_int("VALIDATION_PRACTICE_DEFAULT_QUESTION_COUNT", 10)
+PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT = env_int("PREVIEW_VALIDATION_DEFAULT_QUESTION_COUNT", 10)
+LOCAL_BACKGROUND_JOB_PAUSE_SECONDS = env_float("LOCAL_BACKGROUND_JOB_PAUSE_SECONDS", 1.0)
+LOCAL_BACKGROUND_JOB_STRATEGY = env_str("LOCAL_BACKGROUND_JOB_STRATEGY", "thread")
+COURSE_IMPORT_MAX_SELECTED_CHAPTERS = env_int("COURSE_IMPORT_MAX_SELECTED_CHAPTERS", 5)
+COURSE_IMPORT_MAX_RETRIES = env_int("COURSE_IMPORT_MAX_RETRIES", 2)
+COURSE_IMPORT_STEP_TIMEOUT_SECONDS = env_int("COURSE_IMPORT_STEP_TIMEOUT_SECONDS", 900)
+COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP = env_bool("COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP", False)
+COURSE_IMPORT_SCAN_WINDOW_PAGES = env_int("COURSE_IMPORT_SCAN_WINDOW_PAGES", 10)
+COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES = env_int("COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES", 12)

@@ -1,0 +1,71 @@
+services:
+  - type: web
+    name: nine-point-eight-one
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    disk:
+      name: sqlite-data
+      mountPath: /app/data
+      sizeGB: 1
+    domains:
+      - ninepointeightone.example.com
+    healthCheckPath: /
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com,.ninepointeightone.example.com"
+      - key: DJANGO_CSRF_TRUSTED_ORIGINS
+        value: "https://*.onrender.com,https://ninepointeightone.example.com,https://www.ninepointeightone.example.com"
+      - key: SQLITE_PATH
+        value: /app/data/db.sqlite3
+      - key: MEDIA_ROOT
+        value: /app/data/media
+      - key: FILE_UPLOAD_TEMP_DIR
+        value: /app/data/tmp/uploads
+      - key: FILE_UPLOAD_MAX_MEMORY_SIZE
+        value: "262144"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: GUNICORN_TIMEOUT
+        value: "300"
+      - key: LOCAL_BACKGROUND_JOB_STRATEGY
+        value: subprocess
+      - key: COURSE_IMPORT_MAX_SELECTED_CHAPTERS
+        value: "5"
+      - key: COURSE_IMPORT_MAX_RETRIES
+        value: "2"
+      - key: COURSE_IMPORT_STEP_TIMEOUT_SECONDS
+        value: "900"
+      - key: COURSE_IMPORT_ANALYSIS_OPENAI_CLEANUP
+        value: "false"
+      - key: COURSE_IMPORT_SCAN_WINDOW_PAGES
+        value: "10"
+      - key: COURSE_IMPORT_SYNTHETIC_SECTION_MAX_PAGES
+        value: "12"
+      - key: QUESTION_BANK_BUILDER_LOOP_ENABLED
+        value: "true"
+      - key: DJANGO_ADMIN_USERNAME
+        sync: false
+      - key: DJANGO_ADMIN_PASSWORD
+        sync: false
+      - key: CONTACT_EMAIL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_NUMERIC_MODEL
+        value: gpt-4.1
+      - key: OPENAI_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: EMAIL_BACKEND
+        value: django.core.mail.backends.console.EmailBackend
+      - key: DEFAULT_FROM_EMAIL
+        value: no-reply@ninepointeightone.local
+      - key: PDF_IMPORT_MAX_FILE_SIZE_BYTES
+        value: "52428800"
