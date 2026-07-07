@@ -1022,6 +1022,41 @@ class StandaloneFlowTests(TestCase):
         self.assertNotIn(r"\[In simple harmonic motion", wrapped_feedback["worked_solution_text"])
         self.assertNotIn(r"\[- Angular frequency", wrapped_feedback["worked_solution_text"])
 
+    @override_settings(OPENAI_API_KEY="")
+    def test_coerce_stored_numeric_feedback_wraps_absolute_value_math_lines(self):
+        wrapped_feedback = _coerce_stored_numeric_feedback_payload(
+            {
+                **self.sample_numeric_feedback_payload(),
+                "key_idea": "The emitted photon energy comes from the difference between the two energy levels.",
+                "formula": r"E = \left|E_i - E_f\right| \times e",
+                "substitution": r"E = \left|-4.0 - (-6.2)\right| \times 1.602 \times 10^{-19}",
+                "final_answer": r"E \approx 3.5 \times 10^{-19}\,\mathrm{J}",
+                "worked_solution": (
+                    "The energy of the emitted photon is the absolute difference between the initial and final energy levels.\n\n"
+                    r"E = \left|E_i - E_f\right| \times e"
+                    "\n\n"
+                    r"E = |-4.0 - (-6.2)| \times 1.602 \times 10^{-19} = |2.2| \times 1.602 \times 10^{-19} = 3.5244 \times 10^{-19}"
+                    "\n\n"
+                    r"E \approx 3.5 \times 10^{-19}\,\mathrm{J}"
+                ),
+                "options": [
+                    {"answer_text": "3.5 × 10^-19 J", "is_correct": True, "note": "This matches the converted energy difference."},
+                    {"answer_text": "2.8 × 10^-19 J", "is_correct": False, "note": "This is too small for the stated energy gap."},
+                    {"answer_text": "4.1 × 10^-19 J", "is_correct": False, "note": "This is too large for the stated energy gap."},
+                    {"answer_text": "5.6 × 10^-19 J", "is_correct": False, "note": "This uses the wrong energy change."},
+                ],
+            },
+            correct_answer_text="3.5 × 10^-19 J",
+            distractors=["2.8 × 10^-19 J", "4.1 × 10^-19 J", "5.6 × 10^-19 J"],
+        )
+
+        self.assertIn(r"\[E = \left|E_i - E_f\right| \times e\]", wrapped_feedback["worked_solution_text"])
+        self.assertIn(
+            r"\[E = |-4.0 - (-6.2)| \times 1.602 \times 10^{-19} = |2.2| \times 1.602 \times 10^{-19} = 3.5244 \times 10^{-19}\]",
+            wrapped_feedback["worked_solution_text"],
+        )
+        self.assertIn(r"\[E \approx 3.5 \times 10^{-19}\,\mathrm{J}\]", wrapped_feedback["worked_solution_text"])
+
     @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-5.5")
     def test_regenerate_stored_numeric_feedback_uses_gpt_5_5(self):
         validated_feedback = _coerce_stored_numeric_feedback_payload(
@@ -7688,6 +7723,104 @@ print(result)""",
         second_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == second_block.pk)
         self.assertEqual(second_block_metrics["overall"], 0.0)
 
+    def test_student_preview_course_stats_include_timeline_and_question_type_breakdown(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        first_block, _, first_objective, first_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
+        second_block, _, second_objective, second_chunk = self.create_preview_content_block(course, title="Week 2", order=2)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First preview question?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="First explanation.",
+            question_hash="course-stats-preview-1",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=second_block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="How would you explain the second objective?",
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            correct_answer="The second objective is explained accurately.",
+            written_answer_keywords=["second objective", "explained accurately"],
+            explanation="Second explanation.",
+            question_hash="course-stats-preview-2",
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, first_block.pk, "quiz"]))
+        first_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, first_block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question.pk, "answer": "B"}),
+            content_type="application/json",
+        )
+        self.assertEqual(first_answer_response.status_code, 200)
+
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, second_block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+            content_type="application/json",
+        )
+        second_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, second_block.pk, "answer"]),
+            data=json.dumps(
+                {
+                    "question_id": second_question.pk,
+                    "answer_text": "The second objective is explained accurately and clearly.",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(second_answer_response.status_code, 200)
+
+        session = self.client.session
+        preview_session = session[PREVIEW_SESSION_KEY][str(course.pk)]
+        answered_at_by_question = {
+            first_question.pk: (timezone.now() - timedelta(days=1)).isoformat(),
+            second_question.pk: timezone.now().isoformat(),
+        }
+        for event in preview_session["completed_events"]:
+            question_id = int(event.get("question_id") or 0)
+            if question_id in answered_at_by_question:
+                event["answered_at"] = answered_at_by_question[question_id]
+        session[PREVIEW_SESSION_KEY][str(course.pk)] = preview_session
+        session.save()
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        stats = response.context["preview_state"]["course"]["stats"]
+        self.assertEqual(stats["summary"]["mastery"], 50.0)
+        self.assertEqual(stats["summary"]["coverage"], 50.0)
+        self.assertEqual(stats["summary"]["completed_count"], 2)
+        self.assertEqual(stats["summary"]["correct_count"], 1)
+        self.assertEqual(stats["summary"]["incorrect_count"], 1)
+        self.assertEqual(stats["summary"]["covered_objective_count"], 1)
+        self.assertEqual(stats["summary"]["total_objective_count"], 2)
+        self.assertEqual(len(stats["timeline"]), 2)
+        self.assertEqual(stats["timeline"][0]["mastery"], 0.0)
+        self.assertEqual(stats["timeline"][0]["coverage"], 0.0)
+        self.assertEqual(stats["timeline"][0]["completed_count"], 1)
+        self.assertEqual(stats["timeline"][1]["mastery"], 50.0)
+        self.assertEqual(stats["timeline"][1]["coverage"], 50.0)
+        self.assertEqual(stats["timeline"][1]["completed_count"], 2)
+        breakdown = {item["question_type"]: item for item in stats["question_type_mastery"]}
+        self.assertEqual(breakdown[QuestionBankItem.QuestionType.MCQ]["mastery"], 0.0)
+        self.assertEqual(breakdown[QuestionBankItem.QuestionType.MCQ]["incorrect_count"], 1)
+        self.assertEqual(breakdown[QuestionBankItem.QuestionType.WAQ]["mastery"], 100.0)
+        self.assertEqual(breakdown[QuestionBankItem.QuestionType.WAQ]["correct_count"], 1)
+
     def test_student_preview_keeps_engagement_visible_when_block_release_date_is_set(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
@@ -9939,6 +10072,82 @@ print(result)""",
         )
         self.assertEqual(len(assistant_messages[-1]["further_study_questions"]), 3)
         self.assertTrue(all(question.endswith("?") for question in assistant_messages[-1]["further_study_questions"]))
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_student_preview_chat_normalizes_worked_solution_formatting(self):
+        course = self.create_course()
+        block, _, _, _ = self.create_preview_content_block(course, title="Electricity")
+        self.client.force_login(self.teacher)
+
+        class DummyResponse:
+            output_text = (
+                "To find the output voltage across the 1200 Ω resistor in a potential divider:\n\n"
+                "1. Step 1: Add the resistors to find the total resistance:\n"
+                "R_total = 3300Ω + 1200Ω = 4500Ω\n"
+                "2. Step 2: Use the supply voltage (24 V) to find the current through the circuit:\n"
+                r"I = \frac{V_{\text{supply}}}{R_{\text{total}}} = \frac{24 \text{ V}}{4500 \Omega} = 0.00533 \text{ A}" "\n"
+                "3. Step 3: Calculate the voltage across the 1200 Ω resistor using Ohm's Law V = IR:\n"
+                r"V_{\text{output}} = I \times 1200 \Omega = 0.00533 \times 1200 = 6.4 \text{ V}" "\n\n"
+                "Answer: The output voltage across the 1200 Ω resistor is 6.4 V.\n\n"
+                "So, the process is:\n"
+                "• Find total resistance,\n"
+                "• Calculate current,\n"
+                "• Use current to find voltage across the resistor you want."
+            )
+
+        with patch("standalone.services.preview.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "chat"]),
+                data='{"question": "How do I work out the output voltage in this potential divider?"}',
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        assistant_messages = [message for message in block_payload["transcript"] if message["role"] == "assistant" and message["kind"] == "text"]
+        answer = assistant_messages[-1]["text"]
+        self.assertIn("1. **Step 1:** Add the resistors to find the total resistance:", answer)
+        self.assertIn(r"\[R_total = 3300Ω + 1200Ω = 4500Ω\]", answer)
+        self.assertIn(r"\[I = \frac{V_{\text{supply}}}{R_{\text{total}}} = \frac{24 \text{ V}}{4500 \Omega} = 0.00533 \text{ A}\]", answer)
+        self.assertIn(r"\[V_{\text{output}} = I \times 1200 \Omega = 0.00533 \times 1200 = 6.4 \text{ V}\]", answer)
+        self.assertIn("**Answer:** The output voltage across the 1200 Ω resistor is 6.4 V.", answer)
+        self.assertIn("- Find total resistance,", answer)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_student_preview_chat_wraps_absolute_value_math_lines(self):
+        course = self.create_course()
+        block, _, _, _ = self.create_preview_content_block(course, title="Atomic structure")
+        self.client.force_login(self.teacher)
+
+        class DummyResponse:
+            output_text = (
+                "The emitted photon energy is the absolute difference between the two energy levels.\n\n"
+                r"E = \left|E_i - E_f\right| \times e"
+                "\n"
+                r"E = |-4.0 - (-6.2)| \times 1.602 \times 10^{-19} = |2.2| \times 1.602 \times 10^{-19} = 3.5244 \times 10^{-19}"
+                "\n"
+                r"E \approx 3.5 \times 10^{-19}\,\mathrm{J}"
+            )
+
+        with patch("standalone.services.preview.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "chat"]),
+                data='{"question": "How do I find the emitted photon energy?"}',
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        assistant_messages = [message for message in block_payload["transcript"] if message["role"] == "assistant" and message["kind"] == "text"]
+        answer = assistant_messages[-1]["text"]
+        self.assertIn(r"\[E = \left|E_i - E_f\right| \times e\]", answer)
+        self.assertIn(
+            r"\[E = |-4.0 - (-6.2)| \times 1.602 \times 10^{-19} = |2.2| \times 1.602 \times 10^{-19} = 3.5244 \times 10^{-19}\]",
+            answer,
+        )
+        self.assertIn(r"\[E \approx 3.5 \times 10^{-19}\,\mathrm{J}\]", answer)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_student_preview_chat_prompt_includes_matched_guidance(self):

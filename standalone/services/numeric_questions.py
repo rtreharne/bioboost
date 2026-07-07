@@ -2174,7 +2174,9 @@ def _build_numeric_feedback_context(
     worked_solution_text = ""
     if detailed_explanation:
         worked_solution_text = _decode_literal_unicode_escapes(str(detailed_explanation)).replace("\r\n", "\n").replace("\r", "\n").strip()
+        worked_solution_text = _normalize_numeric_display_math_blocks(worked_solution_text)
         worked_solution_text = re.sub(r"\n{3,}", "\n\n", worked_solution_text).strip()
+        worked_solution_text = _normalize_numeric_worked_solution_layout(worked_solution_text)
     if not worked_solution_text:
         worked_solution_text = _compose_numeric_worked_solution_text(
             prose_blocks=[definitions_text or key_idea],
@@ -2316,7 +2318,7 @@ def _looks_like_standalone_numeric_math_line(line: str) -> bool:
     has_equation_signal = any(token in text for token in ("=", r"\approx", r"\times", r"\frac", r"\sqrt", "/", "×", "÷"))
     if not has_equation_signal and not has_tex_signal:
         return False
-    compact_equation = re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω\\{}_^=+\-−×÷*/().,\s]+", text)
+    compact_equation = re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω\\{}\[\]_^=+\-−×÷*/().,|\s]+", text)
     if compact_equation is None:
         return False
     natural_words = re.findall(r"[A-Za-z]{3,}", re.sub(r"\\[A-Za-z]+", " ", text))

@@ -67,6 +67,12 @@ PREVIEW_QUESTION_TYPE_PRIORITY = {
     QuestionBankItem.QuestionType.WAQ: 2,
     QuestionBankItem.QuestionType.MCQ: 3,
 }
+PREVIEW_STATS_QUESTION_TYPE_ORDER = {
+    QuestionBankItem.QuestionType.MCQ: 0,
+    QuestionBankItem.QuestionType.NUM: 1,
+    QuestionBankItem.QuestionType.MAQ: 2,
+    QuestionBankItem.QuestionType.WAQ: 3,
+}
 
 
 def _empty_course_state() -> dict:
@@ -1864,6 +1870,128 @@ def _is_inappropriate_chat_message(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in targeted_harassment)
 
 
+def _decode_chat_unicode_escapes(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        codepoint = match.group(1) or match.group(2)
+        try:
+            return chr(int(codepoint, 16))
+        except (TypeError, ValueError):
+            return match.group(0)
+
+    return re.sub(r"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})", replace, str(text or ""))
+
+
+def _chat_math_body_looks_like_prose(body: str) -> bool:
+    source = str(body or "").strip()
+    if not source:
+        return False
+    lowered = source.lower()
+    if lowered.startswith(("-", "*")) or re.match(r"^(?:let |here,|so |therefore|using |substituting|rounding|given:)", lowered):
+        return True
+    prose_check = re.sub(r"\\\([\s\S]*?\\\)", " ", source)
+    prose_check = re.sub(r"\\text\{[^}]*\}", " ", prose_check)
+    prose_check = re.sub(r"\\mathrm\{[^}]*\}", " ", prose_check)
+    prose_check = re.sub(r"\s+", " ", prose_check).strip()
+    words = re.findall(r"[A-Za-z]{2,}", prose_check)
+    return len(words) >= 5 or (len(words) >= 3 and bool(re.search(r"[.,:]", prose_check)))
+
+
+def _normalize_chat_display_math_blocks(text: str) -> str:
+    normalized = str(text or "")
+    for _ in range(6):
+        next_text = re.sub(
+            r"\\\[\s*(\\\[[\s\S]*?\\\])\s*\\\]",
+            lambda match: match.group(1).strip(),
+            normalized,
+            flags=re.S,
+        )
+        next_text = re.sub(
+            r"\\\[\s*([\s\S]*?)\s*\\\]",
+            lambda match: (
+                match.group(1).strip()
+                if _chat_math_body_looks_like_prose(match.group(1))
+                else rf"\[{match.group(1).strip()}\]"
+            ),
+            next_text,
+            flags=re.S,
+        )
+        if next_text == normalized:
+            break
+        normalized = next_text
+    return normalized
+
+
+def _looks_like_standalone_chat_math_line(line: str) -> bool:
+    text = _decode_chat_unicode_escapes(str(line or "")).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("-", "*")) or text.endswith(":"):
+        return False
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        return False
+    if re.match(r"^(?:answer|step\s+\d+)\b", lowered):
+        return False
+    has_tex_signal = bool(re.search(r"\\(?:frac|times|approx|sqrt|mathrm|text|pi|theta|omega|lambda|mu|rho|sigma|phi|Delta|delta|cdot|sin|cos|tan|ln|log|exp)\b", text))
+    has_equation_signal = any(token in text for token in ("=", r"\approx", r"\times", r"\frac", r"\sqrt", "/", "×", "÷"))
+    if not has_equation_signal and not has_tex_signal:
+        return False
+    compact_equation = re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω\\{}\[\]_^=+\-−×÷*/().,|\s]+", text)
+    if compact_equation is None:
+        return False
+    natural_words = re.findall(r"[A-Za-z]{3,}", re.sub(r"\\[A-Za-z]+", " ", text))
+    return len(natural_words) <= 6
+
+
+def _normalize_chat_step_spacing(line: str) -> str:
+    text = str(line or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^[•●◦]\s*", "- ", text)
+    text = re.sub(r"^(\d+\.)\s*(?:\*\*)?(Step\s+\d+:)(?:\*\*)?", r"\1 **\2**", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(\d+\.)\s*\*\*(Step\s+\d+:)\*\*(?!\s)", r"\1 **\2** ", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(\d+\.)\s*(?:\*\*)?(Answer:)(?:\*\*)?(?!\s)", r"\1 **\2** ", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(\d+\.)\s*(?:\*\*)?(Answer:)(?:\*\*)?", r"\1 **\2**", text, flags=re.IGNORECASE)
+    if re.match(r"^(?:Answer:|Step\s+\d+:)(?:\s|$)", text, flags=re.IGNORECASE) and not text.startswith("**"):
+        text = re.sub(r"^(Answer:|Step\s+\d+:)", r"**\1**", text, flags=re.IGNORECASE)
+    return text
+
+
+def _normalize_chat_answer_text(text: str) -> str:
+    normalized = _decode_chat_unicode_escapes(str(text or ""))
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    normalized = _normalize_chat_display_math_blocks(normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+    blocks: list[str] = []
+    prose_lines: list[str] = []
+
+    def flush_prose_lines() -> None:
+        if not prose_lines:
+            return
+        paragraph = "\n".join(_normalize_chat_step_spacing(line) for line in prose_lines if line.strip()).strip()
+        if paragraph:
+            blocks.append(paragraph)
+        prose_lines.clear()
+
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_prose_lines()
+            continue
+        if _looks_like_standalone_chat_math_line(line):
+            flush_prose_lines()
+            blocks.append(rf"\[{line}\]")
+            continue
+        prose_lines.append(line)
+
+    flush_prose_lines()
+    return "\n\n".join(blocks).strip()
+
+
 def _block_source_documents(course: Course):
     documents = []
     for block in course.blocks.prefetch_related("learning_objectives", "assets", "content_chunks").all():
@@ -1967,6 +2095,9 @@ Rules:
 - keep the answer concise and useful for a student
 - use clean markdown when it helps readability, especially simple bullet lists or numbered steps
 - when naming key ideas in a list, prefer markdown like **Idea:** short explanation
+- if you show a worked method, use a short intro line, then numbered steps, then a brief final answer line
+- put standalone equations on their own line and write display maths as \\[ ... \\]
+- keep each numbered step as prose first, then the equation on the next line when that is clearer
 - wrap short code snippets, commands, literals, filenames, or syntax examples in single backticks
 - use fenced code blocks for multi-line code examples
 
@@ -1992,7 +2123,7 @@ Student question:
             {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         ],
     )
-    answer = (getattr(response, "output_text", "") or "").strip()
+    answer = _normalize_chat_answer_text((getattr(response, "output_text", "") or "").strip())
     if not answer:
         return _fallback_chat_reply(course, block, question)
 
@@ -2078,6 +2209,7 @@ def send_preview_chat_message(request, course: Course, block: CourseBlock, quest
             answer, source_blocks = _openai_chat_reply(course_state, course, block, question)
         except Exception:
             answer, source_blocks = _fallback_chat_reply(course, block, question)
+    answer = _normalize_chat_answer_text(answer)
     _append_message(
         course_state,
         block,
@@ -2209,6 +2341,101 @@ def _course_metrics(course: Course, serialized_blocks: list[dict], block_metric_
     }
 
 
+def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metrics: dict) -> dict:
+    total_objective_count = sum(block.get("learning_objective_count", 0) for block in serialized_blocks)
+    summary = {
+        "mastery": float(course_metrics.get("mastery") or 0.0),
+        "coverage": float(course_metrics.get("coverage") or 0.0),
+        "completed_count": int(course_metrics.get("completed_count") or 0),
+        "correct_count": int(course_metrics.get("correct_count") or 0),
+        "incorrect_count": int(course_metrics.get("incorrect_count") or 0),
+        "covered_objective_count": int(course_metrics.get("covered_objective_count") or 0),
+        "total_objective_count": int(course_metrics.get("total_objective_count") or total_objective_count),
+    }
+
+    dated_events: list[tuple[datetime, int, dict]] = []
+    for index, event in enumerate(course_state.get("completed_events", [])):
+        answered_at = parse_datetime(str(event.get("answered_at") or ""))
+        if answered_at is None:
+            continue
+        dated_events.append((answered_at, index, event))
+    dated_events.sort(key=lambda item: (item[0], item[1]))
+
+    timeline: list[dict] = []
+    cumulative_completed = 0
+    cumulative_correct = 0
+    covered_objective_ids: set[int] = set()
+    current_day: date | None = None
+
+    def append_timeline_day(day_value: date) -> None:
+        mastery = round((cumulative_correct * 100 / cumulative_completed), 2) if cumulative_completed else 0.0
+        coverage = round((len(covered_objective_ids) * 100 / total_objective_count), 2) if total_objective_count else 0.0
+        timeline.append(
+            {
+                "date": day_value.isoformat(),
+                "mastery": mastery,
+                "coverage": coverage,
+                "completed_count": cumulative_completed,
+                "correct_count": cumulative_correct,
+            }
+        )
+
+    for answered_at, _index, event in dated_events:
+        answered_day = answered_at.date()
+        if current_day is None:
+            current_day = answered_day
+        elif answered_day != current_day:
+            append_timeline_day(current_day)
+            current_day = answered_day
+
+        cumulative_completed += 1
+        if event.get("correct"):
+            cumulative_correct += 1
+            objective_id = event.get("learning_objective_id")
+            if objective_id is not None:
+                covered_objective_ids.add(int(objective_id))
+
+    if current_day is not None:
+        append_timeline_day(current_day)
+
+    question_type_totals: dict[str, dict[str, int]] = defaultdict(lambda: {"completed_count": 0, "correct_count": 0})
+    for _answered_at, _index, event in dated_events:
+        question_type = str(event.get("question_type") or "").strip()
+        if not question_type:
+            continue
+        question_type_totals[question_type]["completed_count"] += 1
+        if event.get("correct"):
+            question_type_totals[question_type]["correct_count"] += 1
+
+    question_type_mastery = [
+        {
+            "question_type": question_type,
+            "label": QuestionBankItem.display_label_for_question_type(question_type),
+            "mastery": round(
+                (totals["correct_count"] * 100 / totals["completed_count"]),
+                2,
+            ) if totals["completed_count"] else 0.0,
+            "completed_count": totals["completed_count"],
+            "correct_count": totals["correct_count"],
+            "incorrect_count": max(0, totals["completed_count"] - totals["correct_count"]),
+        }
+        for question_type, totals in question_type_totals.items()
+    ]
+    question_type_mastery.sort(
+        key=lambda item: (
+            PREVIEW_STATS_QUESTION_TYPE_ORDER.get(item["question_type"], 99),
+            item["label"],
+        )
+    )
+
+    return {
+        "summary": summary,
+        "timeline": timeline,
+        "question_type_mastery": question_type_mastery,
+        "latest_answered_at": dated_events[-1][0].isoformat() if dated_events else "",
+    }
+
+
 def _covered_objective_ids(course_state: dict, block: CourseBlock) -> set[int]:
     return {
         int(event["learning_objective_id"])
@@ -2313,13 +2540,15 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
             }
         )
         course_metric_pairs.append({"block": block, "metrics": block_metrics})
+    course_metrics = _course_metrics(course, serialized_blocks, course_metric_pairs)
     request.session.modified = True
     return {
         "course": {
             "id": course.pk,
             "title": course.title,
             "summary": course.summary,
-            "metrics": _course_metrics(course, serialized_blocks, course_metric_pairs),
+            "metrics": course_metrics,
+            "stats": _course_stats(course_state, serialized_blocks, course_metrics),
         },
         "active_block_id": active_block_id,
         "blocks": serialized_blocks,

@@ -1022,6 +1022,67 @@ if (validationRoot && validationDataNode) {
     ) || null;
   }
 
+  function updateMathOverflowState() {
+    if (!transcriptNode) {
+      return;
+    }
+    const transcriptStyles = window.getComputedStyle(transcriptNode);
+    const transcriptAvailableWidth = transcriptNode.clientWidth
+      - Number.parseFloat(transcriptStyles.paddingLeft || "0")
+      - Number.parseFloat(transcriptStyles.paddingRight || "0");
+
+    function clearMathOverflowStyles(message) {
+      message.classList.remove("preview-message--math-overflow");
+      [
+        "width",
+        "max-width",
+        "min-width",
+        "display",
+        "justify-self",
+        "overflow-x",
+        "overflow-y",
+        "overscroll-behavior-x",
+      ].forEach((property) => {
+        message.style.removeProperty(property);
+      });
+      message.style.webkitOverflowScrolling = "";
+    }
+
+    function applyMathOverflowStyles(message) {
+      message.classList.add("preview-message--math-overflow");
+      message.style.setProperty("width", "100%", "important");
+      message.style.setProperty("max-width", "100%", "important");
+      message.style.setProperty("min-width", "0", "important");
+      message.style.setProperty("display", "block", "important");
+      message.style.setProperty("justify-self", "stretch", "important");
+      message.style.setProperty("overflow-x", "auto", "important");
+      message.style.setProperty("overflow-y", "hidden", "important");
+      message.style.setProperty("overscroll-behavior-x", "contain", "important");
+      message.style.webkitOverflowScrolling = "touch";
+    }
+
+    transcriptNode.querySelectorAll(".preview-message").forEach((message) => {
+      if (!(message instanceof HTMLElement)) {
+        return;
+      }
+      const mathNodes = Array.from(message.querySelectorAll(".katex-display, .katex")).filter(
+        (node) => node instanceof HTMLElement,
+      );
+      clearMathOverflowStyles(message);
+      if (!mathNodes.length || !mobileChatMedia.matches || transcriptAvailableWidth <= 0) {
+        return;
+      }
+      const messageWidth = message.getBoundingClientRect().width;
+      const hasOverflow = mathNodes.some((node) => {
+        const element = node;
+        return element.scrollWidth - transcriptAvailableWidth > 2 || element.getBoundingClientRect().width - transcriptAvailableWidth > 2;
+      });
+      if (messageWidth - transcriptAvailableWidth > 2 || hasOverflow) {
+        applyMathOverflowStyles(message);
+      }
+    });
+  }
+
   function updateQuestionOverflowState(activeQuestion) {
     if (!transcriptNode || !activeQuestion || !activeQuestion.isConnected) {
       return;
@@ -1554,12 +1615,6 @@ if (validationRoot && validationDataNode) {
         helper.textContent = "Type your answer in the fixed box below.";
         article.appendChild(helper);
       } else if (Array.isArray(message.options) && message.options.length && !message.answered) {
-        const overflowHint = document.createElement("div");
-        overflowHint.className = "preview-question-overflow-hint";
-        overflowHint.hidden = true;
-        overflowHint.textContent = "Scroll to see all answers.";
-        article.appendChild(overflowHint);
-
         const optionsWrapper = document.createElement("div");
         optionsWrapper.className = "preview-message-options";
         const selectedAnswers = normalizeAnswers(message.selected_answers);
@@ -1908,6 +1963,7 @@ if (validationRoot && validationDataNode) {
     mergedTranscript().forEach((message) => {
       transcriptNode.appendChild(renderMessage(message));
     });
+    updateMathOverflowState();
     if (preserveScroll) {
       transcriptNode.scrollTop = previousScrollTop;
     }
@@ -2279,6 +2335,7 @@ if (validationRoot && validationDataNode) {
     } else {
       applySidebarState();
     }
+    updateMathOverflowState();
     syncQuestionViewport();
     updateComposerClearance();
   });

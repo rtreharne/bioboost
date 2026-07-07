@@ -1,7 +1,6 @@
 (function () {
   const literalUnicodeEscapePattern = /\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})/g;
   const mathDelimitedPattern = /(?:\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
-  const displayMathDelimitedPattern = /\\\[[\s\S]*?\\\]/g;
   const inlineEquationPatternSource = String.raw`\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)?(?:\s+[A-Za-z][A-Za-z0-9]*){0,5}\s*=\s*.+?(?=(?:[.?!;:](?:\s|$))|$)`;
   const greekTexMap = {
     α: "\\alpha",
@@ -452,7 +451,7 @@
     if (!hasMathSignal) {
       return false;
     }
-    const compactEquation = /^[A-Za-z0-9α-ωΑ-Ω\\{}_^=+\-−×÷*/().,\s]+$/.test(normalized);
+    const compactEquation = /^[A-Za-z0-9α-ωΑ-Ω\\{}\[\]_^=+\-−×÷*/().,|\s]+$/.test(normalized);
     if (!compactEquation) {
       return false;
     }
@@ -779,7 +778,7 @@
 
   function appendInlineMarkdown(target, inlineText, options = {}) {
     const sourceText = String(inlineText || "");
-    const tokenPattern = /`[^`\n]+`|\*\*(?=\S)[\s\S]*?\S\*\*|__(?=\S)[\s\S]*?\S__|\*(?=\S)[\s\S]*?\S\*|_(?=\S)[\s\S]*?\S_/g;
+    const tokenPattern = /`[^`\n]+`|\*\*(?=\S)[\s\S]*?\S\*\*|\*(?=\S)[\s\S]*?\S\*/g;
     let inlineLastIndex = 0;
     const renderOptions = normalizeRenderOptions(options);
 
@@ -805,18 +804,14 @@
         return;
       }
       if (
-        (tokenText.startsWith("**") && tokenText.endsWith("**"))
-        || (tokenText.startsWith("__") && tokenText.endsWith("__"))
+        tokenText.startsWith("**") && tokenText.endsWith("**")
       ) {
         const strong = document.createElement("strong");
         appendInlineMarkdown(strong, tokenText.slice(2, -2), renderOptions);
         targetNode.appendChild(strong);
         return;
       }
-      if (
-        (tokenText.startsWith("*") && tokenText.endsWith("*"))
-        || (tokenText.startsWith("_") && tokenText.endsWith("_"))
-      ) {
+      if (tokenText.startsWith("*") && tokenText.endsWith("*")) {
         if (looksLikeMathCollision(tokenText)) {
           appendPlainTextContent(targetNode, tokenText, renderOptions);
           return;
@@ -845,64 +840,107 @@
     }
   }
 
-  function parseListItems(lines, markerPattern) {
-    const items = [];
-    let currentItem = "";
-    for (const line of lines) {
-      if (!line.trim()) {
-        if (currentItem) {
-          currentItem += "\n";
-        }
-        continue;
-      }
-      if (markerPattern.test(line)) {
-        if (currentItem.trim()) {
-          items.push(currentItem.trim());
-        }
-        currentItem = line.replace(markerPattern, "").trim();
-        continue;
-      }
-      if (/^\s+/.test(line) && currentItem) {
-        currentItem = `${currentItem}\n${line.trim()}`;
-        continue;
-      }
-      return [];
-    }
-    if (currentItem.trim()) {
-      items.push(currentItem.trim());
-    }
-    return items;
-  }
-
-  function appendTextBlock(container, blockText, options = {}) {
-    const unorderedListPattern = /^\s*[-*]\s+/;
-    const orderedListPattern = /^\s*\d+\.\s+/;
-    const lines = blockText.split("\n");
-    const nonEmptyLines = lines.filter((line) => line.trim());
-    if (!nonEmptyLines.length) {
+  function appendListItemContent(item, itemText, options = {}) {
+    const normalized = String(itemText || "").replace(/^\n+|\n+$/g, "");
+    if (!normalized) {
       return;
     }
+    if (/\n/.test(normalized)) {
+      appendFormattedMessageContent(item, normalized, options);
+      return;
+    }
+    appendInlineMarkdown(item, normalized, options);
+  }
 
-    const firstLine = nonEmptyLines[0];
-    const isUnorderedList = unorderedListPattern.test(firstLine);
-    const isOrderedList = !isUnorderedList && orderedListPattern.test(firstLine);
-    const listItems = isUnorderedList
-      ? parseListItems(lines, unorderedListPattern)
-      : (isOrderedList ? parseListItems(lines, orderedListPattern) : []);
+  function appendStructuredPlainText(container, text, options = {}) {
+    const unorderedListPattern = /^\s*[-*]\s+/;
+    const orderedListPattern = /^\s*\d+\.\s+/;
+    const normalized = String(text || "").replace(/^\n+|\n+$/g, "");
+    if (!normalized) {
+      return false;
+    }
 
-    if (listItems.length) {
-      const list = document.createElement(isOrderedList ? "ol" : "ul");
+    const lines = normalized.split("\n");
+    const paragraphLines = [];
+    let activeListType = "";
+    let activeListItems = [];
+
+    function flushParagraph() {
+      if (!paragraphLines.length) {
+        return false;
+      }
+      appendTextBlock(container, paragraphLines.join("\n").trim(), options);
+      paragraphLines.length = 0;
+      return true;
+    }
+
+    function flushList() {
+      if (!activeListType || !activeListItems.length) {
+        return false;
+      }
+      const list = document.createElement(activeListType === "ordered" ? "ol" : "ul");
       list.className = "preview-message-list";
-      listItems.forEach((itemText) => {
+      activeListItems.forEach((itemText) => {
         const item = document.createElement("li");
         item.className = "preview-message-list-item";
-        appendInlineMarkdown(item, itemText, options);
+        appendListItemContent(item, itemText, options);
         list.appendChild(item);
       });
       container.appendChild(list);
-      return;
+      activeListType = "";
+      activeListItems = [];
+      return true;
     }
 
+    function currentListItemAppend(lineText) {
+      if (!activeListItems.length) {
+        return;
+      }
+      const lastItemIndex = activeListItems.length - 1;
+      activeListItems[lastItemIndex] = `${activeListItems[lastItemIndex]}\n${lineText}`;
+    }
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      const isUnorderedListItem = unorderedListPattern.test(line);
+      const isOrderedListItem = !isUnorderedListItem && orderedListPattern.test(line);
+
+      if (isUnorderedListItem || isOrderedListItem) {
+        flushParagraph();
+        const nextListType = isOrderedListItem ? "ordered" : "unordered";
+        if (activeListType && activeListType !== nextListType) {
+          flushList();
+        }
+        activeListType = nextListType;
+        activeListItems.push(line.replace(isOrderedListItem ? orderedListPattern : unorderedListPattern, "").trim());
+        return;
+      }
+
+      if (activeListType) {
+        if (!trimmed) {
+          currentListItemAppend("");
+          return;
+        }
+        if (/^\s+/.test(line) || trimmed.startsWith("\\[") || trimmed.startsWith("\\(") || looksLikeStandaloneLatexMathBlock(trimmed)) {
+          currentListItemAppend(trimmed);
+          return;
+        }
+        flushList();
+      }
+
+      if (!trimmed) {
+        flushParagraph();
+        return;
+      }
+      paragraphLines.push(line);
+    });
+
+    const appendedList = flushList();
+    const appendedParagraph = flushParagraph();
+    return appendedList || appendedParagraph;
+  }
+
+  function appendTextBlock(container, blockText, options = {}) {
     if (looksLikeStandaloneLatexMathBlock(blockText)) {
       const paragraph = document.createElement("p");
       paragraph.className = "preview-message-paragraph";
@@ -928,27 +966,10 @@
     let lastIndex = 0;
     let hasContent = false;
 
-    function appendStandaloneDisplayMathBlock(blockText) {
-      const normalized = normalizeDelimitedMath(blockText);
-      if (!normalized.trim()) {
-        return;
-      }
-      const paragraph = document.createElement("p");
-      paragraph.className = "preview-message-paragraph";
-      paragraph.textContent = normalized;
-      container.appendChild(paragraph);
-      hasContent = true;
-    }
-
     function appendPlainBlocks(segmentText) {
-      const normalized = String(segmentText || "").replace(/^\n+|\n+$/g, "");
-      if (!normalized) {
-        return;
-      }
-      normalized.split(/\n{2,}/).forEach((blockText) => {
-        appendTextBlock(container, blockText, renderOptions);
+      if (appendStructuredPlainText(container, segmentText, renderOptions)) {
         hasContent = true;
-      });
+      }
     }
 
     function appendTextSegment(segment) {
@@ -956,14 +977,7 @@
       if (!normalized) {
         return;
       }
-      let displayMathLastIndex = 0;
-      normalized.replace(displayMathDelimitedPattern, (match, offset) => {
-        appendPlainBlocks(normalized.slice(displayMathLastIndex, offset));
-        appendStandaloneDisplayMathBlock(match);
-        displayMathLastIndex = offset + match.length;
-        return match;
-      });
-      appendPlainBlocks(normalized.slice(displayMathLastIndex));
+      appendPlainBlocks(normalized);
     }
 
     source.replace(fencePattern, (match, language, code, offset) => {

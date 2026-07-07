@@ -22,8 +22,11 @@ if (previewRoot && previewDataNode) {
   const chatBackButton = previewRoot.querySelector("[data-preview-chat-back]");
   const activeBlockAvatar = previewRoot.querySelector("[data-preview-chat-avatar]");
   const activeBlockMeta = previewRoot.querySelector("[data-preview-active-block-meta]");
+  const headerCoverage = previewRoot.querySelector("[data-preview-header-coverage]");
+  const headerCoverageFill = previewRoot.querySelector("[data-preview-header-coverage-fill]");
   const previewSidebarHead = previewRoot.querySelector(".preview-sidebar-head");
   const previewChatHeader = previewRoot.querySelector(".preview-chat-header");
+  const scrollBottomButton = previewRoot.querySelector("[data-preview-scroll-bottom]");
   const sidebarSummary = previewRoot.querySelector("[data-preview-sidebar-summary]");
   const sidebarSummaryText = previewRoot.querySelector("[data-preview-sidebar-summary-text]");
   const sidebarSummaryCopy = previewRoot.querySelector("[data-preview-sidebar-summary-copy]");
@@ -72,6 +75,7 @@ if (previewRoot && previewDataNode) {
   const demoEmbedOriginTokenUrl = String(previewRoot.dataset.demoEmbedOriginTokenUrl || "").trim();
   const hideFlagActions = previewRoot.dataset.hideFlagActions === "true";
   const practiceValidationUrl = String(previewRoot.dataset.practiceValidationUrl || "").trim();
+  const statsIconUrl = String(previewRoot.dataset.statsIconUrl || "").trim();
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = String(previewState.active_block_id || "");
@@ -94,6 +98,7 @@ if (previewRoot && previewDataNode) {
   let messengerSearchQuery = "";
   let messengerMobileChatOpen = !isMessengerPreview || !messengerMobileMedia.matches;
   let messengerHeaderHeightSyncFrame = 0;
+  let transcriptScrollButtonSyncFrame = 0;
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
@@ -119,6 +124,7 @@ if (previewRoot && previewDataNode) {
     month: "2-digit",
     year: "numeric",
   });
+  const STATS_THREAD_ID = "__my_stats__";
   const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
   const richText = window.StandaloneRichText || {
     appendFormattedMessageContent(container, text) {
@@ -178,6 +184,10 @@ if (previewRoot && previewDataNode) {
     try {
       const storedBlockId = window.localStorage.getItem(storageKey);
       if (!storedBlockId) {
+        return;
+      }
+      if (isMessengerPreview && storedBlockId === STATS_THREAD_ID) {
+        activeBlockId = STATS_THREAD_ID;
         return;
       }
       const matchingBlock = (previewState.blocks || []).find((block) => String(block.id) === String(storedBlockId));
@@ -371,7 +381,14 @@ if (previewRoot && previewDataNode) {
     previewSidebar?.classList.toggle("has-expanded-summary", isExpanded);
   }
 
+  function isStatsView() {
+    return String(activeBlockId || "") === STATS_THREAD_ID;
+  }
+
   function currentBlock() {
+    if (isStatsView()) {
+      return null;
+    }
     return (previewState.blocks || []).find((block) => String(block.id) === String(activeBlockId)) || previewState.blocks?.[0] || null;
   }
 
@@ -1135,6 +1152,12 @@ if (previewRoot && previewDataNode) {
     if (!input) {
       return;
     }
+    if (isStatsView()) {
+      input.value = "";
+      input.dataset.mode = "chat";
+      resizeComposerInput();
+      return;
+    }
     if (currentProject()) {
       if (input.dataset.mode === "waq") {
         input.value = "";
@@ -1165,26 +1188,52 @@ if (previewRoot && previewDataNode) {
     if (!submitButton || !input) {
       return;
     }
+    if (isStatsView()) {
+      previewRoot.classList.remove("is-waq-mode", "is-project-mode");
+      form?.classList.remove("is-waq-mode");
+      quizControls?.classList.remove("is-answer-mode", "is-submit-mode");
+      input.placeholder = "Ask";
+      submitButton.textContent = "Quiz";
+      submitButton.disabled = requestInFlight;
+      if (quizMenu) {
+        quizMenu.hidden = false;
+        quizMenu.removeAttribute("hidden");
+        quizMenu.setAttribute("aria-hidden", "false");
+      }
+      if (quizMenuTrigger) {
+        quizMenuTrigger.disabled = requestInFlight;
+      }
+      closeQuizMenu();
+      renderWaqAlignment(null);
+      return;
+    }
     const activeProject = currentProject();
     const activeWaq = pendingWrittenQuestion();
     const hasText = !!input.value.trim();
     const isWaqMode = !!activeWaq;
     const isProjectMode = !!activeProject;
+    const shouldCollapseQuizMenu = hasText || isWaqMode || isProjectMode;
 
     previewRoot.classList.toggle("is-waq-mode", isWaqMode);
     previewRoot.classList.toggle("is-project-mode", isProjectMode);
     form?.classList.toggle("is-waq-mode", isWaqMode);
     quizControls?.classList.toggle("is-answer-mode", isWaqMode);
+    quizControls?.classList.toggle("is-submit-mode", shouldCollapseQuizMenu);
     input.placeholder = isWaqMode
       ? "Write your answer..."
-      : (isProjectMode ? "Ask for a hint or nudge..." : "Ask a related question.");
+      : (isProjectMode ? "Ask for a hint or nudge..." : "Ask");
     submitButton.textContent = isWaqMode ? "Submit answer" : (hasText ? "Send" : (isProjectMode ? "Hint" : "Quiz"));
     submitButton.disabled = requestInFlight || (isWaqMode && !hasText);
     if (quizMenu) {
-      quizMenu.hidden = hasText || isWaqMode || isProjectMode;
+      quizMenu.hidden = false;
+      quizMenu.removeAttribute("hidden");
+      quizMenu.setAttribute("aria-hidden", shouldCollapseQuizMenu ? "true" : "false");
+    }
+    if (shouldCollapseQuizMenu) {
+      closeQuizMenu();
     }
     if (quizMenuTrigger) {
-      quizMenuTrigger.disabled = requestInFlight || !!input.value.trim() || isWaqMode || isProjectMode;
+      quizMenuTrigger.disabled = requestInFlight || shouldCollapseQuizMenu;
     }
     syncQuizMenuItems();
     renderWaqAlignment(activeWaq);
@@ -1235,7 +1284,19 @@ if (previewRoot && previewDataNode) {
     if (!form) {
       return;
     }
+    if (form.hidden) {
+      previewRoot.style.setProperty("--preview-composer-clearance", "1rem");
+      return;
+    }
     previewRoot.style.setProperty("--preview-composer-clearance", `${form.offsetHeight + 20}px`);
+  }
+
+  function clampPercentage(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return 0;
+    }
+    return Math.max(0, Math.min(parsed, 100));
   }
 
   function formatPercentage(value) {
@@ -1278,10 +1339,30 @@ if (previewRoot && previewDataNode) {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
+  function parseCalendarDate(value) {
+    const rawValue = String(value || "").trim();
+    if (!rawValue) {
+      return null;
+    }
+    const parsed = new Date(`${rawValue}T12:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
   function isSameCalendarDay(left, right) {
     return left.getFullYear() === right.getFullYear()
       && left.getMonth() === right.getMonth()
       && left.getDate() === right.getDate();
+  }
+
+  function calendarDayKey(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      return "";
+    }
+    return [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0"),
+    ].join("-");
   }
 
   function daysSince(date) {
@@ -1307,6 +1388,30 @@ if (previewRoot && previewDataNode) {
     return previewSlashDateFormatter.format(parsed);
   }
 
+  function formatTranscriptDayLabel(value) {
+    const parsed = value instanceof Date ? value : parseMessageDate(value);
+    if (!parsed) {
+      return "";
+    }
+    const now = new Date();
+    if (isSameCalendarDay(parsed, now)) {
+      return "Today";
+    }
+    const dayDelta = daysSince(parsed);
+    if (dayDelta >= 0 && dayDelta <= 6) {
+      return previewWeekdayFormatter.format(parsed);
+    }
+    return previewDateFormatter.format(parsed);
+  }
+
+  function formatStatsTimelineLabel(value) {
+    const parsed = value instanceof Date ? value : parseCalendarDate(value);
+    if (!parsed) {
+      return formatPreviewDate(value) || String(value || "");
+    }
+    return formatTranscriptDayLabel(parsed);
+  }
+
   function formatMessageClock(value) {
     const parsed = parseMessageDate(value);
     if (!parsed) {
@@ -1324,6 +1429,18 @@ if (previewRoot && previewDataNode) {
     timestamp.className = "preview-message-time";
     timestamp.textContent = timestampText;
     container.appendChild(timestamp);
+  }
+
+  function renderTranscriptDaySeparator(date) {
+    const label = formatTranscriptDayLabel(date);
+    if (!label) {
+      return null;
+    }
+    const separator = document.createElement("time");
+    separator.className = "preview-chat-day-separator";
+    separator.dateTime = calendarDayKey(date);
+    separator.textContent = label;
+    return separator;
   }
 
   function messagePreviewText(message) {
@@ -1397,6 +1514,65 @@ if (previewRoot && previewDataNode) {
     };
   }
 
+  function courseStats() {
+    return previewState.course?.stats || {};
+  }
+
+  function statsPreviewText(stats = courseStats()) {
+    const completedCount = Number(stats.summary?.completed_count || 0);
+    if (!completedCount) {
+      return "Mastery, coverage, and question-type breakdown.";
+    }
+    return `Mastery ${formatPercentage(stats.summary?.mastery)} • Coverage ${formatPercentage(stats.summary?.coverage)}`;
+  }
+
+  function statsHeaderMetaText(stats = courseStats()) {
+    const updatedLabel = formatConversationTimestamp(stats.latest_answered_at || "");
+    return updatedLabel
+      ? `Updated ${updatedLabel}`
+      : "Mastery, coverage, and question-type breakdown.";
+  }
+
+  function statsConversationRowData() {
+    const stats = courseStats();
+    return {
+      id: STATS_THREAD_ID,
+      isStats: true,
+      title: "My Stats",
+      previewText: statsPreviewText(stats),
+      previewTimestamp: formatConversationTimestamp(stats.latest_answered_at || ""),
+      avatarUrl: statsIconUrl,
+      avatarText: "MS",
+    };
+  }
+
+  function setAvatarContent(container, {
+    avatarUrl = "",
+    avatarText = "",
+    imageClass = "",
+    isSquare = false,
+  } = {}) {
+    if (!container) {
+      return;
+    }
+    const hasImage = Boolean(String(avatarUrl || "").trim());
+    container.classList.toggle("is-image", hasImage);
+    container.classList.toggle("is-square", Boolean(isSquare));
+    container.replaceChildren();
+    container.textContent = "";
+    if (hasImage) {
+      const image = document.createElement("img");
+      image.className = imageClass;
+      image.src = avatarUrl;
+      image.alt = "";
+      image.loading = "lazy";
+      image.decoding = "async";
+      container.appendChild(image);
+      return;
+    }
+    container.textContent = avatarText;
+  }
+
   function sortedConversationBlocks() {
     return (previewState.blocks || [])
       .map((block) => conversationRowData(block))
@@ -1412,18 +1588,48 @@ if (previewRoot && previewDataNode) {
 
   function filteredConversationBlocks() {
     const query = messengerSearchQuery.trim().toLowerCase();
-    if (!query) {
-      return sortedConversationBlocks();
-    }
-    return sortedConversationBlocks().filter((entry) => {
-      const haystack = `${entry.block?.title || ""} ${entry.previewText || ""}`.toLowerCase();
-      return haystack.includes(query);
-    });
+    const blockEntries = !query
+      ? sortedConversationBlocks()
+      : sortedConversationBlocks().filter((entry) => {
+        const haystack = `${entry.block?.title || ""} ${entry.previewText || ""}`.toLowerCase();
+        return haystack.includes(query);
+      });
+    const statsEntry = statsConversationRowData();
+    const statsHaystack = `${statsEntry.title} ${statsEntry.previewText}`.toLowerCase();
+    return [
+      ...((!query || statsHaystack.includes(query)) ? [statsEntry] : []),
+      ...blockEntries,
+    ];
   }
 
   function setMessengerMobileChatOpen(nextOpen) {
     messengerMobileChatOpen = !!nextOpen;
     previewRoot.classList.toggle("is-messenger-chat-open", messengerMobileChatOpen);
+    requestTranscriptScrollButtonSync();
+  }
+
+  function syncTranscriptScrollButton() {
+    if (!transcript || !scrollBottomButton) {
+      return;
+    }
+    const maxScrollTop = Math.max(transcript.scrollHeight - transcript.clientHeight, 0);
+    const distanceFromBottom = Math.max(maxScrollTop - transcript.scrollTop, 0);
+    const chatIsVisible = !isMessengerPreview || messengerMobileChatOpen || !messengerMobileMedia.matches;
+    const shouldShow = chatIsVisible && maxScrollTop > 32 && distanceFromBottom > 72;
+    scrollBottomButton.hidden = !shouldShow;
+  }
+
+  function requestTranscriptScrollButtonSync() {
+    if (!scrollBottomButton) {
+      return;
+    }
+    if (transcriptScrollButtonSyncFrame) {
+      return;
+    }
+    transcriptScrollButtonSyncFrame = window.requestAnimationFrame(() => {
+      transcriptScrollButtonSyncFrame = 0;
+      syncTranscriptScrollButton();
+    });
   }
 
   function metricLabel(metricKey, scope = "block") {
@@ -1436,6 +1642,7 @@ if (previewRoot && previewDataNode) {
 
   function scrollTranscriptToBottom() {
     transcript?.scrollTo({ top: transcript.scrollHeight, behavior: reducedMotionMedia.matches ? "auto" : "smooth" });
+    requestTranscriptScrollButtonSync();
   }
 
   function transcriptHeaderOffset() {
@@ -1473,12 +1680,78 @@ if (previewRoot && previewDataNode) {
     ) || null;
   }
 
+  function updateMathOverflowState() {
+    if (!transcript) {
+      return;
+    }
+    const transcriptStyles = window.getComputedStyle(transcript);
+    const transcriptAvailableWidth = transcript.clientWidth
+      - Number.parseFloat(transcriptStyles.paddingLeft || "0")
+      - Number.parseFloat(transcriptStyles.paddingRight || "0");
+
+    function clearMathOverflowStyles(message) {
+      message.classList.remove("preview-message--math-overflow");
+      [
+        "width",
+        "max-width",
+        "min-width",
+        "display",
+        "justify-self",
+        "overflow-x",
+        "overflow-y",
+        "overscroll-behavior-x",
+      ].forEach((property) => {
+        message.style.removeProperty(property);
+      });
+      message.style.webkitOverflowScrolling = "";
+    }
+
+    function applyMathOverflowStyles(message) {
+      message.classList.add("preview-message--math-overflow");
+      message.style.setProperty("width", "100%", "important");
+      message.style.setProperty("max-width", "100%", "important");
+      message.style.setProperty("min-width", "0", "important");
+      message.style.setProperty("display", "block", "important");
+      message.style.setProperty("justify-self", "stretch", "important");
+      message.style.setProperty("overflow-x", "auto", "important");
+      message.style.setProperty("overflow-y", "hidden", "important");
+      message.style.setProperty("overscroll-behavior-x", "contain", "important");
+      message.style.webkitOverflowScrolling = "touch";
+    }
+
+    transcript.querySelectorAll(".preview-message").forEach((message) => {
+      if (!(message instanceof HTMLElement)) {
+        return;
+      }
+      const mathNodes = Array.from(message.querySelectorAll(".katex-display, .katex")).filter(
+        (node) => node instanceof HTMLElement,
+      );
+      clearMathOverflowStyles(message);
+      if (!mathNodes.length || !mobileChatMedia.matches || transcriptAvailableWidth <= 0) {
+        return;
+      }
+      const messageWidth = message.getBoundingClientRect().width;
+      const hasOverflow = mathNodes.some((node) => {
+        const element = node;
+        return element.scrollWidth - transcriptAvailableWidth > 2 || element.getBoundingClientRect().width - transcriptAvailableWidth > 2;
+      });
+      if (messageWidth - transcriptAvailableWidth > 2 || hasOverflow) {
+        applyMathOverflowStyles(message);
+      }
+    });
+  }
+
   function updateQuestionOverflowState(activeQuestion) {
     if (!transcript || !activeQuestion || !activeQuestion.isConnected) {
       return;
     }
     const hint = activeQuestion.querySelector(".preview-question-overflow-hint");
     if (!hint) {
+      return;
+    }
+    if (!mobileChatMedia.matches) {
+      activeQuestion.classList.remove("is-overflowing-question");
+      hint.hidden = true;
       return;
     }
     const answerRegion = activeQuestion.querySelector(".preview-message-options") || activeQuestion;
@@ -1890,12 +2163,14 @@ if (previewRoot && previewDataNode) {
       } else {
         blocks.forEach((entry) => {
           const { block, previewText, previewTimestamp, avatarText, avatarUrl } = entry;
-          const isActive = String(block.id) === String(activeBlockId);
-          const isSelectionPreview = isActive && isSidebarSelectionPreview(block.id);
+          const rowId = String(entry.id || block?.id || "");
+          const rowTitle = String(entry.title || block?.title || "");
+          const isActive = rowId === String(activeBlockId);
+          const isSelectionPreview = !entry.isStats && isActive && isSidebarSelectionPreview(rowId);
           const row = document.createElement("button");
           row.type = "button";
           row.className = `preview-conversation-row${isActive ? " is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
-          row.dataset.blockId = String(block.id);
+          row.dataset.blockId = rowId;
           row.innerHTML = `
             <span class="preview-conversation-avatar" aria-hidden="true"></span>
             <span class="preview-conversation-body">
@@ -1907,22 +2182,16 @@ if (previewRoot && previewDataNode) {
             </span>
           `;
           const avatar = row.querySelector(".preview-conversation-avatar");
-          if (avatarUrl) {
-            avatar.classList.add("is-image");
-            const image = document.createElement("img");
-            image.className = "preview-conversation-avatar-image";
-            image.src = avatarUrl;
-            image.alt = "";
-            image.loading = "lazy";
-            image.decoding = "async";
-            avatar.appendChild(image);
-          } else {
-            avatar.textContent = avatarText;
-          }
-          row.querySelector(".preview-conversation-title").textContent = String(block.title || "");
+          setAvatarContent(avatar, {
+            avatarUrl,
+            avatarText,
+            imageClass: "preview-conversation-avatar-image",
+            isSquare: entry.isStats,
+          });
+          row.querySelector(".preview-conversation-title").textContent = rowTitle;
           row.querySelector(".preview-conversation-preview").textContent = previewText;
           row.addEventListener("click", () => {
-            activeBlockId = String(block.id);
+            activeBlockId = rowId;
             if (messengerMobileMedia.matches) {
               setMessengerMobileChatOpen(true);
             }
@@ -2038,14 +2307,6 @@ if (previewRoot && previewDataNode) {
         helper.textContent = "Type your answer in the fixed box below.";
         article.appendChild(helper);
       } else if (Array.isArray(message.options) && message.options.length && !message.answered && !message.flagged) {
-        const overflowHint = document.createElement("div");
-        overflowHint.className = "preview-question-overflow-hint";
-        overflowHint.hidden = true;
-        overflowHint.textContent = message.question_type === "waq"
-          ? "Scroll to see the rest of this question."
-          : "Scroll to see all answers.";
-        article.appendChild(overflowHint);
-
         const optionsWrapper = document.createElement("div");
         optionsWrapper.className = "preview-message-options";
         if (message.question_type === "maq") {
@@ -2417,8 +2678,357 @@ if (previewRoot && previewDataNode) {
     return combined;
   }
 
+  function buildStatsPanel(title, description = "") {
+    const panel = document.createElement("section");
+    panel.className = "preview-stats-panel";
+
+    const heading = document.createElement("div");
+    heading.className = "preview-stats-panel-head";
+
+    const titleElement = document.createElement("h3");
+    titleElement.className = "preview-stats-panel-title";
+    titleElement.textContent = title;
+    heading.appendChild(titleElement);
+
+    if (description) {
+      const descriptionElement = document.createElement("p");
+      descriptionElement.className = "preview-stats-panel-description";
+      descriptionElement.textContent = description;
+      heading.appendChild(descriptionElement);
+    }
+
+    panel.appendChild(heading);
+    return panel;
+  }
+
+  function buildStatsSummaryCard(label, value, detail = "") {
+    const card = document.createElement("div");
+    card.className = "preview-stats-summary-card";
+
+    const labelElement = document.createElement("span");
+    labelElement.className = "preview-stats-summary-label";
+    labelElement.textContent = label;
+
+    const valueElement = document.createElement("strong");
+    valueElement.className = "preview-stats-summary-value";
+    valueElement.textContent = value;
+
+    const detailElement = document.createElement("p");
+    detailElement.className = "preview-stats-summary-detail";
+    detailElement.textContent = detail;
+
+    card.append(labelElement, valueElement, detailElement);
+    return card;
+  }
+
+  function statsChartPointData(points) {
+    const chartLeft = 6;
+    const chartRight = 94;
+    const chartTop = 8;
+    const chartBottom = 58;
+    const chartHeight = chartBottom - chartTop;
+    const pointCount = Math.max(points.length, 1);
+    return points.map((point, index) => {
+      const ratio = pointCount === 1 ? 0.5 : index / (pointCount - 1);
+      return {
+        x: chartLeft + ((chartRight - chartLeft) * ratio),
+        masteryY: chartBottom - ((clampPercentage(point.mastery) / 100) * chartHeight),
+        coverageY: chartBottom - ((clampPercentage(point.coverage) / 100) * chartHeight),
+      };
+    });
+  }
+
+  function statsChartPath(points, key) {
+    return points.map((point, index) => {
+      const x = point.x.toFixed(2);
+      const y = Number(point[key]).toFixed(2);
+      return `${index === 0 ? "M" : "L"} ${x} ${y}`;
+    }).join(" ");
+  }
+
+  function buildStatsTimelineChart(timeline) {
+    const chart = document.createElement("div");
+    chart.className = "preview-stats-chart";
+
+    if (!timeline.length) {
+      const emptyState = document.createElement("p");
+      emptyState.className = "preview-stats-empty";
+      emptyState.textContent = "Answer a few questions to see mastery and coverage change over time.";
+      chart.appendChild(emptyState);
+      return chart;
+    }
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 100 64");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Line chart showing mastery and coverage over time");
+    svg.classList.add("preview-stats-chart-svg");
+
+    [0, 50, 100].forEach((value) => {
+      const y = 58 - ((value / 100) * 50);
+      const line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("x1", "6");
+      line.setAttribute("y1", y.toFixed(2));
+      line.setAttribute("x2", "94");
+      line.setAttribute("y2", y.toFixed(2));
+      line.setAttribute("class", "preview-stats-chart-grid");
+      svg.appendChild(line);
+    });
+
+    const points = statsChartPointData(timeline);
+    const masteryPath = document.createElementNS(SVG_NS, "path");
+    masteryPath.setAttribute("d", statsChartPath(points, "masteryY"));
+    masteryPath.setAttribute("class", "preview-stats-chart-line preview-stats-chart-line--mastery");
+    svg.appendChild(masteryPath);
+
+    const coveragePath = document.createElementNS(SVG_NS, "path");
+    coveragePath.setAttribute("d", statsChartPath(points, "coverageY"));
+    coveragePath.setAttribute("class", "preview-stats-chart-line preview-stats-chart-line--coverage");
+    svg.appendChild(coveragePath);
+
+    points.forEach((point, index) => {
+      const masteryDot = document.createElementNS(SVG_NS, "circle");
+      masteryDot.setAttribute("cx", point.x.toFixed(2));
+      masteryDot.setAttribute("cy", point.masteryY.toFixed(2));
+      masteryDot.setAttribute("r", "1.8");
+      masteryDot.setAttribute("class", "preview-stats-chart-dot preview-stats-chart-dot--mastery");
+      svg.appendChild(masteryDot);
+
+      const coverageDot = document.createElementNS(SVG_NS, "circle");
+      coverageDot.setAttribute("cx", point.x.toFixed(2));
+      coverageDot.setAttribute("cy", point.coverageY.toFixed(2));
+      coverageDot.setAttribute("r", "1.6");
+      coverageDot.setAttribute("class", "preview-stats-chart-dot preview-stats-chart-dot--coverage");
+      svg.appendChild(coverageDot);
+
+      if (timeline.length === 1 || index === 0 || index === timeline.length - 1) {
+        const label = document.createElementNS(SVG_NS, "text");
+        label.setAttribute("x", point.x.toFixed(2));
+        label.setAttribute("y", "63");
+        label.setAttribute(
+          "text-anchor",
+          timeline.length === 1 ? "middle" : (index === 0 ? "start" : (index === timeline.length - 1 ? "end" : "middle")),
+        );
+        label.setAttribute("class", "preview-stats-chart-axis-label");
+        label.textContent = formatStatsTimelineLabel(timeline[index]?.date || "");
+        svg.appendChild(label);
+      }
+    });
+
+    chart.appendChild(svg);
+    return chart;
+  }
+
+  function buildStatsSnapshots(timeline) {
+    const snapshots = document.createElement("div");
+    snapshots.className = "preview-stats-snapshots";
+
+    timeline.forEach((point) => {
+      const card = document.createElement("div");
+      card.className = "preview-stats-snapshot";
+
+      const dateLabel = document.createElement("strong");
+      dateLabel.textContent = formatStatsTimelineLabel(point.date || "");
+
+      const mastery = document.createElement("span");
+      mastery.textContent = `Mastery ${formatPercentage(point.mastery)}`;
+
+      const coverage = document.createElement("span");
+      coverage.textContent = `Coverage ${formatPercentage(point.coverage)}`;
+
+      card.append(dateLabel, mastery, coverage);
+      snapshots.appendChild(card);
+    });
+
+    return snapshots;
+  }
+
+  function buildStatsTimelinePanel(stats) {
+    const panel = buildStatsPanel(
+      "Mastery and coverage timeline",
+      "Cumulative progress across every answered chat question.",
+    );
+    const timeline = Array.isArray(stats.timeline) ? stats.timeline : [];
+
+    if (!timeline.length) {
+      const emptyState = document.createElement("p");
+      emptyState.className = "preview-stats-empty";
+      emptyState.textContent = "Answer a few questions to unlock your timeline.";
+      panel.appendChild(emptyState);
+      return panel;
+    }
+
+    const legend = document.createElement("div");
+    legend.className = "preview-stats-legend";
+    [
+      ["Mastery", "preview-stats-legend-swatch preview-stats-legend-swatch--mastery"],
+      ["Coverage", "preview-stats-legend-swatch preview-stats-legend-swatch--coverage"],
+    ].forEach(([labelText, className]) => {
+      const item = document.createElement("span");
+      item.className = "preview-stats-legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = className;
+      const text = document.createElement("span");
+      text.textContent = labelText;
+      item.append(swatch, text);
+      legend.appendChild(item);
+    });
+
+    panel.append(legend, buildStatsTimelineChart(timeline), buildStatsSnapshots(timeline));
+    return panel;
+  }
+
+  function buildStatsBreakdownPanel(stats) {
+    const panel = buildStatsPanel(
+      "Mastery by question type",
+      "Compare how each question format is going so far.",
+    );
+    const breakdown = Array.isArray(stats.question_type_mastery) ? stats.question_type_mastery : [];
+    if (!breakdown.length) {
+      const emptyState = document.createElement("p");
+      emptyState.className = "preview-stats-empty";
+      emptyState.textContent = "Question-type mastery appears once you have answered at least one question.";
+      panel.appendChild(emptyState);
+      return panel;
+    }
+
+    const list = document.createElement("div");
+    list.className = "preview-stats-breakdown";
+
+    breakdown.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "preview-stats-breakdown-row";
+
+      const head = document.createElement("div");
+      head.className = "preview-stats-breakdown-head";
+
+      const title = document.createElement("strong");
+      title.textContent = item.label || String(item.question_type || "").toUpperCase();
+
+      const count = document.createElement("span");
+      count.textContent = formatCount(item.completed_count || 0, "answer");
+
+      head.append(title, count);
+
+      const track = document.createElement("div");
+      track.className = "preview-stats-breakdown-track";
+      const fill = document.createElement("span");
+      fill.style.width = `${clampPercentage(item.mastery)}%`;
+      track.appendChild(fill);
+
+      const foot = document.createElement("div");
+      foot.className = "preview-stats-breakdown-foot";
+      const mastery = document.createElement("span");
+      mastery.textContent = `Mastery ${formatPercentage(item.mastery)}`;
+      const detail = document.createElement("span");
+      detail.textContent = `${item.correct_count || 0} correct · ${item.incorrect_count || 0} incorrect`;
+      foot.append(mastery, detail);
+
+      row.append(head, track, foot);
+      list.appendChild(row);
+    });
+
+    panel.appendChild(list);
+    return panel;
+  }
+
+  function syncStatsViewport(scrollMode = "bottom", previousScrollTop = 0) {
+    if (!transcript) {
+      return;
+    }
+    if (scrollMode === "preserve") {
+      transcript.scrollTop = Math.min(previousScrollTop, transcript.scrollHeight);
+      return;
+    }
+    transcript.scrollTop = 0;
+  }
+
+  function renderStatsTranscript(scrollMode = "bottom") {
+    if (!transcript) {
+      return;
+    }
+    const previousScrollTop = transcript.scrollTop;
+    const stats = courseStats();
+    const summary = stats.summary || {};
+    const completedCount = Number(summary.completed_count || 0);
+    const answeredQuestionTypes = Array.isArray(stats.question_type_mastery) ? stats.question_type_mastery.length : 0;
+
+    transcript.innerHTML = "";
+
+    const article = document.createElement("article");
+    article.className = "preview-message preview-message--assistant preview-message--stats";
+
+    const shell = document.createElement("div");
+    shell.className = "preview-stats-shell";
+
+    const meta = document.createElement("div");
+    meta.className = "preview-message-meta";
+    ["Course", "My Stats"].forEach((labelText) => {
+      const pill = document.createElement("span");
+      pill.className = "preview-message-pill";
+      pill.textContent = labelText;
+      meta.appendChild(pill);
+    });
+    const updatedText = statsHeaderMetaText(stats);
+    if (updatedText) {
+      const updatedPill = document.createElement("span");
+      updatedPill.className = "preview-message-pill";
+      updatedPill.textContent = updatedText;
+      meta.appendChild(updatedPill);
+    }
+
+    const intro = document.createElement("div");
+    intro.className = "preview-stats-intro";
+    const introTitle = document.createElement("h3");
+    introTitle.className = "preview-stats-title";
+    introTitle.textContent = "Track how mastery and coverage are building over time.";
+    const introCopy = document.createElement("p");
+    introCopy.className = "preview-stats-copy";
+    introCopy.textContent = completedCount
+      ? "This view rolls up your cumulative progress across every question answered in chat."
+      : "Your chat practice history will start filling this page as soon as you answer a question.";
+    intro.append(introTitle, introCopy);
+
+    const summaryGrid = document.createElement("div");
+    summaryGrid.className = "preview-stats-summary-grid";
+    summaryGrid.append(
+      buildStatsSummaryCard(
+        "Mastery",
+        formatPercentage(summary.mastery),
+        `${summary.correct_count || 0} correct of ${completedCount}`,
+      ),
+      buildStatsSummaryCard(
+        "Coverage",
+        formatPercentage(summary.coverage),
+        `${summary.covered_objective_count || 0} of ${summary.total_objective_count || 0} objectives covered`,
+      ),
+      buildStatsSummaryCard(
+        "Answered",
+        String(completedCount),
+        `${summary.correct_count || 0} correct · ${summary.incorrect_count || 0} incorrect`,
+      ),
+      buildStatsSummaryCard(
+        "Question types",
+        String(answeredQuestionTypes),
+        answeredQuestionTypes ? "Formats attempted so far" : "No completed question types yet",
+      ),
+    );
+
+    shell.append(meta, intro, summaryGrid, buildStatsTimelinePanel(stats), buildStatsBreakdownPanel(stats));
+    article.appendChild(shell);
+    transcript.appendChild(article);
+
+    syncStatsViewport(scrollMode, previousScrollTop);
+    requestTranscriptScrollButtonSync();
+  }
+
   function renderTranscript(scrollMode = "bottom") {
     if (!transcript) {
+      return;
+    }
+    if (isStatsView()) {
+      renderStatsTranscript(scrollMode);
       return;
     }
     const block = currentBlock();
@@ -2427,10 +3037,24 @@ if (previewRoot && previewDataNode) {
     if (!block) {
       return;
     }
+    let lastRenderedDayKey = "";
     combinedTranscript(block).forEach((message) => {
+      const createdAt = parseMessageDate(message?.created_at);
+      if (createdAt) {
+        const currentDayKey = calendarDayKey(createdAt);
+        if (currentDayKey && currentDayKey !== lastRenderedDayKey) {
+          const separator = renderTranscriptDaySeparator(createdAt);
+          if (separator) {
+            transcript.appendChild(separator);
+          }
+        }
+        lastRenderedDayKey = currentDayKey || lastRenderedDayKey;
+      }
       transcript.appendChild(renderMessage(message));
     });
+    updateMathOverflowState();
     syncQuestionViewport(scrollMode, previousScrollTop);
+    requestTranscriptScrollButtonSync();
   }
 
   function resourceMessagePayload(block, resource) {
@@ -2761,45 +3385,109 @@ if (previewRoot && previewDataNode) {
   }
 
   function renderPreview(scrollMode = "bottom") {
+    const statsView = isStatsView();
     const block = currentBlock();
-    if (!block) {
+    if (!statsView && !block) {
       return;
     }
     closeObjectiveMenus();
-    activeBlockId = String(block.id);
-    persistActiveBlockId(activeBlockId);
+    previewRoot.classList.toggle("is-stats-view", statsView);
+    if (statsView) {
+      closeHeaderMenu();
+      closeQuizMenu();
+      closeFlagSheet();
+      closeGuardrailSheet();
+      persistActiveBlockId(activeBlockId);
+    } else {
+      activeBlockId = String(block.id);
+      persistActiveBlockId(activeBlockId);
+    }
+    if (isMessengerPreview && !messengerMobileMedia.matches) {
+      setMessengerMobileChatOpen(true);
+    }
+    if (chatBackButton) {
+      chatBackButton.hidden = !isMessengerPreview || !messengerMobileMedia.matches;
+    }
+    if (statsView) {
+      const statsConversation = statsConversationRowData();
+      if (activeBlockTitle) {
+        activeBlockTitle.textContent = statsConversation.title;
+      }
+      setAvatarContent(activeBlockAvatar, {
+        avatarUrl: statsConversation.avatarUrl,
+        avatarText: statsConversation.avatarText,
+        imageClass: "preview-chat-header-avatar-image",
+        isSquare: true,
+      });
+      if (activeBlockMeta) {
+        activeBlockMeta.hidden = !isMessengerPreview;
+        activeBlockMeta.textContent = statsHeaderMetaText();
+      }
+      if (headerMenu) {
+        headerMenu.hidden = true;
+      }
+      if (headerCoverage && headerCoverageFill) {
+        headerCoverage.hidden = true;
+        headerCoverageFill.style.width = "0%";
+        headerCoverage.setAttribute("aria-valuenow", "0");
+        headerCoverage.setAttribute("aria-valuetext", "Coverage unavailable");
+        headerCoverage.removeAttribute("title");
+      }
+      if (form) {
+        form.hidden = true;
+      }
+      renderCourseMetrics();
+      renderBlockSwitcher();
+      renderProjectSwitcher();
+      renderProjectPanel();
+      renderTranscript(scrollMode);
+      scheduleMessengerHeaderHeightSync();
+      syncComposerInputFromState();
+      syncComposerState();
+      updateComposerClearance();
+      return;
+    }
+
     const project = currentProject(block);
     const conversation = conversationRowData(block);
     if (activeBlockTitle) {
       activeBlockTitle.textContent = project ? `${block.title} · ${project.title}` : block.title;
     }
-    if (activeBlockAvatar) {
-      activeBlockAvatar.classList.toggle("is-image", Boolean(conversation.avatarUrl));
-      activeBlockAvatar.replaceChildren();
-      activeBlockAvatar.textContent = "";
-      if (conversation.avatarUrl) {
-        const image = document.createElement("img");
-        image.className = "preview-chat-header-avatar-image";
-        image.src = conversation.avatarUrl;
-        image.alt = "";
-        image.loading = "lazy";
-        image.decoding = "async";
-        activeBlockAvatar.appendChild(image);
-      } else {
-        activeBlockAvatar.textContent = conversation.avatarText;
-      }
-    }
+    setAvatarContent(activeBlockAvatar, {
+      avatarUrl: conversation.avatarUrl,
+      avatarText: conversation.avatarText,
+      imageClass: "preview-chat-header-avatar-image",
+      isSquare: false,
+    });
     if (activeBlockMeta) {
       activeBlockMeta.hidden = !isMessengerPreview;
       activeBlockMeta.textContent = conversation.previewTimestamp
         ? `Last activity ${conversation.previewTimestamp}`
         : "Tap Quiz to start this conversation.";
     }
-    if (chatBackButton) {
-      chatBackButton.hidden = !isMessengerPreview || !messengerMobileMedia.matches;
+    if (headerMenu) {
+      headerMenu.hidden = false;
     }
-    if (isMessengerPreview && !messengerMobileMedia.matches) {
-      setMessengerMobileChatOpen(true);
+    if (headerCoverage && headerCoverageFill) {
+      const rawCoverage = Number(block?.metrics?.coverage);
+      const hasCoverage = Number.isFinite(rawCoverage);
+      const coverage = hasCoverage ? Math.max(0, Math.min(rawCoverage, 100)) : 0;
+      headerCoverage.hidden = !hasCoverage;
+      if (hasCoverage) {
+        const coverageText = formatPercentage(coverage);
+        headerCoverageFill.style.width = `${coverage}%`;
+        headerCoverage.setAttribute("aria-valuenow", coverage.toFixed(1));
+        headerCoverage.setAttribute("aria-valuetext", `Coverage ${coverageText}`);
+        headerCoverage.title = `Coverage ${coverageText}`;
+      } else {
+        headerCoverageFill.style.width = "0%";
+        headerCoverage.setAttribute("aria-valuenow", "0");
+        headerCoverage.setAttribute("aria-valuetext", "Coverage unavailable");
+        headerCoverage.removeAttribute("title");
+      }
+    }
+    if (form) {
+      form.hidden = false;
     }
     renderCourseMetrics();
     renderBlockSwitcher();
@@ -3184,6 +3872,14 @@ if (previewRoot && previewDataNode) {
     }
   });
 
+  scrollBottomButton?.addEventListener("click", () => {
+    scrollTranscriptToBottom();
+  });
+
+  transcript?.addEventListener("scroll", () => {
+    requestTranscriptScrollButtonSync();
+  }, { passive: true });
+
   previewRoot.addEventListener("click", (event) => {
     const objectiveMenuTrigger = event.target.closest("[data-preview-objective-menu-trigger='true']");
     if (objectiveMenuTrigger && previewRoot.contains(objectiveMenuTrigger)) {
@@ -3358,6 +4054,8 @@ if (previewRoot && previewDataNode) {
     }
     applySidebarState();
     scheduleMessengerHeaderHeightSync();
+    updateMathOverflowState();
+    requestTranscriptScrollButtonSync();
   });
   restoreActiveBlockId();
   if (isMessengerPreview) {
