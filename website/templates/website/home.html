@@ -4,73 +4,99 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NINE POINT EIGHT ONE</title>
-  <link rel="stylesheet" href="{% static 'website/css/base_theme.css' %}">
+  <meta http-equiv="refresh" content="{{ redirect_delay_seconds }};url={{ cta_url }}" />
+  <title>ForeverPhysics</title>
   <link rel="stylesheet" href="{% static 'website/css/landing.css' %}">
 </head>
 <body>
-  <div id="page-loader" class="page-loader">
-    <div class="spinner" aria-hidden="true"></div>
-    <div class="loader-title">Loading...</div>
-    <div class="loader-subtitle">Preparing the experience.</div>
-  </div>
-
-  <div class="landing-wrapper">
-    <div class="hero-page">
-      <div class="logo-block logo-square">
-        <div class="logo-inner">
-          <span class="logo-line">NINE</span>
-          <span class="logo-line">POINT</span>
-          <span class="logo-line">EIGHT</span>
-          <span class="logo-line">ONE</span>
-        </div>
+  <main class="landing-shell">
+    <section
+      class="landing-hero"
+      style="background-image: url('{% static "standalone/img/ninepointeightonebackground.png" %}');"
+    >
+      <div class="landing-hero__content">
+        <h1 class="landing-title">ForeverPhysics</h1>
+        <section
+          class="landing-loader"
+          data-home-loader
+          data-redirect-url="{{ cta_url }}"
+          data-delay-ms="{{ redirect_delay_ms }}"
+          style="--landing-loader-duration: {{ redirect_delay_ms }}ms;"
+          aria-label="Loading OCR Physics demo"
+        >
+          <p class="landing-loader__label">
+            Opening OCR Physics demo
+            <span class="landing-loader__dots" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+          </p>
+          <div class="landing-loader__track" aria-hidden="true">
+            <span class="landing-loader__fill"></span>
+          </div>
+          <section class="landing-features" data-feature-rotator aria-label="Platform highlights">
+            {% for feature in landing_features %}
+              <p
+                class="landing-features__item"
+                {% if forloop.first %}data-active="true"{% endif %}
+                data-feature-item
+              >
+                {{ feature }}
+              </p>
+            {% endfor %}
+          </section>
+          <noscript>
+            <p class="landing-loader__fallback"><a href="{{ cta_url }}">Continue to the OCR Physics demo</a></p>
+          </noscript>
+        </section>
       </div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const loader = document.querySelector("[data-home-loader]");
+      const featureItems = Array.from(document.querySelectorAll("[data-feature-item]"));
+      if (!loader) {
+        return;
+      }
 
-      <p class="tagline">Unlimited A-Level Physics Practice Questions</p>
-      <p class="hero-subcopy">
-        Invite-based courses, chat-style practice, validation sessions, demo mode, and question banks in one platform.
-      </p>
-      <div class="hero-actions">
-        <a href="{{ cta_url }}" class="button-primary" data-home-cta>{{ cta_label }}</a>
-      </div>
-      <p class="hero-meta">
-        {% if user.is_authenticated %}
-          Continue into your workspace to manage courses, practice, and validation.
-        {% else %}
-          Sign in to enter the NINE POINT EIGHT ONE workspace.
-        {% endif %}
-      </p>
-    </div>
-  </div>
+      const redirectUrl = loader.dataset.redirectUrl;
+      const delayMs = Number(loader.dataset.delayMs || 15000);
+      if (!redirectUrl) {
+        return;
+      }
 
-  <footer class="landing-footer">
-    <span>NINE POINT EIGHT ONE</span>
-    <span>&copy; {{ year }} Fizzy Newt Ltd</span>
-  </footer>
+      if (featureItems.length > 1) {
+        let activeIndex = 0;
+        const featureIntervalMs = Math.max(2400, Math.floor(delayMs / featureItems.length));
+        const featureTransitionMs = Math.min(1100, Math.max(850, Math.floor(featureIntervalMs * 0.3)));
+        const featureHoldMs = Math.max(900, featureIntervalMs - featureTransitionMs);
+        const rotator = document.querySelector("[data-feature-rotator]");
+
+        if (rotator) {
+          rotator.style.setProperty("--landing-feature-transition-duration", `${featureTransitionMs}ms`);
+        }
+
+        const queueNextFeature = () => {
+          featureItems[activeIndex].removeAttribute("data-active");
+          featureItems[activeIndex].setAttribute("data-exiting", "true");
+
+          window.setTimeout(() => {
+            featureItems[activeIndex].removeAttribute("data-exiting");
+            activeIndex = (activeIndex + 1) % featureItems.length;
+            featureItems[activeIndex].setAttribute("data-active", "true");
+            window.setTimeout(queueNextFeature, featureHoldMs);
+          }, featureTransitionMs);
+        };
+
+        window.setTimeout(queueNextFeature, featureHoldMs);
+      }
+
+      window.setTimeout(() => {
+        window.location.assign(redirectUrl);
+      }, delayMs);
+    })();
+  </script>
 </body>
-
-<script>
-window.addEventListener("load", () => {
-  const loader = document.getElementById("page-loader");
-  if (loader) loader.classList.add("hidden");
-});
-
-function equalizeLogo() {
-  const lines = document.querySelectorAll('.logo-square .logo-line');
-  if (!lines.length) return;
-  let maxWidth = 0;
-  lines.forEach(line => {
-    line.style.transform = 'none';
-    const w = line.getBoundingClientRect().width;
-    if (w > maxWidth) maxWidth = w;
-  });
-  lines.forEach(line => {
-    const w = line.getBoundingClientRect().width;
-    const scale = maxWidth / w;
-    line.style.transform = `scaleX(${scale})`;
-  });
-}
-window.addEventListener('load', equalizeLogo);
-window.addEventListener('resize', equalizeLogo);
-</script>
 </html>

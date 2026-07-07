@@ -8,20 +8,51 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
+from standalone.models import Course, CourseConfig, CourseDemoAccess
+from website.views import OCR_PHYSICS_COURSE_SLUG
+
 
 class RootHomepageTests(TestCase):
-    def test_root_renders_homepage_with_sign_in_cta_for_unauthenticated_users(self):
+    def create_ocr_demo_course(self, *, demo_enabled=False):
+        teacher = get_user_model().objects.create_user(
+            username="ocrteacher",
+            email="ocrteacher@example.com",
+            password="password123",
+            role="teacher",
+        )
+        course = Course.objects.create(
+            teacher=teacher,
+            title="A-Level Physics OCR",
+            slug=OCR_PHYSICS_COURSE_SLUG,
+            summary="OCR Physics demo course.",
+        )
+        CourseConfig.objects.create(course=course, demo_enabled=demo_enabled)
+        access = CourseDemoAccess.objects.create(course=course)
+        return course, access
+
+    def test_root_renders_demo_landing_for_unauthenticated_users(self):
+        _course, access = self.create_ocr_demo_course()
+
         response = self.client.get(reverse("website:home"))
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "website/home.html")
-        self.assertContains(response, "NINE POINT EIGHT ONE")
-        self.assertContains(response, "Unlimited A-Level Physics Practice Questions")
-        self.assertContains(response, 'data-home-cta', html=False)
-        self.assertContains(response, f'href="{reverse("standalone:login")}"', html=False)
-        self.assertContains(response, "Sign in")
+        self.assertContains(response, "ForeverPhysics")
+        self.assertContains(response, "Infinite A-Level physics practice")
+        self.assertContains(response, "Immediate feedback and support")
+        self.assertContains(response, "Step-by-step help when you get stuck")
+        self.assertContains(response, "Opening OCR Physics demo", html=False)
+        self.assertContains(response, 'data-home-loader', html=False)
+        self.assertContains(response, f'data-redirect-url="{reverse("standalone:demo_practice", args=[access.token])}"', html=False)
+        self.assertContains(response, 'data-delay-ms="15000"', html=False)
+        self.assertContains(response, f'content="15;url={reverse("standalone:demo_practice", args=[access.token])}"', html=False)
+        self.assertNotContains(response, 'data-home-cta', html=False)
+        self.assertNotContains(response, "Infinite A-Level Physics practice with instant feedback.")
+        self.assertNotContains(response, "Sign in")
+        self.assertNotContains(response, "Open dashboard")
 
-    def test_root_renders_homepage_with_dashboard_cta_for_authenticated_users(self):
+    def test_root_renders_same_demo_landing_for_authenticated_users(self):
+        _course, access = self.create_ocr_demo_course()
         user = get_user_model().objects.create_user(
             username="teacher",
             email="teacher@example.com",
@@ -34,8 +65,29 @@ class RootHomepageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "website/home.html")
-        self.assertContains(response, f'href="{reverse("standalone:dashboard")}"', html=False)
-        self.assertContains(response, "Open dashboard")
+        self.assertContains(response, "ForeverPhysics")
+        self.assertContains(response, "Opening OCR Physics demo", html=False)
+        self.assertContains(response, f'data-redirect-url="{reverse("standalone:demo_practice", args=[access.token])}"', html=False)
+        self.assertContains(response, 'data-delay-ms="15000"', html=False)
+        self.assertContains(response, f'content="15;url={reverse("standalone:demo_practice", args=[access.token])}"', html=False)
+        self.assertNotContains(response, 'data-home-cta', html=False)
+        self.assertNotContains(response, "Open dashboard")
+        self.assertNotContains(response, "Sign in")
+
+    def test_root_enables_demo_mode_for_existing_ocr_course(self):
+        course, access = self.create_ocr_demo_course(demo_enabled=False)
+
+        response = self.client.get(reverse("website:home"))
+
+        self.assertEqual(response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertTrue(course.config.demo_enabled)
+        self.assertContains(response, f'data-redirect-url="{reverse("standalone:demo_practice", args=[access.token])}"', html=False)
+
+    def test_root_returns_404_when_ocr_course_is_missing(self):
+        response = self.client.get(reverse("website:home"))
+
+        self.assertEqual(response.status_code, 404)
 
 
 class AdminBootstrapCommandTests(TestCase):

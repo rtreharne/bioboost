@@ -118,6 +118,28 @@ if (validationRoot && validationDataNode) {
     renderMath() {},
   };
 
+  function setValidationSubmitButton(button, { label, iconOnly = false } = {}) {
+    if (!button) {
+      return;
+    }
+    const safeLabel = String(label || "").trim() || "Submit";
+    button.dataset.iconOnly = iconOnly ? "true" : "false";
+    button.setAttribute("aria-label", safeLabel);
+    button.title = safeLabel;
+    if (iconOnly) {
+      button.innerHTML = `
+        <span class="preview-composer-submit-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+            <path d="M3 20.25 21 12 3 3.75v6.38l12 1.87-12 1.87v6.38Z"></path>
+          </svg>
+        </span>
+        <span class="preview-sr-only">${safeLabel}</span>
+      `;
+      return;
+    }
+    button.textContent = safeLabel;
+  }
+
   function isOfficialValidation() {
     return sessionState.mode === "digital_invigilation";
   }
@@ -440,6 +462,12 @@ if (validationRoot && validationDataNode) {
     if (!input) {
       return;
     }
+    if (currentInputMode() === "waq") {
+      input.style.overflowY = "auto";
+      input.style.height = "72px";
+      return;
+    }
+    input.style.overflowY = "hidden";
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
   }
@@ -1039,26 +1067,44 @@ if (validationRoot && validationDataNode) {
         "min-width",
         "display",
         "justify-self",
-        "overflow-x",
-        "overflow-y",
-        "overscroll-behavior-x",
       ].forEach((property) => {
         message.style.removeProperty(property);
       });
-      message.style.webkitOverflowScrolling = "";
+      message.querySelectorAll(".preview-math-overflow-block").forEach((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return;
+        }
+        node.classList.remove("preview-math-overflow-block");
+        [
+          "overflow-x",
+          "overflow-y",
+          "overscroll-behavior-x",
+          "max-width",
+        ].forEach((property) => {
+          node.style.removeProperty(property);
+        });
+        node.style.webkitOverflowScrolling = "";
+      });
     }
 
-    function applyMathOverflowStyles(message) {
+    function applyMathOverflowStyles(message, overflowTargets) {
       message.classList.add("preview-message--math-overflow");
       message.style.setProperty("width", "100%", "important");
       message.style.setProperty("max-width", "100%", "important");
       message.style.setProperty("min-width", "0", "important");
       message.style.setProperty("display", "block", "important");
       message.style.setProperty("justify-self", "stretch", "important");
-      message.style.setProperty("overflow-x", "auto", "important");
-      message.style.setProperty("overflow-y", "hidden", "important");
-      message.style.setProperty("overscroll-behavior-x", "contain", "important");
-      message.style.webkitOverflowScrolling = "touch";
+      overflowTargets.forEach((target) => {
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        target.classList.add("preview-math-overflow-block");
+        target.style.setProperty("overflow-x", "auto", "important");
+        target.style.setProperty("overflow-y", "hidden", "important");
+        target.style.setProperty("overscroll-behavior-x", "contain", "important");
+        target.style.setProperty("max-width", "100%", "important");
+        target.style.webkitOverflowScrolling = "touch";
+      });
     }
 
     transcriptNode.querySelectorAll(".preview-message").forEach((message) => {
@@ -1073,12 +1119,18 @@ if (validationRoot && validationDataNode) {
         return;
       }
       const messageWidth = message.getBoundingClientRect().width;
+      const overflowTargets = new Set();
       const hasOverflow = mathNodes.some((node) => {
         const element = node;
-        return element.scrollWidth - transcriptAvailableWidth > 2 || element.getBoundingClientRect().width - transcriptAvailableWidth > 2;
+        const isOverflowing = element.scrollWidth - transcriptAvailableWidth > 2
+          || element.getBoundingClientRect().width - transcriptAvailableWidth > 2;
+        if (isOverflowing) {
+          overflowTargets.add(element.closest(".katex-display") || element);
+        }
+        return isOverflowing;
       });
       if (messageWidth - transcriptAvailableWidth > 2 || hasOverflow) {
-        applyMathOverflowStyles(message);
+        applyMathOverflowStyles(message, overflowTargets);
       }
     });
   }
@@ -1433,7 +1485,10 @@ if (validationRoot && validationDataNode) {
     }
     if (submitButton) {
       submitButton.hidden = !showWaqComposer;
-      submitButton.textContent = requestInFlight && activeAction === "submit" ? "Sending..." : "Send";
+      setValidationSubmitButton(submitButton, {
+        label: requestInFlight && activeAction === "submit" ? "Submitting answer" : "Submit answer",
+        iconOnly: true,
+      });
       submitButton.disabled = requestInFlight || !showWaqComposer || !input?.value.trim();
     }
     if (nextButton) {
@@ -1671,7 +1726,6 @@ if (validationRoot && validationDataNode) {
       } else if (message.answered && message.review_visible && Array.isArray(message.correct_answers) && message.correct_answers.length) {
         article.appendChild(renderAnsweredOptions(message));
       }
-      richText.renderMath(article);
       return article;
     }
 
@@ -1700,7 +1754,6 @@ if (validationRoot && validationDataNode) {
         });
         article.appendChild(optionsWrapper);
       }
-      richText.renderMath(article);
       return article;
     }
 
@@ -1925,7 +1978,6 @@ if (validationRoot && validationDataNode) {
     }
 
     appendFormattedMessageContent(article, message.text || "");
-    richText.renderMath(article);
     return article;
   }
 

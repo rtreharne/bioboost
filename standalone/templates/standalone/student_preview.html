@@ -38,6 +38,7 @@
   data-hide-flag-actions="{% if hide_flag_actions %}true{% else %}false{% endif %}"
   data-practice-validation-url="{{ practice_validation_url|default:'' }}"
   data-stats-icon-url="{% static 'standalone/img/my-stats-icon.svg' %}"
+  data-message-background-url="{% static 'standalone/img/ninepointeightonebackground.png' %}"
 >
   <div class="preview-launch-loader" hidden data-preview-launch-loader>
     <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing Test Me">
@@ -56,7 +57,7 @@
         <div class="preview-sidebar-title-row preview-messenger-sidebar-title-row">
           <a
             class="preview-messenger-brand"
-            href="{% if is_demo_mode %}{{ demo_home_url|default:'#' }}{% elif user.is_authenticated %}{% url 'standalone:dashboard' %}{% else %}{% url 'website:home' %}{% endif %}"
+            href="{% url 'website:home' %}"
             aria-label="FOREVER PHYSICS"
           >
             <span class="preview-messenger-brand-wordmark">ForeverPhysics</span>
@@ -65,6 +66,7 @@
             class="preview-messenger-menu-trigger"
             type="button"
             aria-label="Sidebar menu"
+            hidden
           >
             <span aria-hidden="true">&#8942;</span>
           </button>
@@ -127,7 +129,11 @@
           aria-label="Back to conversations"
           data-preview-chat-back
         >
-          <span aria-hidden="true">&#8249;</span>
+          <span class="preview-messenger-back-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <path d="M14.7 5.3a1 1 0 0 1 0 1.4L9.41 12l5.29 5.3a1 1 0 1 1-1.41 1.4l-6-6a1 1 0 0 1 0-1.4l6-6a1 1 0 0 1 1.41 0Z"></path>
+            </svg>
+          </span>
         </button>
       {% endif %}
       <div class="preview-chat-header-main">
@@ -183,6 +189,25 @@
       data-preview-scroll-bottom
     >
       <span aria-hidden="true">↓</span>
+    </button>
+    <button
+      class="preview-calculator-trigger"
+      type="button"
+      aria-label="Open calculator"
+      data-preview-calculator-trigger
+    >
+      <span class="preview-calculator-trigger-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+          <rect x="5" y="3.5" width="14" height="17" rx="3.25"></rect>
+          <rect x="7.75" y="6.75" width="8.5" height="3.1" rx="1.1"></rect>
+          <circle cx="9" cy="13" r="1"></circle>
+          <circle cx="12" cy="13" r="1"></circle>
+          <circle cx="15" cy="13" r="1"></circle>
+          <circle cx="9" cy="16.5" r="1"></circle>
+          <circle cx="12" cy="16.5" r="1"></circle>
+          <rect x="14.05" y="15.45" width="1.9" height="4.1" rx="0.95"></rect>
+        </svg>
+      </span>
     </button>
     <form class="preview-chat-form">
       <p class="preview-chat-status" role="status" aria-live="polite"></p>
@@ -280,6 +305,6 @@
 {% block extra_body %}
   <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
   <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
-  <script src="{% static 'standalone/js/math-render.js' %}"></script>
-  <script src="{% static 'standalone/js/student-preview.js' %}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}?v=20260707"></script>
+  <script src="{% static 'standalone/js/student-preview.js' %}?v=20260707b"></script>
 {% endblock %}

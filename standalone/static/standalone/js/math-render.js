@@ -119,6 +119,7 @@
       throwOnError: false,
       strict: "ignore",
       ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      ignoredClasses: ["katex", "katex-display"],
     });
   }
 
@@ -374,6 +375,17 @@
 
     for (let iteration = 0; iteration < 4; iteration += 1) {
       const next = normalized
+        .replace(/^\\\[\s*([\s\S]*?)\s*\\\]\s*$/g, "$1")
+        .replace(/^\\\(\s*([\s\S]*?)\s*\\\)\s*([,.;:]?)\s*$/g, "$1$2")
+        .replace(/\\\\(?=[A-Za-z,;:.!])/g, "\\");
+      if (next === normalized) {
+        break;
+      }
+      normalized = next;
+    }
+
+    for (let iteration = 0; iteration < 4; iteration += 1) {
+      const next = normalized
         .replace(/\\operatorname\{radians\}\\left\(([^()]*)\\right\)/g, (match, argument) => formatAngleTex(argument))
         .replace(/\bradians\(([^()]*)\)/g, (match, argument) => formatAngleTex(convertInlineExpressionToTex(argument)));
       if (next === normalized) {
@@ -411,6 +423,20 @@
       return true;
     }
     return words.length >= 3 && /[.,:]/.test(proseCheck);
+  }
+
+  function normalizeStandaloneMathBlockText(blockText) {
+    const normalized = decodeLiteralUnicodeEscapes(blockText).trim();
+    if (!normalized) {
+      return "";
+    }
+    if (normalized.startsWith("\\[") && normalized.endsWith("\\]")) {
+      return `\\[${normalizeStoredMathBody(normalized.slice(2, -2))}\\]`;
+    }
+    if (normalized.startsWith("\\(") && normalized.endsWith("\\)")) {
+      return `\\(${normalizeStoredMathBody(normalized.slice(2, -2))}\\)`;
+    }
+    return `\\[${normalizeStoredMathBody(normalized)}\\]`;
   }
 
   function normalizeNestedDisplayMathWrappers(text) {
@@ -864,6 +890,7 @@
     const paragraphLines = [];
     let activeListType = "";
     let activeListItems = [];
+    let appendedAny = false;
 
     function flushParagraph() {
       if (!paragraphLines.length) {
@@ -871,6 +898,7 @@
       }
       appendTextBlock(container, paragraphLines.join("\n").trim(), options);
       paragraphLines.length = 0;
+      appendedAny = true;
       return true;
     }
 
@@ -889,6 +917,7 @@
       container.appendChild(list);
       activeListType = "";
       activeListItems = [];
+      appendedAny = true;
       return true;
     }
 
@@ -904,6 +933,9 @@
       const trimmed = line.trim();
       const isUnorderedListItem = unorderedListPattern.test(line);
       const isOrderedListItem = !isUnorderedListItem && orderedListPattern.test(line);
+      const isStandaloneMathLine = Boolean(
+        trimmed && (trimmed.startsWith("\\[") || trimmed.startsWith("\\(") || looksLikeStandaloneLatexMathBlock(trimmed)),
+      );
 
       if (isUnorderedListItem || isOrderedListItem) {
         flushParagraph();
@@ -932,19 +964,30 @@
         flushParagraph();
         return;
       }
+      if (isStandaloneMathLine) {
+        flushParagraph();
+        appendTextBlock(container, trimmed, options);
+        appendedAny = true;
+        return;
+      }
       paragraphLines.push(line);
     });
 
-    const appendedList = flushList();
-    const appendedParagraph = flushParagraph();
-    return appendedList || appendedParagraph;
+    flushList();
+    flushParagraph();
+    return appendedAny;
   }
 
   function appendTextBlock(container, blockText, options = {}) {
-    if (looksLikeStandaloneLatexMathBlock(blockText)) {
+    const normalized = decodeLiteralUnicodeEscapes(blockText).trim();
+    if (
+      normalized.startsWith("\\[")
+      || normalized.startsWith("\\(")
+      || looksLikeStandaloneLatexMathBlock(normalized)
+    ) {
       const paragraph = document.createElement("p");
       paragraph.className = "preview-message-paragraph";
-      paragraph.textContent = `\\[${normalizeStoredMathBody(blockText)}\\]`;
+      paragraph.textContent = normalizeStandaloneMathBlockText(normalized);
       container.appendChild(paragraph);
       return;
     }
@@ -953,6 +996,22 @@
     paragraph.className = "preview-message-paragraph";
     appendInlineMarkdown(paragraph, blockText, options);
     container.appendChild(paragraph);
+  }
+
+  function normalizeStandaloneMathParagraphs(container) {
+    if (!container) {
+      return;
+    }
+    container.querySelectorAll("p.preview-message-paragraph").forEach((paragraph) => {
+      if (!(paragraph instanceof HTMLElement) || paragraph.childElementCount) {
+        return;
+      }
+      const text = String(paragraph.textContent || "").trim();
+      if (!looksLikeStandaloneLatexMathBlock(text)) {
+        return;
+      }
+      paragraph.textContent = normalizeStandaloneMathBlockText(text);
+    });
   }
 
   function appendFormattedMessageContent(container, text, options = {}) {
@@ -1007,6 +1066,7 @@
       container.appendChild(paragraph);
     }
 
+    normalizeStandaloneMathParagraphs(container);
     renderMath(container);
   }
 

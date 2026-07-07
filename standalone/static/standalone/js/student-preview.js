@@ -33,6 +33,7 @@ if (previewRoot && previewDataNode) {
   const sidebarSummaryToggle = previewRoot.querySelector("[data-preview-sidebar-summary-toggle]");
   const launchLoader = previewRoot.querySelector("[data-preview-launch-loader]");
   const submitButton = form?.querySelector("button[type='submit']");
+  const calculatorTrigger = previewRoot.querySelector("[data-preview-calculator-trigger]");
   const quizMenu = previewRoot.querySelector("[data-quiz-menu]");
   const quizMenuTrigger = previewRoot.querySelector("[data-quiz-menu-trigger]");
   const quizMenuPanel = previewRoot.querySelector("[data-quiz-menu-panel]");
@@ -76,6 +77,7 @@ if (previewRoot && previewDataNode) {
   const hideFlagActions = previewRoot.dataset.hideFlagActions === "true";
   const practiceValidationUrl = String(previewRoot.dataset.practiceValidationUrl || "").trim();
   const statsIconUrl = String(previewRoot.dataset.statsIconUrl || "").trim();
+  const messageBackgroundUrl = String(previewRoot.dataset.messageBackgroundUrl || "").trim();
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = String(previewState.active_block_id || "");
@@ -102,6 +104,8 @@ if (previewRoot && previewDataNode) {
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
+  const calculatorStatesByMessageId = {};
+  const calculatorAnswersByThreadId = {};
   const activeProjectIdsByBlock = {};
   const projectAnswerDraftsById = {};
   const maqSelectionsByQuestionId = {};
@@ -125,7 +129,123 @@ if (previewRoot && previewDataNode) {
     year: "numeric",
   });
   const STATS_THREAD_ID = "__my_stats__";
+  const CALCULATOR_FUNCTION_TOKENS = new Set(["sin(", "cos(", "tan(", "asin(", "acos(", "atan(", "log(", "ln(", "sqrt(", "exp("]);
+  const CALCULATOR_CONSTANT_TOKENS = new Set(["Ans", "pi", "h", "qe", "c"]);
+  const CALCULATOR_OPERATOR_TOKENS = new Set(["+", "-", "*", "/", "^"]);
+  const CALCULATOR_SUPERSCRIPT_MAP = {
+    0: "⁰",
+    1: "¹",
+    2: "²",
+    3: "³",
+    4: "⁴",
+    5: "⁵",
+    6: "⁶",
+    7: "⁷",
+    8: "⁸",
+    9: "⁹",
+    "+": "⁺",
+    "-": "⁻",
+    "(": "⁽",
+    ")": "⁾",
+    ".": "˙",
+    n: "ⁿ",
+    i: "ⁱ",
+    p: "ᵖ",
+    A: "ᴬ",
+    s: "ˢ",
+  };
+  const CALCULATOR_BUTTON_ROWS = [
+    [
+      { label: "AC", action: "clear", tone: "action" },
+      { label: "DEL", action: "delete", tone: "action" },
+      { label: "(", action: "open-paren", tone: "action" },
+      { label: ")", action: "close-paren", tone: "action" },
+      { label: "Ans", action: "constant", value: "Ans", tone: "accent" },
+    ],
+    [
+      { label: "sin", action: "function", value: "sin", tone: "function" },
+      { label: "cos", action: "function", value: "cos", tone: "function" },
+      { label: "tan", action: "function", value: "tan", tone: "function" },
+      { label: "log", action: "function", value: "log", tone: "function" },
+      { label: "ln", action: "function", value: "ln", tone: "function" },
+    ],
+    [
+      { label: "sin⁻¹", action: "function", value: "asin", tone: "function" },
+      { label: "cos⁻¹", action: "function", value: "acos", tone: "function" },
+      { label: "tan⁻¹", action: "function", value: "atan", tone: "function" },
+      { label: "sqrt", action: "function", value: "sqrt", tone: "function" },
+      { label: "exp", action: "function", value: "exp", tone: "function" },
+    ],
+    [
+      { label: "x²", action: "square", tone: "function" },
+      { label: "xⁿ", action: "power", tone: "function" },
+      { label: "×10ⁿ", action: "ten-power", tone: "function" },
+      { label: "π", action: "constant", value: "pi", tone: "accent" },
+      { label: "Std", action: "standard-form", tone: "accent" },
+    ],
+    [
+      { label: "7", action: "digit", value: "7", tone: "number" },
+      { label: "8", action: "digit", value: "8", tone: "number" },
+      { label: "9", action: "digit", value: "9", tone: "number" },
+      { label: "÷", action: "operator", value: "/", tone: "operator" },
+      { label: "×", action: "operator", value: "*", tone: "operator" },
+    ],
+    [
+      { label: "4", action: "digit", value: "4", tone: "number" },
+      { label: "5", action: "digit", value: "5", tone: "number" },
+      { label: "6", action: "digit", value: "6", tone: "number" },
+      { label: "-", action: "operator", value: "-", tone: "operator" },
+      { label: "+", action: "operator", value: "+", tone: "operator" },
+    ],
+    [
+      { label: "1", action: "digit", value: "1", tone: "number" },
+      { label: "2", action: "digit", value: "2", tone: "number" },
+      { label: "3", action: "digit", value: "3", tone: "number" },
+      { label: "+/-", action: "toggle-sign", tone: "accent" },
+      { label: ".", action: "decimal", tone: "number" },
+    ],
+    [
+      { label: "0", action: "digit", value: "0", tone: "number" },
+      { label: "h", action: "constant", value: "h", tone: "accent" },
+      { label: "e", action: "constant", value: "qe", tone: "accent" },
+      { label: "c", action: "constant", value: "c", tone: "accent" },
+      { label: "=", action: "evaluate", tone: "equals" },
+    ],
+  ];
   const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
+  function stableMessageHash(seedText) {
+    let hash = 2166136261;
+    const text = String(seedText || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function applySeededMessageBackground(article, message) {
+    if (!(article instanceof HTMLElement) || !messageBackgroundUrl) {
+      return;
+    }
+    const seedText = [
+      message?.id,
+      message?.created_at,
+      message?.question_id,
+      message?.resource_key,
+      message?.kind,
+      message?.role,
+      message?.text,
+    ].filter(Boolean).join("|");
+    const hash = stableMessageHash(seedText || "preview-message");
+    const positionX = 12 + (hash % 77);
+    const positionY = 10 + (Math.floor(hash / 97) % 81);
+    const sizePx = 520 + (hash % 140);
+    article.style.setProperty("--message-bg-image", `url("${messageBackgroundUrl}")`);
+    article.style.setProperty("--message-bg-x", `${positionX}%`);
+    article.style.setProperty("--message-bg-y", `${positionY}%`);
+    article.style.setProperty("--message-bg-size", `${sizePx}px auto`);
+  }
+
   const richText = window.StandaloneRichText || {
     appendFormattedMessageContent(container, text) {
       if (!container) {
@@ -153,6 +273,28 @@ if (previewRoot && previewDataNode) {
     },
     renderMath() {},
   };
+
+  function setComposerSubmitButton(button, { label, iconOnly = false } = {}) {
+    if (!button) {
+      return;
+    }
+    const safeLabel = String(label || "").trim() || "Submit";
+    button.dataset.iconOnly = iconOnly ? "true" : "false";
+    button.setAttribute("aria-label", safeLabel);
+    button.title = safeLabel;
+    if (iconOnly) {
+      button.innerHTML = `
+        <span class="preview-composer-submit-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+            <path d="M3 20.25 21 12 3 3.75v6.38l12 1.87-12 1.87v6.38Z"></path>
+          </svg>
+        </span>
+        <span class="preview-sr-only">${safeLabel}</span>
+      `;
+      return;
+    }
+    button.textContent = safeLabel;
+  }
 
   function activeBlockStorageKey() {
     const courseId = String(previewState?.course?.id || previewRoot.dataset.courseId || "");
@@ -383,6 +525,14 @@ if (previewRoot && previewDataNode) {
 
   function isStatsView() {
     return String(activeBlockId || "") === STATS_THREAD_ID;
+  }
+
+  function currentConversationKey() {
+    if (isStatsView()) {
+      return STATS_THREAD_ID;
+    }
+    const block = currentBlock();
+    return block ? String(block.id) : "";
   }
 
   function currentBlock() {
@@ -679,45 +829,27 @@ if (previewRoot && previewDataNode) {
     return question?.question_type === "waq" ? question : null;
   }
 
-  function isAdvancedQuestionType(questionType) {
-    return questionType === "maq" || questionType === "waq";
-  }
-
-  function advancedQuestionUnlockText(block = currentBlock()) {
-    const metrics = block?.metrics || {};
-    const threshold = Number(metrics.advanced_question_start_percent || 0);
-    const completed = Number(metrics.completed_count || 0);
-    const target = Number(metrics.target_question_count || 0);
-    if (!threshold || !target) {
-      return "Locked";
-    }
-    return `Unlocks at ${threshold}% engagement target (${completed}/${target})`;
-  }
-
   function syncQuizMenuItems() {
     if (!quizMenuPanel) {
       return;
     }
     const block = currentBlock();
-    const unlocked = block?.metrics?.advanced_question_types_unlocked !== false;
     const availableManualQuestionTypes = Array.isArray(block?.available_manual_question_types)
       ? block.available_manual_question_types
       : ["mcq", "maq", "waq"];
     quizMenuPanel.querySelectorAll("[data-quiz-type]").forEach((button) => {
       const questionType = button.dataset.quizType || "";
       const isVisible = availableManualQuestionTypes.includes(questionType);
-      const locked = isAdvancedQuestionType(questionType) && !unlocked;
       const copy = button.querySelector(".preview-quiz-menu-item-copy");
       if (copy && !copy.dataset.defaultText) {
         copy.dataset.defaultText = copy.textContent || "";
       }
       button.hidden = !isVisible;
       button.toggleAttribute("hidden", !isVisible);
-      button.disabled = requestInFlight || locked;
+      button.disabled = requestInFlight;
       button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
-      button.classList.toggle("is-locked", locked);
       if (copy) {
-        copy.textContent = locked ? advancedQuestionUnlockText(block) : copy.dataset.defaultText;
+        copy.textContent = copy.dataset.defaultText;
       }
     });
   }
@@ -738,12 +870,777 @@ if (previewRoot && previewDataNode) {
     return updatedQuestion;
   }
 
-  function blockInlineMessages(blockId) {
-    const key = String(blockId);
+  function threadInlineMessages(threadId) {
+    const key = String(threadId || "");
     if (!Array.isArray(inlineMessagesByBlock[key])) {
       inlineMessagesByBlock[key] = [];
     }
     return inlineMessagesByBlock[key];
+  }
+
+  function blockInlineMessages(blockId) {
+    return threadInlineMessages(blockId);
+  }
+
+  function createCalculatorState() {
+    return {
+      tokens: [],
+      resultText: "0",
+      error: "",
+      lastComputedValue: null,
+      justEvaluated: false,
+      standardFormActive: false,
+    };
+  }
+
+  function ensureCalculatorState(messageId) {
+    const key = String(messageId || "");
+    if (!calculatorStatesByMessageId[key]) {
+      calculatorStatesByMessageId[key] = createCalculatorState();
+    }
+    return calculatorStatesByMessageId[key];
+  }
+
+  function cleanupCalculatorState(messageId) {
+    delete calculatorStatesByMessageId[String(messageId || "")];
+  }
+
+  function calculatorThreadAnswer(threadId) {
+    const key = String(threadId || "");
+    return Number.isFinite(calculatorAnswersByThreadId[key]) ? calculatorAnswersByThreadId[key] : null;
+  }
+
+  function setCalculatorThreadAnswer(threadId, value) {
+    const key = String(threadId || "");
+    if (!key || !Number.isFinite(value)) {
+      return;
+    }
+    calculatorAnswersByThreadId[key] = value;
+  }
+
+  function removeCalculatorInlineMessages(threadId) {
+    const inlineMessages = threadInlineMessages(threadId);
+    if (!inlineMessages.length) {
+      return;
+    }
+    const retainedMessages = inlineMessages.filter((message) => {
+      if (message.kind !== "calculator") {
+        return true;
+      }
+      cleanupCalculatorState(message.id);
+      return false;
+    });
+    inlineMessages.length = 0;
+    retainedMessages.forEach((message) => inlineMessages.push(message));
+  }
+
+  function calculatorTokenType(token) {
+    if (CALCULATOR_FUNCTION_TOKENS.has(token)) {
+      return "function";
+    }
+    if (CALCULATOR_CONSTANT_TOKENS.has(token)) {
+      return "constant";
+    }
+    if (CALCULATOR_OPERATOR_TOKENS.has(token)) {
+      return "operator";
+    }
+    if (token === "(") {
+      return "open-paren";
+    }
+    if (token === ")") {
+      return "close-paren";
+    }
+    if (typeof token === "string" && /^-?(?:\d+\.?\d*|\d*\.?\d+|-?\d+\.?)$/.test(token)) {
+      return "number";
+    }
+    return "unknown";
+  }
+
+  function calculatorDisplayToken(token) {
+    return {
+      "*": "×",
+      "/": "÷",
+      pi: "π",
+      qe: "e",
+      "asin(": "sin⁻¹(",
+      "acos(": "cos⁻¹(",
+      "atan(": "tan⁻¹(",
+    }[token] || token;
+  }
+
+  function calculatorSuperscriptText(value) {
+    return String(value || "").split("").map((character) => CALCULATOR_SUPERSCRIPT_MAP[character] || character).join("");
+  }
+
+  function formatCalculatorTokens(tokens) {
+    const parts = [];
+    let exponentMode = false;
+    let exponentDepth = 0;
+    (tokens || []).forEach((token) => {
+      if (token === "^") {
+        exponentMode = true;
+        exponentDepth = 0;
+        return;
+      }
+      if (exponentMode) {
+        const superscriptToken = calculatorSuperscriptText(calculatorDisplayToken(token));
+        if (!parts.length) {
+          parts.push(superscriptToken);
+        } else {
+          parts[parts.length - 1] = `${parts[parts.length - 1]}${superscriptToken}`;
+        }
+        if (token === "(") {
+          exponentDepth += 1;
+          return;
+        }
+        if (token === ")") {
+          exponentDepth = Math.max(0, exponentDepth - 1);
+          if (exponentDepth === 0) {
+            exponentMode = false;
+          }
+          return;
+        }
+        if (exponentDepth === 0) {
+          exponentMode = false;
+        }
+        return;
+      }
+      parts.push(calculatorDisplayToken(token));
+    });
+    return parts.join(" ");
+  }
+
+  function normalizeCalculatorNumberString(value) {
+    let text = String(value || "");
+    if (!text) {
+      return "0";
+    }
+    if (text.includes(".")) {
+      text = text.replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "").replace(/\.$/u, "");
+    }
+    if (text === "-0") {
+      return "0";
+    }
+    return text || "0";
+  }
+
+  function calculatorPlainString(value) {
+    if (!Number.isFinite(value)) {
+      return "0";
+    }
+    const raw = String(value);
+    if (!/[eE]/.test(raw)) {
+      return normalizeCalculatorNumberString(raw);
+    }
+    const [mantissaPart, exponentPart] = raw.toLowerCase().split("e");
+    const exponent = Number(exponentPart || 0);
+    let sign = "";
+    let mantissa = mantissaPart;
+    if (mantissa.startsWith("-")) {
+      sign = "-";
+      mantissa = mantissa.slice(1);
+    }
+    const [whole = "0", fraction = ""] = mantissa.split(".");
+    const digits = `${whole}${fraction}`.replace(/^0+(?=\d)/u, "") || "0";
+    const decimalIndex = whole.length + exponent;
+    if (decimalIndex <= 0) {
+      return normalizeCalculatorNumberString(`${sign}0.${"0".repeat(Math.abs(decimalIndex))}${digits}`);
+    }
+    if (decimalIndex >= digits.length) {
+      return normalizeCalculatorNumberString(`${sign}${digits}${"0".repeat(decimalIndex - digits.length)}`);
+    }
+    return normalizeCalculatorNumberString(`${sign}${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`);
+  }
+
+  function roundCalculatorValue(value) {
+    return Number(value.toPrecision(12));
+  }
+
+  function formatCalculatorValue(value) {
+    return normalizeCalculatorNumberString(calculatorPlainString(roundCalculatorValue(value)));
+  }
+
+  function formatCalculatorStandardForm(value) {
+    if (!Number.isFinite(value)) {
+      return "0";
+    }
+    const rounded = roundCalculatorValue(value);
+    if (rounded === 0) {
+      return "0";
+    }
+    const exponent = Math.floor(Math.log10(Math.abs(rounded)));
+    const mantissa = roundCalculatorValue(rounded / (10 ** exponent));
+    return `${formatCalculatorValue(mantissa)} × 10${calculatorSuperscriptText(exponent)}`;
+  }
+
+  function calculatorNeedsImplicitMultiply(tokens, nextType) {
+    if (!tokens.length) {
+      return false;
+    }
+    const previousType = calculatorTokenType(tokens[tokens.length - 1]);
+    const previousCanMultiply = ["number", "constant", "close-paren"].includes(previousType);
+    const nextCanMultiply = ["number", "constant", "function", "open-paren"].includes(nextType);
+    return previousCanMultiply && nextCanMultiply;
+  }
+
+  function calculatorParenthesisBalance(tokens) {
+    return (tokens || []).reduce((balance, token) => {
+      if (token === "(" || CALCULATOR_FUNCTION_TOKENS.has(token)) {
+        return balance + 1;
+      }
+      if (token === ")") {
+        return balance - 1;
+      }
+      return balance;
+    }, 0);
+  }
+
+  function calculatorIsUnaryMinus(tokens, index) {
+    if ((tokens[index] || "") !== "-") {
+      return false;
+    }
+    if (index === 0) {
+      return true;
+    }
+    const previousType = calculatorTokenType(tokens[index - 1]);
+    return ["operator", "open-paren", "function"].includes(previousType);
+  }
+
+  function calculatorSerializeTokens(tokens) {
+    return (tokens || []).join("");
+  }
+
+  function calculatorResetForInput(state, inputType) {
+    if (!state.justEvaluated) {
+      state.error = "";
+      state.standardFormActive = false;
+      return;
+    }
+    if (inputType === "operator" && Number.isFinite(state.lastComputedValue)) {
+      state.tokens = [calculatorPlainString(state.lastComputedValue)];
+    } else {
+      state.tokens = [];
+      state.resultText = "0";
+    }
+    state.error = "";
+    state.justEvaluated = false;
+    state.standardFormActive = false;
+  }
+
+  function calculatorAppendDigit(state, digit) {
+    calculatorResetForInput(state, "number");
+    const tokens = state.tokens;
+    const lastToken = tokens[tokens.length - 1] || "";
+    if (calculatorTokenType(lastToken) === "number") {
+      tokens[tokens.length - 1] = `${lastToken}${digit}`;
+      return;
+    }
+    if (calculatorNeedsImplicitMultiply(tokens, "number")) {
+      tokens.push("*");
+    }
+    tokens.push(String(digit));
+  }
+
+  function calculatorAppendDecimal(state) {
+    calculatorResetForInput(state, "number");
+    const tokens = state.tokens;
+    const lastToken = tokens[tokens.length - 1] || "";
+    if (calculatorTokenType(lastToken) === "number") {
+      if (!lastToken.includes(".")) {
+        tokens[tokens.length - 1] = `${lastToken}.`;
+      }
+      return;
+    }
+    if (calculatorNeedsImplicitMultiply(tokens, "number")) {
+      tokens.push("*");
+    }
+    tokens.push("0.");
+  }
+
+  function calculatorAppendConstant(state, token) {
+    calculatorResetForInput(state, "constant");
+    if (calculatorNeedsImplicitMultiply(state.tokens, "constant")) {
+      state.tokens.push("*");
+    }
+    state.tokens.push(token);
+  }
+
+  function calculatorAppendFunction(state, functionName) {
+    calculatorResetForInput(state, "function");
+    if (calculatorNeedsImplicitMultiply(state.tokens, "function")) {
+      state.tokens.push("*");
+    }
+    state.tokens.push(`${functionName}(`);
+  }
+
+  function calculatorAppendOpenParen(state) {
+    calculatorResetForInput(state, "open-paren");
+    if (calculatorNeedsImplicitMultiply(state.tokens, "open-paren")) {
+      state.tokens.push("*");
+    }
+    state.tokens.push("(");
+  }
+
+  function calculatorAppendCloseParen(state) {
+    calculatorResetForInput(state, "close-paren");
+    const lastType = calculatorTokenType(state.tokens[state.tokens.length - 1] || "");
+    if (!state.tokens.length || ["operator", "open-paren", "function"].includes(lastType)) {
+      return;
+    }
+    if (calculatorParenthesisBalance(state.tokens) <= 0) {
+      return;
+    }
+    state.tokens.push(")");
+  }
+
+  function calculatorAppendOperator(state, operator) {
+    calculatorResetForInput(state, "operator");
+    const tokens = state.tokens;
+    const lastToken = tokens[tokens.length - 1] || "";
+    const lastType = calculatorTokenType(lastToken);
+    if (!tokens.length) {
+      if (operator === "-") {
+        tokens.push("-");
+      }
+      return;
+    }
+    if (lastType === "operator") {
+      tokens[tokens.length - 1] = operator;
+      return;
+    }
+    if (["open-paren", "function"].includes(lastType)) {
+      if (operator === "-") {
+        tokens.push("-");
+      }
+      return;
+    }
+    tokens.push(operator);
+  }
+
+  function calculatorApplySquare(state) {
+    calculatorResetForInput(state, "operator");
+    const lastType = calculatorTokenType(state.tokens[state.tokens.length - 1] || "");
+    if (!state.tokens.length || ["operator", "open-paren", "function"].includes(lastType)) {
+      return;
+    }
+    state.tokens.push("^");
+    state.tokens.push("2");
+  }
+
+  function calculatorApplyPower(state) {
+    calculatorAppendOperator(state, "^");
+  }
+
+  function calculatorApplyTenPower(state) {
+    calculatorResetForInput(state, "operator");
+    const lastType = calculatorTokenType(state.tokens[state.tokens.length - 1] || "");
+    if (!state.tokens.length || ["operator", "open-paren", "function"].includes(lastType)) {
+      return;
+    }
+    state.tokens.push("*");
+    state.tokens.push("10");
+    state.tokens.push("^");
+  }
+
+  function calculatorToggleSign(state) {
+    calculatorResetForInput(state, "number");
+    const tokens = state.tokens;
+    const lastIndex = tokens.length - 1;
+    const lastToken = tokens[lastIndex] || "";
+    if (calculatorTokenType(lastToken) === "number") {
+      if (lastToken.startsWith("-")) {
+        tokens[lastIndex] = lastToken.slice(1) || "0";
+      } else {
+        tokens[lastIndex] = `-${lastToken}`;
+      }
+      return;
+    }
+    if (lastIndex >= 0 && calculatorIsUnaryMinus(tokens, lastIndex)) {
+      tokens.pop();
+      return;
+    }
+    if (!tokens.length || ["operator", "open-paren", "function"].includes(calculatorTokenType(lastToken))) {
+      tokens.push("-");
+    }
+  }
+
+  function calculatorDelete(state) {
+    state.error = "";
+    state.standardFormActive = false;
+    state.justEvaluated = false;
+    const tokens = state.tokens;
+    const lastToken = tokens[tokens.length - 1] || "";
+    if (!tokens.length) {
+      state.resultText = "0";
+      return;
+    }
+    if (calculatorTokenType(lastToken) === "number" && lastToken.length > 1) {
+      tokens[tokens.length - 1] = lastToken.slice(0, -1);
+      if (!tokens[tokens.length - 1]) {
+        tokens.pop();
+      }
+      return;
+    }
+    tokens.pop();
+  }
+
+  function calculatorClear(state) {
+    state.tokens = [];
+    state.resultText = "0";
+    state.error = "";
+    state.lastComputedValue = null;
+    state.justEvaluated = false;
+    state.standardFormActive = false;
+  }
+
+  function tokenizeCalculatorExpression(expression) {
+    const tokens = [];
+    let index = 0;
+    const source = String(expression || "");
+    while (index < source.length) {
+      const character = source[index];
+      if (/\s/u.test(character)) {
+        index += 1;
+        continue;
+      }
+      if (/[0-9.]/u.test(character)) {
+        let nextIndex = index + 1;
+        while (nextIndex < source.length && /[0-9.]/u.test(source[nextIndex])) {
+          nextIndex += 1;
+        }
+        tokens.push({ type: "number", value: source.slice(index, nextIndex) });
+        index = nextIndex;
+        continue;
+      }
+      if (/[A-Za-z]/u.test(character)) {
+        let nextIndex = index + 1;
+        while (nextIndex < source.length && /[A-Za-z]/u.test(source[nextIndex])) {
+          nextIndex += 1;
+        }
+        tokens.push({ type: "identifier", value: source.slice(index, nextIndex) });
+        index = nextIndex;
+        continue;
+      }
+      if ("+-*/^()".includes(character)) {
+        tokens.push({ type: "symbol", value: character });
+        index += 1;
+        continue;
+      }
+      throw new Error("Invalid character");
+    }
+    return tokens;
+  }
+
+  function evaluateCalculatorExpression(tokens, ansValue) {
+    const expression = calculatorSerializeTokens(tokens);
+    if (!expression) {
+      throw new Error("Enter an expression");
+    }
+    const parsedTokens = tokenizeCalculatorExpression(expression);
+    let index = 0;
+
+    function currentToken() {
+      return parsedTokens[index] || null;
+    }
+
+    function consumeSymbol(symbol) {
+      const token = currentToken();
+      if (token?.type === "symbol" && token.value === symbol) {
+        index += 1;
+        return true;
+      }
+      return false;
+    }
+
+    function expectSymbol(symbol) {
+      if (!consumeSymbol(symbol)) {
+        throw new Error("Invalid expression");
+      }
+    }
+
+    function parseExpression() {
+      let value = parseTerm();
+      while (true) {
+        if (consumeSymbol("+")) {
+          value += parseTerm();
+          continue;
+        }
+        if (consumeSymbol("-")) {
+          value -= parseTerm();
+          continue;
+        }
+        break;
+      }
+      return value;
+    }
+
+    function parseTerm() {
+      let value = parsePower();
+      while (true) {
+        if (consumeSymbol("*")) {
+          value *= parsePower();
+          continue;
+        }
+        if (consumeSymbol("/")) {
+          const divisor = parsePower();
+          if (Math.abs(divisor) < 1e-12) {
+            throw new Error("Cannot divide by zero");
+          }
+          value /= divisor;
+          continue;
+        }
+        break;
+      }
+      return value;
+    }
+
+    function parsePower() {
+      let value = parseUnary();
+      if (consumeSymbol("^")) {
+        value = value ** parsePower();
+      }
+      return value;
+    }
+
+    function parseUnary() {
+      if (consumeSymbol("+")) {
+        return parseUnary();
+      }
+      if (consumeSymbol("-")) {
+        return -parseUnary();
+      }
+      return parsePrimary();
+    }
+
+    function applyCalculatorFunction(name, inputValue) {
+      if (!Number.isFinite(inputValue)) {
+        throw new Error("Invalid expression");
+      }
+      const radians = (inputValue * Math.PI) / 180;
+      switch (name) {
+        case "sin":
+          return Math.sin(radians);
+        case "cos":
+          return Math.cos(radians);
+        case "tan":
+          if (Math.abs(Math.cos(radians)) < 1e-12) {
+            throw new Error("tan undefined");
+          }
+          return Math.tan(radians);
+        case "asin":
+          if (inputValue < -1 || inputValue > 1) {
+            throw new Error("sin⁻¹ domain error");
+          }
+          return (Math.asin(inputValue) * 180) / Math.PI;
+        case "acos":
+          if (inputValue < -1 || inputValue > 1) {
+            throw new Error("cos⁻¹ domain error");
+          }
+          return (Math.acos(inputValue) * 180) / Math.PI;
+        case "atan":
+          return (Math.atan(inputValue) * 180) / Math.PI;
+        case "sqrt":
+          if (inputValue < 0) {
+            throw new Error("sqrt domain error");
+          }
+          return Math.sqrt(inputValue);
+        case "log":
+          if (inputValue <= 0) {
+            throw new Error("log domain error");
+          }
+          return Math.log10(inputValue);
+        case "ln":
+          if (inputValue <= 0) {
+            throw new Error("ln domain error");
+          }
+          return Math.log(inputValue);
+        case "exp":
+          return Math.exp(inputValue);
+        default:
+          throw new Error("Invalid function");
+      }
+    }
+
+    function parsePrimary() {
+      const token = currentToken();
+      if (!token) {
+        throw new Error("Incomplete expression");
+      }
+      if (token.type === "number") {
+        index += 1;
+        const numericValue = Number(token.value);
+        if (!Number.isFinite(numericValue)) {
+          throw new Error("Invalid number");
+        }
+        return numericValue;
+      }
+      if (token.type === "identifier") {
+        index += 1;
+        const identifier = token.value;
+        if (identifier === "Ans") {
+          if (!Number.isFinite(ansValue)) {
+            throw new Error("Ans unavailable");
+          }
+          return ansValue;
+        }
+        if (identifier === "pi") {
+          return Math.PI;
+        }
+        if (identifier === "h") {
+          return 6.62607015e-34;
+        }
+        if (identifier === "qe") {
+          return 1.602176634e-19;
+        }
+        if (identifier === "c") {
+          return 299792458;
+        }
+        expectSymbol("(");
+        const inputValue = parseExpression();
+        expectSymbol(")");
+        return applyCalculatorFunction(identifier, inputValue);
+      }
+      if (consumeSymbol("(")) {
+        const value = parseExpression();
+        expectSymbol(")");
+        return value;
+      }
+      throw new Error("Invalid expression");
+    }
+
+    const value = parseExpression();
+    if (index < parsedTokens.length) {
+      throw new Error("Invalid expression");
+    }
+    if (!Number.isFinite(value)) {
+      throw new Error("Result out of range");
+    }
+    return roundCalculatorValue(value);
+  }
+
+  function calculatorEvaluate(state, threadId) {
+    try {
+      const answer = evaluateCalculatorExpression(state.tokens, calculatorThreadAnswer(threadId));
+      state.lastComputedValue = answer;
+      state.resultText = formatCalculatorValue(answer);
+      state.error = "";
+      state.justEvaluated = true;
+      state.standardFormActive = false;
+      state.tokens = [calculatorPlainString(answer)];
+      setCalculatorThreadAnswer(threadId, answer);
+    } catch (error) {
+      state.error = error?.message || "Unable to calculate";
+      state.justEvaluated = false;
+      state.standardFormActive = false;
+    }
+  }
+
+  function calculatorShowStandardForm(state) {
+    if (!Number.isFinite(state.lastComputedValue)) {
+      state.error = "No answer to convert";
+      return;
+    }
+    state.resultText = formatCalculatorStandardForm(state.lastComputedValue);
+    state.error = "";
+    state.justEvaluated = true;
+    state.standardFormActive = true;
+  }
+
+  function handleCalculatorButtonPress(message, buttonConfig) {
+    if (!message || !buttonConfig) {
+      return;
+    }
+    const threadId = String(message.thread_id || currentConversationKey() || "");
+    const state = ensureCalculatorState(message.id);
+    switch (buttonConfig.action) {
+      case "digit":
+        calculatorAppendDigit(state, buttonConfig.value);
+        break;
+      case "decimal":
+        calculatorAppendDecimal(state);
+        break;
+      case "operator":
+        calculatorAppendOperator(state, buttonConfig.value);
+        break;
+      case "constant":
+        calculatorAppendConstant(state, buttonConfig.value);
+        break;
+      case "function":
+        calculatorAppendFunction(state, buttonConfig.value);
+        break;
+      case "open-paren":
+        calculatorAppendOpenParen(state);
+        break;
+      case "close-paren":
+        calculatorAppendCloseParen(state);
+        break;
+      case "square":
+        calculatorApplySquare(state);
+        break;
+      case "power":
+        calculatorApplyPower(state);
+        break;
+      case "ten-power":
+        calculatorApplyTenPower(state);
+        break;
+      case "toggle-sign":
+        calculatorToggleSign(state);
+        break;
+      case "delete":
+        calculatorDelete(state);
+        break;
+      case "clear":
+        calculatorClear(state);
+        break;
+      case "standard-form":
+        calculatorShowStandardForm(state);
+        break;
+      case "evaluate":
+        calculatorEvaluate(state, threadId);
+        break;
+      default:
+        return;
+    }
+    renderTranscript("preserve");
+  }
+
+  function renderCalculatorMessage(article, message) {
+    const state = ensureCalculatorState(message.id);
+    article.classList.add("preview-message--calculator");
+    article.dataset.calculatorMessageId = String(message.id || "");
+
+    const shell = document.createElement("div");
+    shell.className = "preview-calculator";
+
+    const screen = document.createElement("div");
+    screen.className = `preview-calculator-screen${state.error ? " is-error" : ""}`;
+    const expression = document.createElement("div");
+    expression.className = "preview-calculator-expression";
+    expression.textContent = formatCalculatorTokens(state.tokens) || "0";
+    const result = document.createElement("div");
+    result.className = "preview-calculator-result";
+    result.textContent = state.error || state.resultText || "0";
+    screen.append(expression, result);
+
+    const grid = document.createElement("div");
+    grid.className = "preview-calculator-grid";
+    CALCULATOR_BUTTON_ROWS.flat().forEach((buttonConfig) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `preview-calculator-key is-${buttonConfig.tone || "number"}`;
+      button.textContent = buttonConfig.label;
+      if (buttonConfig.span) {
+        button.style.setProperty("--preview-calc-key-span", String(buttonConfig.span));
+      }
+      button.addEventListener("click", () => {
+        handleCalculatorButtonPress(message, buttonConfig);
+      });
+      grid.appendChild(button);
+    });
+
+    shell.append(screen, grid);
+    article.appendChild(shell);
+    appendMessageTimestamp(article, message);
   }
 
   function setQuizLoading(blockId, isLoading) {
@@ -1059,6 +1956,12 @@ if (previewRoot && previewDataNode) {
     if (!input) {
       return;
     }
+    if (input.dataset.mode === "waq") {
+      input.style.overflowY = "auto";
+      input.style.height = "72px";
+      return;
+    }
+    input.style.overflowY = "hidden";
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
   }
@@ -1179,9 +2082,9 @@ if (previewRoot && previewDataNode) {
 
     if (input.dataset.mode === "waq") {
       input.value = "";
-      resizeComposerInput();
     }
     input.dataset.mode = "chat";
+    resizeComposerInput();
   }
 
   function syncComposerState() {
@@ -1191,17 +2094,19 @@ if (previewRoot && previewDataNode) {
     if (isStatsView()) {
       previewRoot.classList.remove("is-waq-mode", "is-project-mode");
       form?.classList.remove("is-waq-mode");
+      form?.classList.add("is-read-only");
       quizControls?.classList.remove("is-answer-mode", "is-submit-mode");
       input.placeholder = "Ask";
-      submitButton.textContent = "Quiz";
-      submitButton.disabled = requestInFlight;
+      setComposerSubmitButton(submitButton, { label: "Quiz" });
+      input.disabled = true;
+      submitButton.disabled = true;
       if (quizMenu) {
         quizMenu.hidden = false;
         quizMenu.removeAttribute("hidden");
         quizMenu.setAttribute("aria-hidden", "false");
       }
       if (quizMenuTrigger) {
-        quizMenuTrigger.disabled = requestInFlight;
+        quizMenuTrigger.disabled = true;
       }
       closeQuizMenu();
       renderWaqAlignment(null);
@@ -1217,12 +2122,17 @@ if (previewRoot && previewDataNode) {
     previewRoot.classList.toggle("is-waq-mode", isWaqMode);
     previewRoot.classList.toggle("is-project-mode", isProjectMode);
     form?.classList.toggle("is-waq-mode", isWaqMode);
+    form?.classList.remove("is-read-only");
+    input.disabled = requestInFlight;
     quizControls?.classList.toggle("is-answer-mode", isWaqMode);
     quizControls?.classList.toggle("is-submit-mode", shouldCollapseQuizMenu);
     input.placeholder = isWaqMode
       ? "Write your answer..."
       : (isProjectMode ? "Ask for a hint or nudge..." : "Ask");
-    submitButton.textContent = isWaqMode ? "Submit answer" : (hasText ? "Send" : (isProjectMode ? "Hint" : "Quiz"));
+    setComposerSubmitButton(submitButton, {
+      label: isWaqMode ? "Submit answer" : (hasText ? "Send" : (isProjectMode ? "Hint" : "Quiz")),
+      iconOnly: isWaqMode,
+    });
     submitButton.disabled = requestInFlight || (isWaqMode && !hasText);
     if (quizMenu) {
       quizMenu.hidden = false;
@@ -1444,7 +2354,7 @@ if (previewRoot && previewDataNode) {
   }
 
   function messagePreviewText(message) {
-    if (!message || message.kind === "loading") {
+    if (!message || message.kind === "loading" || message.kind === "calculator") {
       return "";
     }
     if (message.kind === "question") {
@@ -1487,6 +2397,9 @@ if (previewRoot && previewDataNode) {
   function latestConversationTimestamp(block) {
     const messages = combinedTranscript(block);
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (!humanReadableMessage(messages[index])) {
+        continue;
+      }
       const parsed = parseMessageDate(messages[index]?.created_at);
       if (parsed) {
         return parsed;
@@ -1519,18 +2432,15 @@ if (previewRoot && previewDataNode) {
   }
 
   function statsPreviewText(stats = courseStats()) {
-    const completedCount = Number(stats.summary?.completed_count || 0);
-    if (!completedCount) {
-      return "Mastery, coverage, and question-type breakdown.";
-    }
-    return `Mastery ${formatPercentage(stats.summary?.mastery)} • Coverage ${formatPercentage(stats.summary?.coverage)}`;
+    const summary = stats.summary || {};
+    return `Mastery ${formatPercentage(summary.mastery)} • Coverage ${formatPercentage(summary.coverage)} • Streak ${Number(summary.longest_streak || 0)}`;
   }
 
   function statsHeaderMetaText(stats = courseStats()) {
     const updatedLabel = formatConversationTimestamp(stats.latest_answered_at || "");
     return updatedLabel
       ? `Updated ${updatedLabel}`
-      : "Mastery, coverage, and question-type breakdown.";
+      : "Mastery, coverage, and longest streak.";
   }
 
   function statsConversationRowData() {
@@ -1694,49 +2604,81 @@ if (previewRoot && previewDataNode) {
       [
         "width",
         "max-width",
-        "min-width",
-        "display",
-        "justify-self",
-        "overflow-x",
-        "overflow-y",
-        "overscroll-behavior-x",
       ].forEach((property) => {
         message.style.removeProperty(property);
       });
-      message.style.webkitOverflowScrolling = "";
+      const overflowFrame = message.querySelector(":scope > .preview-message-overflow-frame");
+      if (overflowFrame instanceof HTMLElement) {
+        while (overflowFrame.firstChild) {
+          message.insertBefore(overflowFrame.firstChild, overflowFrame);
+        }
+        overflowFrame.remove();
+      }
+      message.querySelectorAll(".preview-math-overflow-block").forEach((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return;
+        }
+        node.classList.remove("preview-math-overflow-block");
+        [
+          "min-width",
+        ].forEach((property) => {
+          node.style.removeProperty(property);
+        });
+      });
     }
 
-    function applyMathOverflowStyles(message) {
+    function ensureMessageOverflowFrame(message) {
+      const existingFrame = message.querySelector(":scope > .preview-message-overflow-frame");
+      if (existingFrame instanceof HTMLElement) {
+        return existingFrame;
+      }
+      const frame = document.createElement("div");
+      frame.className = "preview-message-overflow-frame";
+      while (message.firstChild) {
+        frame.appendChild(message.firstChild);
+      }
+      message.appendChild(frame);
+      return frame;
+    }
+
+    function applyMathOverflowStyles(message, overflowTargets, messageWidth) {
       message.classList.add("preview-message--math-overflow");
-      message.style.setProperty("width", "100%", "important");
-      message.style.setProperty("max-width", "100%", "important");
-      message.style.setProperty("min-width", "0", "important");
-      message.style.setProperty("display", "block", "important");
-      message.style.setProperty("justify-self", "stretch", "important");
-      message.style.setProperty("overflow-x", "auto", "important");
-      message.style.setProperty("overflow-y", "hidden", "important");
-      message.style.setProperty("overscroll-behavior-x", "contain", "important");
-      message.style.webkitOverflowScrolling = "touch";
+      message.style.setProperty("width", `${messageWidth}px`, "important");
+      message.style.setProperty("max-width", `${messageWidth}px`, "important");
+      ensureMessageOverflowFrame(message);
+      overflowTargets.forEach((target) => {
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        target.classList.add("preview-math-overflow-block");
+        target.style.setProperty("min-width", "max-content", "important");
+      });
     }
 
     transcript.querySelectorAll(".preview-message").forEach((message) => {
       if (!(message instanceof HTMLElement)) {
         return;
       }
-      const mathNodes = Array.from(message.querySelectorAll(".katex-display, .katex")).filter(
+      const mathNodes = Array.from(message.querySelectorAll(".katex-display")).filter(
         (node) => node instanceof HTMLElement,
       );
       clearMathOverflowStyles(message);
       if (!mathNodes.length || !mobileChatMedia.matches || transcriptAvailableWidth <= 0) {
         return;
       }
-      const messageWidth = message.getBoundingClientRect().width;
+      const messageWidth = Math.min(message.getBoundingClientRect().width, transcriptAvailableWidth);
+      const overflowTargets = new Set();
       const hasOverflow = mathNodes.some((node) => {
         const element = node;
-        return element.scrollWidth - transcriptAvailableWidth > 2 || element.getBoundingClientRect().width - transcriptAvailableWidth > 2;
+        const isOverflowing = element.scrollWidth - messageWidth > 2
+          || element.getBoundingClientRect().width - messageWidth > 2;
+        if (isOverflowing) {
+          overflowTargets.add(element);
+        }
+        return isOverflowing;
       });
-      if (messageWidth - transcriptAvailableWidth > 2 || hasOverflow) {
-        applyMathOverflowStyles(message);
+      if (hasOverflow) {
+        applyMathOverflowStyles(message, overflowTargets, messageWidth);
       }
     });
   }
@@ -2277,6 +3219,7 @@ if (previewRoot && previewDataNode) {
     const feedbackClass =
       message.kind === "feedback" ? (message.correct ? " preview-feedback--correct" : " preview-feedback--incorrect") : "";
     article.className = `preview-message ${roleClass}${feedbackClass}`;
+    applySeededMessageBackground(article, message);
 
     if (message.kind === "question") {
       const renderOptions = questionRenderOptions(message);
@@ -2416,6 +3359,11 @@ if (previewRoot && previewDataNode) {
       }
       article.appendChild(actions);
       richText.renderMath(article);
+      return article;
+    }
+
+    if (message.kind === "calculator") {
+      renderCalculatorMessage(article, message);
       return article;
     }
 
@@ -2620,15 +3568,30 @@ if (previewRoot && previewDataNode) {
       }
     }
 
-    richText.renderMath(article);
-
     return article;
   }
 
   function combinedTranscript(block) {
+    const inlineMessages = block ? threadInlineMessages(block.id) : [];
     const project = currentProject(block);
     if (project) {
-      const messages = Array.isArray(project.transcript) ? [...project.transcript] : [];
+      const baseMessages = Array.isArray(project.transcript) ? project.transcript : [];
+      const messages = [];
+      inlineMessages
+        .filter((message) => message.insert_after_count === 0)
+        .sort((left, right) => left.sequence - right.sequence)
+        .forEach((message) => messages.push(message));
+      baseMessages.forEach((message, index) => {
+        messages.push(message);
+        inlineMessages
+          .filter((inlineMessage) => inlineMessage.insert_after_count === index + 1)
+          .sort((left, right) => left.sequence - right.sequence)
+          .forEach((inlineMessage) => messages.push(inlineMessage));
+      });
+      inlineMessages
+        .filter((message) => message.insert_after_count > baseMessages.length)
+        .sort((left, right) => left.sequence - right.sequence)
+        .forEach((message) => messages.push(message));
       if (optimisticUserMessagesByBlock[String(block.id)]) {
         messages.push(optimisticUserMessagesByBlock[String(block.id)]);
       }
@@ -2642,7 +3605,6 @@ if (previewRoot && previewDataNode) {
       return messages;
     }
     const baseMessages = Array.isArray(block?.transcript) ? block.transcript : [];
-    const inlineMessages = block ? blockInlineMessages(block.id) : [];
     const combined = [];
 
     inlineMessages
@@ -2952,72 +3914,43 @@ if (previewRoot && previewDataNode) {
     const stats = courseStats();
     const summary = stats.summary || {};
     const completedCount = Number(summary.completed_count || 0);
-    const answeredQuestionTypes = Array.isArray(stats.question_type_mastery) ? stats.question_type_mastery.length : 0;
+    const correctCount = Number(summary.correct_count || 0);
+    const coveredObjectiveCount = Number(summary.covered_objective_count || 0);
+    const totalObjectiveCount = Number(summary.total_objective_count || 0);
+    const longestStreak = Number(summary.longest_streak || 0);
 
     transcript.innerHTML = "";
 
     const article = document.createElement("article");
-    article.className = "preview-message preview-message--assistant preview-message--stats";
+    article.className = "preview-message preview-message--assistant";
 
-    const shell = document.createElement("div");
-    shell.className = "preview-stats-shell";
+    const intro = document.createElement("p");
+    intro.className = "preview-message-paragraph";
+    intro.textContent = completedCount
+      ? "My Stats is calculated from your answered questions across the course:"
+      : "You have not answered any questions yet. These metrics will update as you work through the course:";
 
-    const meta = document.createElement("div");
-    meta.className = "preview-message-meta";
-    ["Course", "My Stats"].forEach((labelText) => {
-      const pill = document.createElement("span");
-      pill.className = "preview-message-pill";
-      pill.textContent = labelText;
-      meta.appendChild(pill);
+    const list = document.createElement("ul");
+    list.className = "preview-message-list";
+    [
+      `Mastery % - ${formatPercentage(summary.mastery)} (${correctCount} correct of ${completedCount} attempted).`,
+      `Coverage % - ${formatPercentage(summary.coverage)} (${coveredObjectiveCount} of ${totalObjectiveCount} objectives covered).`,
+      `Longest streak - ${longestStreak}.`,
+    ].forEach((text) => {
+      const item = document.createElement("li");
+      item.className = "preview-message-list-item";
+      item.textContent = text;
+      list.appendChild(item);
     });
-    const updatedText = statsHeaderMetaText(stats);
-    if (updatedText) {
-      const updatedPill = document.createElement("span");
-      updatedPill.className = "preview-message-pill";
-      updatedPill.textContent = updatedText;
-      meta.appendChild(updatedPill);
-    }
 
-    const intro = document.createElement("div");
-    intro.className = "preview-stats-intro";
-    const introTitle = document.createElement("h3");
-    introTitle.className = "preview-stats-title";
-    introTitle.textContent = "Track how mastery and coverage are building over time.";
-    const introCopy = document.createElement("p");
-    introCopy.className = "preview-stats-copy";
-    introCopy.textContent = completedCount
-      ? "This view rolls up your cumulative progress across every question answered in chat."
-      : "Your chat practice history will start filling this page as soon as you answer a question.";
-    intro.append(introTitle, introCopy);
-
-    const summaryGrid = document.createElement("div");
-    summaryGrid.className = "preview-stats-summary-grid";
-    summaryGrid.append(
-      buildStatsSummaryCard(
-        "Mastery",
-        formatPercentage(summary.mastery),
-        `${summary.correct_count || 0} correct of ${completedCount}`,
-      ),
-      buildStatsSummaryCard(
-        "Coverage",
-        formatPercentage(summary.coverage),
-        `${summary.covered_objective_count || 0} of ${summary.total_objective_count || 0} objectives covered`,
-      ),
-      buildStatsSummaryCard(
-        "Answered",
-        String(completedCount),
-        `${summary.correct_count || 0} correct · ${summary.incorrect_count || 0} incorrect`,
-      ),
-      buildStatsSummaryCard(
-        "Question types",
-        String(answeredQuestionTypes),
-        answeredQuestionTypes ? "Formats attempted so far" : "No completed question types yet",
-      ),
-    );
-
-    shell.append(meta, intro, summaryGrid, buildStatsTimelinePanel(stats), buildStatsBreakdownPanel(stats));
-    article.appendChild(shell);
+    article.append(intro, list);
+    appendMessageTimestamp(article, { created_at: stats.latest_answered_at || "" });
     transcript.appendChild(article);
+    threadInlineMessages(STATS_THREAD_ID)
+      .sort((left, right) => left.sequence - right.sequence)
+      .forEach((message) => {
+        transcript.appendChild(renderMessage(message));
+      });
 
     syncStatsViewport(scrollMode, previousScrollTop);
     requestTranscriptScrollButtonSync();
@@ -3165,34 +4098,49 @@ if (previewRoot && previewDataNode) {
     return null;
   }
 
-  function appendInlineMessage(messagePayload, { block = currentBlock(), dedupeKey = "", closeSidebarOnMobile = false } = {}) {
-    if (!block || !messagePayload) {
+  function appendInlineMessage(messagePayload, {
+    block = currentBlock(),
+    threadId = "",
+    dedupeKey = "",
+    closeSidebarOnMobile = false,
+  } = {}) {
+    const resolvedThreadId = String(threadId || (block ? block.id : currentConversationKey()) || "");
+    if (!resolvedThreadId || !messagePayload) {
       return;
     }
 
-    const inlineMessages = blockInlineMessages(block.id);
+    const inlineMessages = threadInlineMessages(resolvedThreadId);
     const lastMessage = inlineMessages[inlineMessages.length - 1];
     if (dedupeKey && lastMessage?._dedupe_key === dedupeKey) {
       scrollTranscriptToBottom();
       if (closeSidebarOnMobile && isMobileSidebar()) {
         setSidebarOpen(false);
       }
-      return;
+      return lastMessage;
     }
 
+    const activeProject = block ? currentProject(block) : null;
+    const baseCount = activeProject && Array.isArray(activeProject.transcript)
+      ? activeProject.transcript.length
+      : (block && Array.isArray(block.transcript)
+        ? block.transcript.length
+        : (resolvedThreadId === STATS_THREAD_ID ? 1 : 0));
     inlineMessageSequence += 1;
-    inlineMessages.push({
+    const message = {
       ...messagePayload,
+      thread_id: resolvedThreadId,
       _dedupe_key: dedupeKey,
-      id: `inline-resource-${block.id}-${inlineMessageSequence}`,
+      id: `inline-message-${resolvedThreadId}-${inlineMessageSequence}`,
       created_at: new Date().toISOString(),
-      insert_after_count: Array.isArray(block.transcript) ? block.transcript.length : 0,
+      insert_after_count: baseCount,
       sequence: inlineMessageSequence,
-    });
+    };
+    inlineMessages.push(message);
     renderTranscript();
     if (closeSidebarOnMobile && isMobileSidebar()) {
       setSidebarOpen(false);
     }
+    return message;
   }
 
   function appendResourceMessage(resource) {
@@ -3218,6 +4166,28 @@ if (previewRoot && previewDataNode) {
       dedupeKey: `further-study:${block.id}:${sourceKey}`,
       closeSidebarOnMobile: true,
     });
+  }
+
+  function openCalculatorMessage() {
+    const threadId = currentConversationKey();
+    if (!threadId) {
+      return;
+    }
+    removeCalculatorInlineMessages(threadId);
+    closeQuizMenu();
+    closeHeaderMenu();
+    appendInlineMessage(
+      {
+        kind: "calculator",
+        role: "assistant",
+        text: "",
+      },
+      {
+        block: isStatsView() ? null : currentBlock(),
+        threadId,
+        closeSidebarOnMobile: true,
+      },
+    );
   }
 
   function renderProjectSwitcher() {
@@ -3434,7 +4404,7 @@ if (previewRoot && previewDataNode) {
         headerCoverage.removeAttribute("title");
       }
       if (form) {
-        form.hidden = true;
+        form.hidden = false;
       }
       renderCourseMetrics();
       renderBlockSwitcher();
@@ -3849,6 +4819,10 @@ if (previewRoot && previewDataNode) {
       closeHeaderMenu();
       appendResourceMessage(button.dataset.previewResource || "");
     });
+  });
+
+  calculatorTrigger?.addEventListener("click", () => {
+    openCalculatorMessage();
   });
 
   blockSearchInput?.addEventListener("input", () => {

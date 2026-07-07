@@ -59,7 +59,6 @@ PREVIEW_WAQ_CLOSE_THRESHOLD = 0.55
 PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS = 3
 PREVIEW_WAQ_OPENAI_DRAFT_MIN_CHARS = 24
 PREVIEW_WAQ_OPENAI_CHECK_INTERVAL = 12
-ADVANCED_QUESTION_TYPES = {QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ}
 CODING_QUESTION_REQUEST = "coding"
 PREVIEW_QUESTION_TYPE_PRIORITY = {
     QuestionBankItem.QuestionType.NUM: 0,
@@ -118,9 +117,8 @@ def _next_message_id(course_state: dict) -> str:
 
 def _block_welcome_message_text(block_title: str) -> str:
     return (
-        f"Welcome to {block_title}. You are in practice mode. "
-        "Tap Quiz to get a question from this block, or ask about anything in the course. "
-        'If you wish to test yourself to get a better picture of the knowledge you\'ve gained then click "Test Mode".'
+        f'Welcome to {block_title}. Tap the "Quiz" button to generate a quiz question for this topic, '
+        "or ask about anything in the course."
     )
 
 
@@ -337,13 +335,12 @@ def _available_preview_delivery_question_types(course: Course, block: CourseBloc
     question_types = [QuestionBankItem.QuestionType.MCQ]
     if _manual_preview_ratio_enabled(block, "question_numeric_ratio_percent"):
         question_types.append(QuestionBankItem.QuestionType.NUM)
-    if _advanced_question_types_unlocked(course, block, course_state):
-        question_types.extend(
-            [
-                QuestionBankItem.QuestionType.MAQ,
-                QuestionBankItem.QuestionType.WAQ,
-            ]
-        )
+    question_types.extend(
+        [
+            QuestionBankItem.QuestionType.MAQ,
+            QuestionBankItem.QuestionType.WAQ,
+        ]
+    )
     return question_types
 
 
@@ -493,10 +490,6 @@ def _effective_preview_question_type(
         normalized_type = QuestionBankItem.QuestionType.MCQ
     if force_requested_type:
         return normalized_type
-    if _advanced_question_types_unlocked(course, block, course_state):
-        return normalized_type
-    if normalized_type in ADVANCED_QUESTION_TYPES or normalized_type is None:
-        return QuestionBankItem.QuestionType.MCQ
     return normalized_type
 
 
@@ -512,20 +505,18 @@ def _fallback_preview_question_types(
         ordered_delivery_types = _ordered_preview_question_types_by_delivery(course, block, course_state)
         return ordered_delivery_types or [QuestionBankItem.QuestionType.MCQ]
 
-    unlocked = _advanced_question_types_unlocked(course, block, course_state)
     ordered: list[str | None] = [
         _effective_preview_question_type(course, block, course_state, requested_question_type, coding_only=coding_only),
         QuestionBankItem.QuestionType.MCQ,
     ]
     if not coding_only and QuestionBankItem.QuestionType.NUM in _manual_preview_question_types(block):
         ordered.append(QuestionBankItem.QuestionType.NUM)
-    if unlocked:
-        ordered.extend(
-            [
-                QuestionBankItem.QuestionType.MAQ,
-                QuestionBankItem.QuestionType.WAQ,
-            ]
-        )
+    ordered.extend(
+        [
+            QuestionBankItem.QuestionType.MAQ,
+            QuestionBankItem.QuestionType.WAQ,
+        ]
+    )
     fallback_types: list[str] = []
     for question_type in ordered:
         if question_type and question_type not in fallback_types:
@@ -2343,14 +2334,17 @@ def _course_metrics(course: Course, serialized_blocks: list[dict], block_metric_
 
 def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metrics: dict) -> dict:
     total_objective_count = sum(block.get("learning_objective_count", 0) for block in serialized_blocks)
+    completed_count = int(course_metrics.get("completed_count") or 0)
+    correct_count = int(course_metrics.get("correct_count") or 0)
     summary = {
-        "mastery": float(course_metrics.get("mastery") or 0.0),
+        "mastery": round((correct_count * 100 / completed_count), 2) if completed_count else 0.0,
         "coverage": float(course_metrics.get("coverage") or 0.0),
-        "completed_count": int(course_metrics.get("completed_count") or 0),
-        "correct_count": int(course_metrics.get("correct_count") or 0),
+        "completed_count": completed_count,
+        "correct_count": correct_count,
         "incorrect_count": int(course_metrics.get("incorrect_count") or 0),
         "covered_objective_count": int(course_metrics.get("covered_objective_count") or 0),
         "total_objective_count": int(course_metrics.get("total_objective_count") or total_objective_count),
+        "longest_streak": 0,
     }
 
     dated_events: list[tuple[datetime, int, dict]] = []
@@ -2364,6 +2358,8 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
     timeline: list[dict] = []
     cumulative_completed = 0
     cumulative_correct = 0
+    current_correct_streak = 0
+    longest_correct_streak = 0
     covered_objective_ids: set[int] = set()
     current_day: date | None = None
 
@@ -2391,12 +2387,18 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
         cumulative_completed += 1
         if event.get("correct"):
             cumulative_correct += 1
+            current_correct_streak += 1
+            longest_correct_streak = max(longest_correct_streak, current_correct_streak)
             objective_id = event.get("learning_objective_id")
             if objective_id is not None:
                 covered_objective_ids.add(int(objective_id))
+        else:
+            current_correct_streak = 0
 
     if current_day is not None:
         append_timeline_day(current_day)
+
+    summary["longest_streak"] = longest_correct_streak
 
     question_type_totals: dict[str, dict[str, int]] = defaultdict(lambda: {"completed_count": 0, "correct_count": 0})
     for _answered_at, _index, event in dated_events:
@@ -2462,7 +2464,7 @@ def _serialized_transcript(course_state: dict, transcript: list[dict], block: Co
             and message_payload.get("kind") == "text"
             and (
                 message_payload.get("is_block_welcome")
-                or str(message_payload.get("text") or "").startswith(f"Welcome to {block.title}. You are in practice mode.")
+                or str(message_payload.get("text") or "").startswith(f"Welcome to {block.title}.")
             )
         ):
             message_payload["text"] = _block_welcome_message_text(block.title)

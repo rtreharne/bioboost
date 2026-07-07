@@ -711,14 +711,72 @@ def _format_number_tex(value: float, significant_figures: int, display_style: st
     return rf"{mantissa_text} \times 10^{{{exponent}}}"
 
 
-def _unit_tex(unit: str) -> str:
-    normalized_unit = _normalize_text(unit)
+def _looks_like_math_unit_text(text: str) -> bool:
+    normalized = _decode_literal_unicode_escapes(str(text or "")).replace(r"\ ", " ").strip()
+    if not normalized or len(normalized) > 48:
+        return False
+    compact = normalized.replace(r"\cdot", "").replace(r"\circ", "").replace("{}", "")
+    if re.fullmatch(r"[A-Za-z0-9%°µμΩ·./*^+()\\\- ]+", compact) is None:
+        return False
+    if any(signal in normalized for signal in ("/", "°", "·", r"\circ", r"\cdot", "^")):
+        return True
+    symbols = re.findall(r"[A-Za-zµμΩ]+", normalized)
+    return bool(symbols) and len(symbols) <= 4 and all(len(symbol) <= 4 for symbol in symbols)
+
+
+def _normalize_math_unit_body(unit_text: str) -> str:
+    normalized = _decode_literal_unicode_escapes(str(unit_text or "")).replace(r"\ ", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s*[·*]\s*", r"\\cdot", normalized)
+    normalized = re.sub(r"(?<=[A-Za-zΩµμ])\.(?=[A-Za-zΩµμ])", r"\\cdot", normalized)
+    normalized = re.sub(r"\s*\\cdot\s*", r"\\cdot", normalized)
+    normalized = re.sub(r"\^\s*\{\s*\\circ\s*\}\s*([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"\^\s*\\circ\s*([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"\\circ\s*([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"°\s*([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = normalized.replace("°", r"{}^{\circ}")
+    normalized = re.sub(r"\{\}\^\{\\circ\}\s+([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    return normalized.replace(" ", r"\ ")
+
+
+def _wrap_math_unit_text(unit_text: str, *, include_thin_space: bool) -> str:
+    normalized_unit = _normalize_math_unit_body(unit_text)
     if not normalized_unit:
         return ""
-    unit_text = normalized_unit.replace(" ", r"\ ")
-    unit_text = re.sub(r"\s*[·*]\s*", r"}\\cdot\\mathrm{", unit_text)
-    unit_text = re.sub(r"(?<=[A-Za-zΩµμ])\.(?=[A-Za-zΩµμ])", r"}\\cdot\\mathrm{", unit_text)
-    return r"\,\mathrm{" + unit_text + "}"
+    prefix = r"\," if include_thin_space else ""
+    return prefix + r"\mathrm{" + normalized_unit + "}"
+
+
+def _sanitize_numeric_feedback_math_tex(text: str) -> str:
+    normalized = _decode_literal_unicode_escapes(str(text or "")).strip()
+    if not normalized:
+        return ""
+
+    def replace_text_unit(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if not _looks_like_math_unit_text(body):
+            return match.group(0)
+        return _wrap_math_unit_text(body, include_thin_space=True)
+
+    normalized = re.sub(r"\\text\{\s*([^{}]+?)\s*\}", replace_text_unit, normalized)
+    normalized = normalized.replace("·", r"\cdot")
+    normalized = re.sub(r"\\cdot\s*\^\s*\{\s*\\circ\s*\}\s*([A-Za-zΩµμ%])", r"\\cdot{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"\\cdot\s*\^\s*\\circ\s*([A-Za-zΩµμ%])", r"\\cdot{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"\\cdot\s*\\circ\s*([A-Za-zΩµμ%])", r"\\cdot{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"°\s*([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = normalized.replace("°", r"{}^{\circ}")
+    normalized = re.sub(r"\{\}\^\{\\circ\}\s+([A-Za-zΩµμ%])", r"{}^{\\circ}\1", normalized)
+    normalized = re.sub(r"\s+\\,", r"\\,", normalized)
+    return re.sub(r"\s{2,}", " ", normalized).strip()
+
+
+def _unit_tex(unit: str) -> str:
+    normalized_unit = _normalize_math_unit_body(unit)
+    if not normalized_unit:
+        return ""
+    return r"\,\mathrm{" + normalized_unit + "}"
 
 
 def normalize_numeric_answer_text(
@@ -2162,10 +2220,10 @@ def _build_numeric_feedback_context(
     explanation_blocks = _extract_feedback_display_blocks(detailed_explanation)
     definitions_source = "derived"
     if len(explanation_blocks) >= 3:
-        formula_tex = explanation_blocks[0]
-        substitution_tex = explanation_blocks[1]
+        formula_tex = _sanitize_numeric_feedback_math_tex(explanation_blocks[0])
+        substitution_tex = _sanitize_numeric_feedback_math_tex(explanation_blocks[1])
         if r"\approx" in explanation_blocks[-1]:
-            final_tex = explanation_blocks[-1]
+            final_tex = _sanitize_numeric_feedback_math_tex(explanation_blocks[-1])
         parsed_definitions = _extract_feedback_definitions_text(detailed_explanation)
         if parsed_definitions and not normalize_objective_symbol_heuristics(objective_symbol_heuristics):
             definitions_text = parsed_definitions
@@ -2231,6 +2289,7 @@ def _normalize_numeric_feedback_math_block(value: str, label: str) -> str:
     text = _normalize_text(str(value or ""))
     if text.startswith(r"\[") and text.endswith(r"\]"):
         text = text[2:-2].strip()
+    text = _sanitize_numeric_feedback_math_tex(text)
     if not text:
         raise NumericQuestionValidationError(f"Stored numeric feedback must include {label}.")
     if NUMERIC_FEEDBACK_OPTION_LABEL_PATTERN.search(text):
@@ -2290,7 +2349,7 @@ def _normalize_numeric_display_math_blocks(text: str) -> str:
             lambda match: (
                 match.group(1).strip()
                 if _display_math_body_looks_like_prose(match.group(1))
-                else rf"\[{match.group(1).strip()}\]"
+                else rf"\[{_sanitize_numeric_feedback_math_tex(match.group(1).strip())}\]"
             ),
             next_text,
             flags=re.S,
@@ -2345,7 +2404,7 @@ def _normalize_numeric_worked_solution_layout(text: str) -> str:
             continue
         if _looks_like_standalone_numeric_math_line(line):
             flush_prose_lines()
-            blocks.append(rf"\[{line}\]")
+            blocks.append(rf"\[{_sanitize_numeric_feedback_math_tex(line)}\]")
             continue
         prose_lines.append(line)
 

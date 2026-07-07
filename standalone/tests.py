@@ -67,7 +67,7 @@ from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.block_avatars import generate_and_store_block_avatar
 from standalone.services.guidance import build_generation_guidance_prompt
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
-from standalone.services.preview import CODING_QUESTION_REQUEST, PREVIEW_SESSION_KEY
+from standalone.services.preview import CODING_QUESTION_REQUEST, PREVIEW_SESSION_KEY, _course_stats
 from standalone.services.course_imports import course_import_work_is_active, run_course_import_worker_once
 from standalone.services.question_builder import (
     course_question_generation_budget,
@@ -921,9 +921,76 @@ class StandaloneFlowTests(TestCase):
         )
 
         self.assertIn(
-            r"\[T = \frac{2 \times 3.1416}{7.5} = \frac{6.2832}{7.5} \approx 0.83776 \text{s}\]",
+            r"\[T = \frac{2 \times 3.1416}{7.5} = \frac{6.2832}{7.5} \approx 0.83776\,\mathrm{s}\]",
             wrapped_feedback["worked_solution_text"],
         )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_coerce_stored_numeric_feedback_sanitizes_temperature_units(self):
+        wrapped_feedback = _coerce_stored_numeric_feedback_payload(
+            {
+                "key_idea": "Specific heat capacity is found by dividing energy by mass and temperature change.",
+                "formula": r"c = \frac{Q}{m \Delta T}",
+                "substitution": r"c = \frac{21000}{2.5 \times (43 - 18)} = \frac{21000}{62.5}",
+                "final_answer": r"336 \text{ J/(kg\cdot^\circ C)}",
+                "worked_solution": (
+                    "Specific heat capacity is found by dividing the energy supplied by the product of mass and temperature change.\n\n"
+                    r"\[c = \frac{Q}{m \Delta T}\]"
+                    "\n\n"
+                    r"\[c = \frac{21000}{2.5 \times (43 - 18)} = \frac{21000}{62.5}\]"
+                    "\n\n"
+                    r"\[336 \text{ J/(kg\cdot^\circ C)}\]"
+                ),
+                "options": [
+                    {"answer_text": "336 J/(kg·°C)", "is_correct": True, "note": "This matches the calculated value."},
+                    {"answer_text": "338 J/(kg·°C)", "is_correct": False, "note": "This is slightly too large."},
+                    {"answer_text": "333 J/(kg·°C)", "is_correct": False, "note": "This is slightly too small."},
+                    {"answer_text": "343 J/(kg·°C)", "is_correct": False, "note": "This is too large."},
+                ],
+            },
+            correct_answer_text="336 J/(kg·°C)",
+            distractors=["338 J/(kg·°C)", "333 J/(kg·°C)", "343 J/(kg·°C)"],
+        )
+
+        self.assertEqual(wrapped_feedback["final_tex"], r"336\,\mathrm{J/(kg\cdot{}^{\circ}C)}")
+        self.assertIn(r"\[336\,\mathrm{J/(kg\cdot{}^{\circ}C)}\]", wrapped_feedback["worked_solution_text"])
+        self.assertNotIn(r"\text{ J/(kg\cdot^\circ C)}", wrapped_feedback["worked_solution_text"])
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_coerce_stored_numeric_feedback_wraps_kelvin_conversion_math_lines(self):
+        wrapped_feedback = _coerce_stored_numeric_feedback_payload(
+            {
+                **self.sample_numeric_feedback_payload(),
+                "key_idea": "Convert Kelvin to Celsius by subtracting 273.15.",
+                "formula": r"T_{\mathrm{C}} = T_{\mathrm{K}} - 273.15",
+                "substitution": r"T_{\mathrm{C}} = 312 - 273.15",
+                "final_answer": r"T_{\mathrm{C}} \approx 38.9\,\mathrm{{}^{\circ}C}",
+                "worked_solution": (
+                    "The temperature in Kelvin is given as 312 K. To convert this to degrees Celsius, we use the formula:\n\n"
+                    r"T_{\,\mathrm{C}} = T_{\,\mathrm{K}} - 273.15"
+                    "\n\n"
+                    "Substituting the given temperature:\n\n"
+                    r"T_{\,\mathrm{C}} = 312 - 273.15"
+                    "\n\n"
+                    "Calculating the difference:\n\n"
+                    r"T_{\,\mathrm{C}} = 38.85"
+                    "\n\n"
+                    'Rounding to one decimal place, the temperature is 38.9 °C. Therefore, choose the option "38.9 °C".'
+                ),
+                "options": [
+                    {"answer_text": "38.9 °C", "is_correct": True, "note": "This matches the exact conversion."},
+                    {"answer_text": "39.0 °C", "is_correct": False, "note": "This is slightly too high."},
+                    {"answer_text": "37.9 °C", "is_correct": False, "note": "This is too low."},
+                    {"answer_text": "41.2 °C", "is_correct": False, "note": "This subtracts the wrong offset."},
+                ],
+            },
+            correct_answer_text="38.9 °C",
+            distractors=["39.0 °C", "37.9 °C", "41.2 °C"],
+        )
+
+        self.assertIn(r"\[T_{\,\mathrm{C}} = T_{\,\mathrm{K}} - 273.15\]", wrapped_feedback["worked_solution_text"])
+        self.assertIn(r"\[T_{\,\mathrm{C}} = 312 - 273.15\]", wrapped_feedback["worked_solution_text"])
+        self.assertIn(r"\[T_{\,\mathrm{C}} = 38.85\]", wrapped_feedback["worked_solution_text"])
 
     @override_settings(OPENAI_API_KEY="")
     def test_coerce_stored_numeric_feedback_collapses_blank_lines_inside_display_math(self):
@@ -1172,6 +1239,34 @@ class StandaloneFlowTests(TestCase):
         self.assertIn(r"\[a = \frac{3.2^2}{2.5} = \frac{10.24}{2.5} = 4.096\]", feedback)
         self.assertIn(r"\[a \approx 4.1\,\mathrm{m/s^2}\]", feedback)
         self.assertNotIn(r"\[v = \frac{v^2}{r}\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_sanitizes_generated_temperature_units(self):
+        feedback = format_numeric_answer_feedback(
+            stem="A metal block with a mass of 2.5 kg is heated from 18 °C to 43 °C using 2.1 × 10⁴ J of energy. What is the specific heat capacity?",
+            explanation_text="Specific heat capacity is calculated from energy divided by mass and temperature change.",
+            numeric_metadata={
+                "inputs": {
+                    "energy": {"value": 21000, "unit": "J"},
+                    "mass": {"value": 2.5, "unit": "kg"},
+                    "delta_temp": {"value": 25, "unit": "°C"},
+                },
+                "validation": {
+                    "answer_expression": "energy / (mass * delta_temp)",
+                },
+                "output_snapshot": {
+                    "answer_value": 336.0,
+                    "answer_unit": "J/(kg·°C)",
+                    "correct_answer": "336 J/(kg·°C)",
+                    "distractors": ["338 J/(kg·°C)", "333 J/(kg·°C)", "343 J/(kg·°C)"],
+                },
+            },
+            selected_answer_text="336 J/(kg·°C)",
+            is_correct=True,
+        )
+
+        self.assertIn(r"\mathrm{J/(kg\cdot{}^{\circ}C)}", feedback)
+        self.assertNotIn("°C)}", feedback)
 
     @override_settings(OPENAI_API_KEY="")
     def test_ingest_content_asset_persists_learning_objective_symbol_heuristics(self):
@@ -7603,6 +7698,9 @@ print(result)""",
         self.assertNotContains(response, 'class="app-header"', html=False)
         self.assertContains(response, block.title)
         self.assertContains(response, "Quiz")
+        self.assertContains(response, "data-preview-calculator-trigger", html=False)
+        self.assertContains(response, "preview-chat-scroll-bottom", html=False)
+        self.assertNotContains(response, "preview-composer-actions", html=False)
 
     def test_student_practice_keeps_legacy_shell_without_messenger_markers(self):
         course = self.create_course()
@@ -7633,6 +7731,9 @@ print(result)""",
         self.assertNotContains(response, "data-preview-block-search", html=False)
         self.assertNotContains(response, "data-preview-course-metrics", html=False)
         self.assertNotContains(response, "data-preview-sidebar-toggle", html=False)
+        self.assertContains(response, "data-preview-calculator-trigger", html=False)
+        self.assertContains(response, "preview-chat-scroll-bottom", html=False)
+        self.assertNotContains(response, "preview-composer-actions", html=False)
 
     def test_student_preview_course_metrics_average_available_block_metrics(self):
         course = self.create_course()
@@ -7808,6 +7909,7 @@ print(result)""",
         self.assertEqual(stats["summary"]["incorrect_count"], 1)
         self.assertEqual(stats["summary"]["covered_objective_count"], 1)
         self.assertEqual(stats["summary"]["total_objective_count"], 2)
+        self.assertEqual(stats["summary"]["longest_streak"], 1)
         self.assertEqual(len(stats["timeline"]), 2)
         self.assertEqual(stats["timeline"][0]["mastery"], 0.0)
         self.assertEqual(stats["timeline"][0]["coverage"], 0.0)
@@ -7820,6 +7922,25 @@ print(result)""",
         self.assertEqual(breakdown[QuestionBankItem.QuestionType.MCQ]["incorrect_count"], 1)
         self.assertEqual(breakdown[QuestionBankItem.QuestionType.WAQ]["mastery"], 100.0)
         self.assertEqual(breakdown[QuestionBankItem.QuestionType.WAQ]["correct_count"], 1)
+
+    def test_course_stats_summary_mastery_uses_correct_over_attempted(self):
+        stats = _course_stats(
+            course_state={"completed_events": []},
+            serialized_blocks=[],
+            course_metrics={
+                "mastery": 12.5,
+                "coverage": 50.0,
+                "completed_count": 5,
+                "correct_count": 3,
+                "incorrect_count": 2,
+                "covered_objective_count": 1,
+                "total_objective_count": 2,
+            },
+        )
+
+        self.assertEqual(stats["summary"]["mastery"], 60.0)
+        self.assertEqual(stats["summary"]["completed_count"], 5)
+        self.assertEqual(stats["summary"]["correct_count"], 3)
 
     def test_student_preview_keeps_engagement_visible_when_block_release_date_is_set(self):
         course = self.create_course()
@@ -8699,7 +8820,7 @@ print(result)""",
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
         self.assertIn("average speed", question_messages[-1]["text"].lower())
 
-    def test_student_preview_forced_advanced_types_use_mcq_until_threshold_met(self):
+    def test_student_preview_forced_advanced_types_are_available_before_threshold(self):
         course = self.create_course()
         maq_block, _, maq_objective, maq_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
         waq_block, _, waq_objective, waq_chunk = self.create_preview_content_block(course, title="Week 2", order=2)
@@ -8782,7 +8903,7 @@ print(result)""",
                 block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
                 question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
                 self.assertEqual(question_messages[-1]["question_id"], expected_question_id)
-                self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
+                self.assertEqual(question_messages[-1]["question_type"], requested_type)
                 self.assertFalse(block_payload["metrics"]["advanced_question_types_unlocked"])
                 self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 50)
 
@@ -8857,7 +8978,7 @@ print(result)""",
         self.assertTrue(block_payload["metrics"]["advanced_question_types_unlocked"])
         self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 0)
 
-    def test_student_preview_forced_advanced_type_unlocks_at_configured_target_progress(self):
+    def test_student_preview_forced_advanced_type_is_available_before_target_progress(self):
         course = self.create_course()
         block, _, objective, chunk = self.create_preview_content_block(course)
         block.config.target_question_count = 2
@@ -8899,24 +9020,18 @@ print(result)""",
         self.assertEqual(first_question_messages[-1]["question_id"], first_mcq.pk)
         self.assertFalse(first_block_payload["metrics"]["advanced_question_types_unlocked"])
 
-        self.client.post(
-            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
-            data=json.dumps({"question_id": first_mcq.pk, "answer": "A"}),
-            content_type="application/json",
-        )
-
-        unlocked_response = self.client.post(
+        forced_response = self.client.post(
             reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
             data=json.dumps({"question_type": QuestionBankItem.QuestionType.MAQ}),
             content_type="application/json",
         )
 
-        self.assertEqual(unlocked_response.status_code, 200)
-        unlocked_block_payload = next(item for item in unlocked_response.json()["preview"]["blocks"] if item["id"] == block.pk)
-        unlocked_question_messages = [message for message in unlocked_block_payload["transcript"] if message["kind"] == "question"]
-        self.assertEqual(unlocked_question_messages[-1]["question_id"], unlocked_maq.pk)
-        self.assertEqual(unlocked_question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
-        self.assertTrue(unlocked_block_payload["metrics"]["advanced_question_types_unlocked"])
+        self.assertEqual(forced_response.status_code, 200)
+        forced_block_payload = next(item for item in forced_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        forced_question_messages = [message for message in forced_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(forced_question_messages[-1]["question_id"], unlocked_maq.pk)
+        self.assertEqual(forced_question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
+        self.assertFalse(forced_block_payload["metrics"]["advanced_question_types_unlocked"])
 
     def test_student_preview_automatic_delivery_uses_configured_type_mix_over_bank_mix(self):
         course = self.create_course()
@@ -12383,7 +12498,7 @@ print(result)""",
         assistant_messages = [message for message in block_payload["transcript"] if message["role"] == "assistant" and message["kind"] == "text"]
         self.assertEqual(
             assistant_messages[0]["text"],
-            'Welcome to Origins of Life. You are in practice mode. Tap Quiz to get a question from this block, or ask about anything in the course. If you wish to test yourself to get a better picture of the knowledge you\'ve gained then click "Test Mode".',
+            'Welcome to Origins of Life. Tap the "Quiz" button to generate a quiz question for this topic, or ask about anything in the course.',
         )
         self.assertEqual(assistant_messages[0]["inline_cta_label"], "Test Mode")
 
