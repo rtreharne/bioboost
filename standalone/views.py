@@ -138,13 +138,20 @@ from standalone.services.practice_scoring import weighted_practice_score
 from standalone.services.practice_validation import released_validation_pool_count
 from standalone.services.notifications import send_logged_email
 from standalone.services.preview import (
+    PREVIEW_COLLECTION_THREAD_KIND,
+    draft_preview_collection_written_answer,
     draft_preview_written_answer,
+    flag_preview_collection_question,
     flag_preview_question,
+    regenerate_preview_collection_numeric_feedback,
     regenerate_preview_numeric_feedback,
+    request_preview_collection_quiz,
     request_preview_quiz,
     save_preview_objective_guardrail,
+    send_preview_collection_chat_message,
     send_preview_chat_message,
     serialize_preview_state,
+    submit_preview_collection_answer,
     submit_preview_answer,
 )
 from standalone.services.question_builder import (
@@ -1677,38 +1684,58 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
 
 
 def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, action: str) -> JsonResponse:
+    collection = None
+    if request.body and "application/json" in (request.content_type or ""):
+        try:
+            request_data = json.loads(request.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+        if (
+            str(request_data.get("thread_kind") or "").strip().lower() == PREVIEW_COLLECTION_THREAD_KIND
+            and int(request_data.get("thread_id") or 0) > 0
+        ):
+            collection = get_object_or_404(
+                CourseBlockCollection.objects.filter(course=course).prefetch_related("blocks"),
+                pk=int(request_data.get("thread_id") or 0),
+            )
+    else:
+        request_data = None
+
     if action == "quiz":
         requested_question_type = None
         preferred_objective_id = None
         force_new = False
         coding_only = False
-        if request.body and "application/json" in (request.content_type or ""):
-            try:
-                data = json.loads(request.body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
-            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
-            preferred_objective_id = int(data.get("learning_objective_id") or 0) or None
-            force_new = bool(data.get("force_new"))
-            coding_only = bool(data.get("coding_only"))
+        if request_data is not None:
+            requested_question_type = str(request_data.get("question_type", "")).strip().lower() or None
+            preferred_objective_id = int(request_data.get("learning_objective_id") or 0) or None
+            force_new = bool(request_data.get("force_new"))
+            coding_only = bool(request_data.get("coding_only"))
         try:
-            payload = request_preview_quiz(
-                request,
-                course,
-                block,
-                requested_question_type=requested_question_type,
-                preferred_objective_id=preferred_objective_id,
-                force_new=force_new,
-                coding_only=coding_only,
-            )
+            if collection is not None:
+                payload = request_preview_collection_quiz(
+                    request,
+                    course,
+                    collection,
+                    requested_question_type=requested_question_type,
+                )
+            else:
+                payload = request_preview_quiz(
+                    request,
+                    course,
+                    block,
+                    requested_question_type=requested_question_type,
+                    preferred_objective_id=preferred_objective_id,
+                    force_new=force_new,
+                    coding_only=coding_only,
+                )
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
 
-    try:
-        data = json.loads(request.body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    if request_data is None:
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    data = request_data
 
     if action in {"project_open", "project_chat", "project_submit"}:
         project_id = int(data.get("project_id") or 0)
@@ -1734,18 +1761,40 @@ def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, a
             selected_answers = [selected_answer] if selected_answer else []
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = submit_preview_answer(request, course, block, question_id, selected_answers, answer_text=answer_text)
+        if collection is not None:
+            payload = submit_preview_collection_answer(
+                request,
+                course,
+                collection,
+                question_id,
+                selected_answers,
+                answer_text=answer_text,
+            )
+        else:
+            payload = submit_preview_answer(request, course, block, question_id, selected_answers, answer_text=answer_text)
         return JsonResponse({"ok": True, "preview": payload})
     if action == "draft_answer":
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = draft_preview_written_answer(request, course, block, question_id, answer_text)
+        if collection is not None:
+            payload = draft_preview_collection_written_answer(request, course, collection, question_id, answer_text)
+        else:
+            payload = draft_preview_written_answer(request, course, block, question_id, answer_text)
         return JsonResponse({"ok": True, "alignment": payload})
     if action == "regenerate_feedback":
         question_id = int(data.get("question_id") or 0)
         feedback_message_id = str(data.get("feedback_message_id", "")).strip()
         try:
-            payload = regenerate_preview_numeric_feedback(request, course, block, question_id, feedback_message_id)
+            if collection is not None:
+                payload = regenerate_preview_collection_numeric_feedback(
+                    request,
+                    course,
+                    collection,
+                    question_id,
+                    feedback_message_id,
+                )
+            else:
+                payload = regenerate_preview_numeric_feedback(request, course, block, question_id, feedback_message_id)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
@@ -1753,19 +1802,32 @@ def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, a
         question = str(data.get("question", "")).strip()
         if not question:
             return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
-        payload = send_preview_chat_message(request, course, block, question)
+        if collection is not None:
+            payload = send_preview_collection_chat_message(request, course, collection, question)
+        else:
+            payload = send_preview_chat_message(request, course, block, question)
         return JsonResponse({"ok": True, "preview": payload})
     if action == "flag":
         question_id = int(data.get("question_id") or 0)
         try:
-            payload = flag_preview_question(
-                request,
-                course,
-                block,
-                question_id,
-                instruction=str(data.get("instruction", "")).strip(),
-                learning_objective_id=int(data.get("learning_objective_id") or 0) or None,
-            )
+            if collection is not None:
+                payload = flag_preview_collection_question(
+                    request,
+                    course,
+                    collection,
+                    question_id,
+                    instruction=str(data.get("instruction", "")).strip(),
+                    learning_objective_id=int(data.get("learning_objective_id") or 0) or None,
+                )
+            else:
+                payload = flag_preview_question(
+                    request,
+                    course,
+                    block,
+                    question_id,
+                    instruction=str(data.get("instruction", "")).strip(),
+                    learning_objective_id=int(data.get("learning_objective_id") or 0) or None,
+                )
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
@@ -2302,24 +2364,38 @@ def demo_embed_origin_token(request: HttpRequest, token) -> JsonResponse:
 
 
 def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: str, request: HttpRequest) -> JsonResponse:
+    collection = None
+    if request.body and "application/json" in (request.content_type or ""):
+        try:
+            request_data = json.loads(request.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+        if (
+            str(request_data.get("thread_kind") or "").strip().lower() == PREVIEW_COLLECTION_THREAD_KIND
+            and int(request_data.get("thread_id") or 0) > 0
+        ):
+            collection = get_object_or_404(
+                CourseBlockCollection.objects.filter(course=access.course).prefetch_related("blocks"),
+                pk=int(request_data.get("thread_id") or 0),
+            )
+    else:
+        request_data = None
+
     if action == "quiz":
         requested_question_type = None
         preferred_objective_id = None
         force_new = False
         coding_only = False
-        if request.body and "application/json" in (request.content_type or ""):
-            try:
-                data = json.loads(request.body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
-            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
-            preferred_objective_id = int(data.get("learning_objective_id") or 0) or None
-            force_new = bool(data.get("force_new"))
-            coding_only = bool(data.get("coding_only"))
+        if request_data is not None:
+            requested_question_type = str(request_data.get("question_type", "")).strip().lower() or None
+            preferred_objective_id = int(request_data.get("learning_objective_id") or 0) or None
+            force_new = bool(request_data.get("force_new"))
+            coding_only = bool(request_data.get("coding_only"))
         try:
             payload = request_demo_preview_quiz(
                 access,
                 block,
+                collection=collection,
                 requested_question_type=requested_question_type,
                 preferred_objective_id=preferred_objective_id,
                 force_new=force_new,
@@ -2329,10 +2405,9 @@ def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: 
             return JsonResponse({"ok": False, "error": str(error)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
 
-    try:
-        data = json.loads(request.body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    if request_data is None:
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    data = request_data
 
     if action == "answer":
         selected_answers = data.get("answers")
@@ -2341,18 +2416,31 @@ def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: 
             selected_answers = [selected_answer] if selected_answer else []
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = submit_demo_preview_answer(access, block, question_id, selected_answers, answer_text=answer_text)
+        payload = submit_demo_preview_answer(
+            access,
+            block,
+            question_id,
+            selected_answers,
+            collection=collection,
+            answer_text=answer_text,
+        )
         return JsonResponse({"ok": True, "preview": payload})
     if action == "draft_answer":
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = draft_demo_preview_written_answer(access, block, question_id, answer_text)
+        payload = draft_demo_preview_written_answer(
+            access,
+            block,
+            question_id,
+            answer_text,
+            collection=collection,
+        )
         return JsonResponse({"ok": True, "alignment": payload})
     if action == "chat":
         question = str(data.get("question", "")).strip()
         if not question:
             return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
-        payload = send_demo_preview_chat_message(access, block, question)
+        payload = send_demo_preview_chat_message(access, block, question, collection=collection)
         return JsonResponse({"ok": True, "preview": payload})
     raise Http404
 
@@ -4212,7 +4300,14 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     )
 
 
-def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action: str, request: HttpRequest) -> JsonResponse:
+def _student_practice_payload(
+    enrollment: Enrollment,
+    block: CourseBlock,
+    action: str,
+    request: HttpRequest,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> JsonResponse:
     if action == "quiz":
         requested_question_type = None
         coding_only = False
@@ -4228,6 +4323,7 @@ def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action
             block,
             requested_question_type=requested_question_type,
             coding_only=coding_only,
+            collection=collection,
         )
         return JsonResponse({"ok": True, "preview": payload})
 
@@ -4259,18 +4355,37 @@ def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action
             selected_answers = [selected_answer] if selected_answer else []
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = submit_student_practice_answer(enrollment, block, question_id, selected_answers, answer_text=answer_text)
+        payload = submit_student_practice_answer(
+            enrollment,
+            block,
+            question_id,
+            selected_answers,
+            answer_text=answer_text,
+            collection=collection,
+        )
         return JsonResponse({"ok": True, "preview": payload})
     if action == "draft_answer":
         question_id = int(data.get("question_id") or 0)
         answer_text = str(data.get("answer_text", "")).strip()
-        payload = draft_student_practice_written_answer(enrollment, block, question_id, answer_text)
+        payload = draft_student_practice_written_answer(
+            enrollment,
+            block,
+            question_id,
+            answer_text,
+            collection=collection,
+        )
         return JsonResponse({"ok": True, "alignment": payload})
     if action == "regenerate_feedback":
         question_id = int(data.get("question_id") or 0)
         feedback_message_id = str(data.get("feedback_message_id", "")).strip()
         try:
-            payload = regenerate_student_practice_numeric_feedback(enrollment, block, question_id, feedback_message_id)
+            payload = regenerate_student_practice_numeric_feedback(
+                enrollment,
+                block,
+                question_id,
+                feedback_message_id,
+                collection=collection,
+            )
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
@@ -4278,11 +4393,11 @@ def _student_practice_payload(enrollment: Enrollment, block: CourseBlock, action
         question = str(data.get("question", "")).strip()
         if not question:
             return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
-        payload = send_student_practice_chat_message(enrollment, block, question)
+        payload = send_student_practice_chat_message(enrollment, block, question, collection=collection)
         return JsonResponse({"ok": True, "preview": payload})
     if action == "flag":
         question_id = int(data.get("question_id") or 0)
-        payload = flag_student_practice_question(enrollment, block, question_id)
+        payload = flag_student_practice_question(enrollment, block, question_id, collection=collection)
         return JsonResponse({"ok": True, "preview": payload})
     raise Http404
 
@@ -4293,7 +4408,20 @@ def student_practice_action(request: HttpRequest, course_id: int, block_id: int,
         raise Http404
     enrollment = _student_enrollment_or_404(request.user, course_id)
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=enrollment.course)
-    return _student_practice_payload(enrollment, block, action, request)
+    collection = None
+    if request.body and "application/json" in (request.content_type or ""):
+        try:
+            data = json.loads(request.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            data = {}
+        thread_kind = str(data.get("thread_kind", "")).strip().lower()
+        thread_id = int(data.get("thread_id") or 0)
+        if thread_kind == "collection" and thread_id > 0:
+            collection = get_object_or_404(
+                CourseBlockCollection.objects.filter(course=enrollment.course).prefetch_related("blocks"),
+                pk=thread_id,
+            )
+    return _student_practice_payload(enrollment, block, action, request, collection=collection)
 
 
 class StandaloneLogoutView(LogoutView):

@@ -80,7 +80,7 @@ if (previewRoot && previewDataNode) {
   const messageBackgroundUrl = String(previewRoot.dataset.messageBackgroundUrl || "").trim();
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
-  let activeBlockId = String(previewState.active_block_id || "");
+  let activeBlockId = "";
   let requestInFlight = false;
   let sidebarOpen = true;
   let inlineMessageSequence = 0;
@@ -302,6 +302,22 @@ if (previewRoot && previewDataNode) {
     return courseId ? `quizanchor:${mode}:course:${courseId}:active-block` : "";
   }
 
+  function collectionThreadKey(collectionId) {
+    return collectionId ? `collection:${collectionId}` : "";
+  }
+
+  function previewThreadKey(state = previewState) {
+    const kind = String(state?.active_thread_kind || "");
+    const id = String(state?.active_thread_id || "");
+    if (kind === "collection" && id) {
+      return collectionThreadKey(id);
+    }
+    if (kind === "block" && id) {
+      return id;
+    }
+    return String(state?.active_block_id || "");
+  }
+
   function persistActiveBlockId(blockId) {
     const storageKey = activeBlockStorageKey();
     if (!storageKey) {
@@ -332,6 +348,16 @@ if (previewRoot && previewDataNode) {
         activeBlockId = STATS_THREAD_ID;
         return;
       }
+      const collectionMatch = storedBlockId.match(/^collection:(\d+)$/);
+      if (collectionMatch) {
+        const matchingCollection = (previewState.collections || []).find(
+          (collection) => String(collection.id) === String(collectionMatch[1]),
+        );
+        if (matchingCollection) {
+          activeBlockId = collectionThreadKey(matchingCollection.id);
+          return;
+        }
+      }
       const matchingBlock = (previewState.blocks || []).find((block) => String(block.id) === String(storedBlockId));
       if (matchingBlock) {
         activeBlockId = String(matchingBlock.id);
@@ -342,6 +368,7 @@ if (previewRoot && previewDataNode) {
       return;
     }
   }
+  activeBlockId = previewThreadKey(previewState);
 
   function showLaunchLoader() {
     if (launchLoader) {
@@ -527,19 +554,58 @@ if (previewRoot && previewDataNode) {
     return String(activeBlockId || "") === STATS_THREAD_ID;
   }
 
+  function isCollectionView() {
+    return /^collection:\d+$/.test(String(activeBlockId || ""));
+  }
+
+  function currentCollectionId() {
+    const match = String(activeBlockId || "").match(/^collection:(\d+)$/);
+    return match ? match[1] : "";
+  }
+
   function currentConversationKey() {
     if (isStatsView()) {
       return STATS_THREAD_ID;
+    }
+    if (isCollectionView()) {
+      return collectionThreadKey(currentCollectionId());
     }
     const block = currentBlock();
     return block ? String(block.id) : "";
   }
 
   function currentBlock() {
-    if (isStatsView()) {
+    if (isStatsView() || isCollectionView()) {
       return null;
     }
     return (previewState.blocks || []).find((block) => String(block.id) === String(activeBlockId)) || previewState.blocks?.[0] || null;
+  }
+
+  function findCollection(collectionId) {
+    return (previewState.collections || []).find((collection) => String(collection.id) === String(collectionId)) || null;
+  }
+
+  function currentCollection() {
+    return isCollectionView() ? findCollection(currentCollectionId()) : null;
+  }
+
+  function currentConversationEntry() {
+    if (isStatsView()) {
+      return null;
+    }
+    return currentCollection() || currentBlock();
+  }
+
+  function currentActionBlock() {
+    if (isStatsView()) {
+      return null;
+    }
+    const collection = currentCollection();
+    if (collection) {
+      const anchorBlockId = String(collection.anchor_block_id || collection.block_ids?.[0] || "");
+      return findBlock(anchorBlockId);
+    }
+    return currentBlock();
   }
 
   function findBlock(blockId) {
@@ -812,20 +878,20 @@ if (previewRoot && previewDataNode) {
     }
   }
 
-  function pendingQuestion(block = currentBlock()) {
-    if (currentProject(block)) {
+  function pendingQuestion(conversation = currentConversationEntry()) {
+    if (currentProject(conversation)) {
       return null;
     }
-    if (!block || !Array.isArray(block.transcript)) {
+    if (!conversation || !Array.isArray(conversation.transcript)) {
       return null;
     }
-    return [...block.transcript].reverse().find(
+    return [...conversation.transcript].reverse().find(
       (message) => message.kind === "question" && !message.answered && !message.flagged,
     ) || null;
   }
 
-  function pendingWrittenQuestion(block = currentBlock()) {
-    const question = pendingQuestion(block);
+  function pendingWrittenQuestion(conversation = currentConversationEntry()) {
+    const question = pendingQuestion(conversation);
     return question?.question_type === "waq" ? question : null;
   }
 
@@ -833,9 +899,9 @@ if (previewRoot && previewDataNode) {
     if (!quizMenuPanel) {
       return;
     }
-    const block = currentBlock();
-    const availableManualQuestionTypes = Array.isArray(block?.available_manual_question_types)
-      ? block.available_manual_question_types
+    const conversation = currentConversationEntry();
+    const availableManualQuestionTypes = Array.isArray(conversation?.available_manual_question_types)
+      ? conversation.available_manual_question_types
       : ["mcq", "maq", "waq"];
     quizMenuPanel.querySelectorAll("[data-quiz-type]").forEach((button) => {
       const questionType = button.dataset.quizType || "";
@@ -859,13 +925,12 @@ if (previewRoot && previewDataNode) {
       return null;
     }
     let updatedQuestion = null;
-    (previewState.blocks || []).forEach((block) => {
-      (block.transcript || []).forEach((message) => {
-        if (message.kind === "question" && String(message.question_id) === String(questionId)) {
-          updater(message, block);
-          updatedQuestion = message;
-        }
-      });
+    const conversation = currentConversationEntry();
+    (conversation?.transcript || []).forEach((message) => {
+      if (message.kind === "question" && String(message.question_id) === String(questionId)) {
+        updater(message, conversation);
+        updatedQuestion = message;
+      }
     });
     return updatedQuestion;
   }
@@ -932,6 +997,37 @@ if (previewRoot && previewDataNode) {
     });
     inlineMessages.length = 0;
     retainedMessages.forEach((message) => inlineMessages.push(message));
+  }
+
+  function threadHasCalculatorInlineMessage(threadId) {
+    const resolvedThreadId = String(threadId || "");
+    if (!resolvedThreadId) {
+      return false;
+    }
+    return threadInlineMessages(resolvedThreadId).some((message) => message.kind === "calculator");
+  }
+
+  function currentConversationMessages() {
+    if (isStatsView()) {
+      return threadInlineMessages(STATS_THREAD_ID)
+        .sort((left, right) => left.sequence - right.sequence);
+    }
+    const conversation = currentConversationEntry();
+    return conversation ? combinedTranscript(conversation) : [];
+  }
+
+  function currentConversationEndsWithCalculator() {
+    const messages = currentConversationMessages();
+    const lastMessage = messages[messages.length - 1];
+    return !!lastMessage && lastMessage.kind === "calculator";
+  }
+
+  function syncCalculatorTriggerVisibility() {
+    if (!calculatorTrigger) {
+      return;
+    }
+    const threadId = currentConversationKey();
+    calculatorTrigger.hidden = !threadId || currentConversationEndsWithCalculator();
   }
 
   function calculatorTokenType(token) {
@@ -1522,10 +1618,10 @@ if (previewRoot && previewDataNode) {
     try {
       const answer = evaluateCalculatorExpression(state.tokens, calculatorThreadAnswer(threadId));
       state.lastComputedValue = answer;
-      state.resultText = formatCalculatorValue(answer);
+      state.resultText = formatCalculatorStandardForm(answer);
       state.error = "";
       state.justEvaluated = true;
-      state.standardFormActive = false;
+      state.standardFormActive = true;
       state.tokens = [calculatorPlainString(answer)];
       setCalculatorThreadAnswer(threadId, answer);
     } catch (error) {
@@ -1640,7 +1736,9 @@ if (previewRoot && previewDataNode) {
 
     shell.append(screen, grid);
     article.appendChild(shell);
-    appendMessageTimestamp(article, message);
+    window.requestAnimationFrame(() => {
+      expression.scrollLeft = expression.scrollWidth;
+    });
   }
 
   function setQuizLoading(blockId, isLoading) {
@@ -2384,8 +2482,8 @@ if (previewRoot && previewDataNode) {
     return `${normalized.slice(0, limit - 1).trimEnd()}…`;
   }
 
-  function latestConversationMessage(block) {
-    const messages = combinedTranscript(block);
+  function latestConversationMessage(conversation) {
+    const messages = combinedTranscript(conversation);
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (humanReadableMessage(messages[index])) {
         return messages[index];
@@ -2394,8 +2492,8 @@ if (previewRoot && previewDataNode) {
     return null;
   }
 
-  function latestConversationTimestamp(block) {
-    const messages = combinedTranscript(block);
+  function latestConversationTimestamp(conversation) {
+    const messages = combinedTranscript(conversation);
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (!humanReadableMessage(messages[index])) {
         continue;
@@ -2408,22 +2506,48 @@ if (previewRoot && previewDataNode) {
     return null;
   }
 
-  function conversationRowData(block) {
+  function conversationAvatarText(title, fallback = "B") {
+    return String(title || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || "")
+      .join("") || fallback;
+  }
+
+  function blockConversationRowData(block) {
     const lastMessage = latestConversationMessage(block);
     const lastTimestamp = latestConversationTimestamp(block);
     return {
+      id: String(block?.id || ""),
+      threadKind: "block",
       block,
       lastMessage,
       lastMessageAt: lastTimestamp,
       previewText: truncateConversationPreview(messagePreviewText(lastMessage) || "Tap Quiz to start this conversation."),
       previewTimestamp: formatConversationTimestamp(lastTimestamp ? lastTimestamp.toISOString() : (lastMessage?.created_at || "")),
       avatarUrl: String(block?.avatar_url || "").trim(),
-      avatarText: String(block?.title || "")
-        .split(/\s+/)
-        .filter(Boolean)
-        .slice(0, 2)
-        .map((part) => part[0]?.toUpperCase() || "")
-        .join("") || "B",
+      avatarText: conversationAvatarText(block?.title, "B"),
+      title: String(block?.title || ""),
+      isSquare: false,
+    };
+  }
+
+  function collectionConversationRowData(collection) {
+    const lastMessage = latestConversationMessage(collection);
+    const lastTimestamp = latestConversationTimestamp(collection);
+    return {
+      id: collectionThreadKey(collection?.id),
+      threadKind: "collection",
+      collection,
+      lastMessage,
+      lastMessageAt: lastTimestamp,
+      previewText: truncateConversationPreview(messagePreviewText(lastMessage) || "Tap Quiz to start this conversation."),
+      previewTimestamp: formatConversationTimestamp(lastTimestamp ? lastTimestamp.toISOString() : (lastMessage?.created_at || "")),
+      avatarUrl: "",
+      avatarText: conversationAvatarText(collection?.title, "C"),
+      title: String(collection?.title || ""),
+      isSquare: true,
     };
   }
 
@@ -2484,15 +2608,18 @@ if (previewRoot && previewDataNode) {
   }
 
   function sortedConversationBlocks() {
-    return (previewState.blocks || [])
-      .map((block) => conversationRowData(block))
+    const rows = [
+      ...(previewState.collections || []).map((collection) => collectionConversationRowData(collection)),
+      ...(previewState.blocks || []).map((block) => blockConversationRowData(block)),
+    ];
+    return rows
       .sort((left, right) => {
         const rightTime = right.lastMessageAt ? right.lastMessageAt.getTime() : 0;
         const leftTime = left.lastMessageAt ? left.lastMessageAt.getTime() : 0;
         if (rightTime !== leftTime) {
           return rightTime - leftTime;
         }
-        return String(left.block?.title || "").localeCompare(String(right.block?.title || ""));
+        return String(left.title || "").localeCompare(String(right.title || ""));
       });
   }
 
@@ -2501,7 +2628,7 @@ if (previewRoot && previewDataNode) {
     const blockEntries = !query
       ? sortedConversationBlocks()
       : sortedConversationBlocks().filter((entry) => {
-        const haystack = `${entry.block?.title || ""} ${entry.previewText || ""}`.toLowerCase();
+        const haystack = `${entry.title || ""} ${entry.previewText || ""}`.toLowerCase();
         return haystack.includes(query);
       });
     const statsEntry = statsConversationRowData();
@@ -2520,6 +2647,10 @@ if (previewRoot && previewDataNode) {
 
   function syncTranscriptScrollButton() {
     if (!transcript || !scrollBottomButton) {
+      return;
+    }
+    if (currentConversationEndsWithCalculator()) {
+      scrollBottomButton.hidden = true;
       return;
     }
     const maxScrollTop = Math.max(transcript.scrollHeight - transcript.clientHeight, 0);
@@ -3104,11 +3235,11 @@ if (previewRoot && previewDataNode) {
         blockSwitcher.appendChild(emptyState);
       } else {
         blocks.forEach((entry) => {
-          const { block, previewText, previewTimestamp, avatarText, avatarUrl } = entry;
-          const rowId = String(entry.id || block?.id || "");
-          const rowTitle = String(entry.title || block?.title || "");
+          const { previewText, previewTimestamp, avatarText, avatarUrl } = entry;
+          const rowId = String(entry.id || "");
+          const rowTitle = String(entry.title || "");
           const isActive = rowId === String(activeBlockId);
-          const isSelectionPreview = !entry.isStats && isActive && isSidebarSelectionPreview(rowId);
+          const isSelectionPreview = !entry.isStats && entry.threadKind !== "collection" && isActive && isSidebarSelectionPreview(rowId);
           const row = document.createElement("button");
           row.type = "button";
           row.className = `preview-conversation-row${isActive ? " is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
@@ -3128,7 +3259,7 @@ if (previewRoot && previewDataNode) {
             avatarUrl,
             avatarText,
             imageClass: "preview-conversation-avatar-image",
-            isSquare: entry.isStats,
+            isSquare: entry.isStats || entry.isSquare,
           });
           row.querySelector(".preview-conversation-title").textContent = rowTitle;
           row.querySelector(".preview-conversation-preview").textContent = previewText;
@@ -3227,6 +3358,12 @@ if (previewRoot && previewDataNode) {
       article.dataset.questionId = String(message.question_id || "");
       article.dataset.answered = message.answered ? "true" : "false";
       article.dataset.flagged = message.flagged ? "true" : "false";
+      if (message.block_label && String(message.thread_kind || "") === "collection") {
+        const meta = document.createElement("div");
+        meta.className = "preview-message-meta";
+        meta.innerHTML = `<span class="preview-message-pill">${message.block_label}</span>`;
+        article.appendChild(meta);
+      }
       const header = document.createElement("div");
       header.className = "preview-question-header";
       const callout = document.createElement("div");
@@ -3571,9 +3708,12 @@ if (previewRoot && previewDataNode) {
     return article;
   }
 
-  function combinedTranscript(block) {
-    const inlineMessages = block ? threadInlineMessages(block.id) : [];
-    const project = currentProject(block);
+  function combinedTranscript(conversation) {
+    const threadId = conversation
+      ? (conversation.block_ids ? collectionThreadKey(conversation.id) : String(conversation.id))
+      : "";
+    const inlineMessages = threadId ? threadInlineMessages(threadId) : [];
+    const project = conversation && !conversation.block_ids ? currentProject(conversation) : null;
     if (project) {
       const baseMessages = Array.isArray(project.transcript) ? project.transcript : [];
       const messages = [];
@@ -3592,19 +3732,19 @@ if (previewRoot && previewDataNode) {
         .filter((message) => message.insert_after_count > baseMessages.length)
         .sort((left, right) => left.sequence - right.sequence)
         .forEach((message) => messages.push(message));
-      if (optimisticUserMessagesByBlock[String(block.id)]) {
-        messages.push(optimisticUserMessagesByBlock[String(block.id)]);
+      if (optimisticUserMessagesByBlock[threadId]) {
+        messages.push(optimisticUserMessagesByBlock[threadId]);
       }
-      if (loadingMessagesByBlock[String(block.id)]) {
+      if (loadingMessagesByBlock[threadId]) {
         messages.push({
-          id: `loading-project-${block.id}`,
+          id: `loading-project-${threadId}`,
           kind: "loading",
           role: "assistant",
         });
       }
       return messages;
     }
-    const baseMessages = Array.isArray(block?.transcript) ? block.transcript : [];
+    const baseMessages = Array.isArray(conversation?.transcript) ? conversation.transcript : [];
     const combined = [];
 
     inlineMessages
@@ -3625,13 +3765,13 @@ if (previewRoot && previewDataNode) {
       .sort((left, right) => left.sequence - right.sequence)
       .forEach((message) => combined.push(message));
 
-    if (block && optimisticUserMessagesByBlock[String(block.id)]) {
-      combined.push(optimisticUserMessagesByBlock[String(block.id)]);
+    if (threadId && optimisticUserMessagesByBlock[threadId]) {
+      combined.push(optimisticUserMessagesByBlock[threadId]);
     }
 
-    if (block && loadingMessagesByBlock[String(block.id)]) {
+    if (threadId && loadingMessagesByBlock[threadId]) {
       combined.push({
-        id: `loading-${block.id}`,
+        id: `loading-${threadId}`,
         kind: "loading",
         role: "assistant",
       });
@@ -3952,6 +4092,7 @@ if (previewRoot && previewDataNode) {
         transcript.appendChild(renderMessage(message));
       });
 
+    syncCalculatorTriggerVisibility();
     syncStatsViewport(scrollMode, previousScrollTop);
     requestTranscriptScrollButtonSync();
   }
@@ -3964,14 +4105,14 @@ if (previewRoot && previewDataNode) {
       renderStatsTranscript(scrollMode);
       return;
     }
-    const block = currentBlock();
+    const conversation = currentConversationEntry();
     const previousScrollTop = transcript.scrollTop;
     transcript.innerHTML = "";
-    if (!block) {
+    if (!conversation) {
       return;
     }
     let lastRenderedDayKey = "";
-    combinedTranscript(block).forEach((message) => {
+    combinedTranscript(conversation).forEach((message) => {
       const createdAt = parseMessageDate(message?.created_at);
       if (createdAt) {
         const currentDayKey = calendarDayKey(createdAt);
@@ -3986,6 +4127,7 @@ if (previewRoot && previewDataNode) {
       transcript.appendChild(renderMessage(message));
     });
     updateMathOverflowState();
+    syncCalculatorTriggerVisibility();
     syncQuestionViewport(scrollMode, previousScrollTop);
     requestTranscriptScrollButtonSync();
   }
@@ -4016,15 +4158,15 @@ if (previewRoot && previewDataNode) {
     };
   }
 
-  function furtherStudyMessagePayload(block, sourceMessage) {
+  function furtherStudyMessagePayload(conversation, sourceMessage) {
     const questions = Array.isArray(sourceMessage?.further_study_questions)
       ? sourceMessage.further_study_questions.filter(Boolean)
       : [];
-    if (!block || !sourceMessage || !questions.length) {
+    if (!conversation || !sourceMessage || !questions.length) {
       return null;
     }
     return {
-      block_label: block.title,
+      block_label: conversation.title,
       kind: "resource",
       resource_key: "further_study",
       resource_label: "Further study",
@@ -4119,12 +4261,26 @@ if (previewRoot && previewDataNode) {
       return lastMessage;
     }
 
+    if (messagePayload.kind !== "calculator") {
+      removeCalculatorInlineMessages(resolvedThreadId);
+    }
+
+    const activeConversation = currentConversationEntry();
     const activeProject = block ? currentProject(block) : null;
-    const baseCount = activeProject && Array.isArray(activeProject.transcript)
-      ? activeProject.transcript.length
-      : (block && Array.isArray(block.transcript)
-        ? block.transcript.length
-        : (resolvedThreadId === STATS_THREAD_ID ? 1 : 0));
+    let baseCount = 0;
+    if (activeProject && Array.isArray(activeProject.transcript)) {
+      baseCount = activeProject.transcript.length;
+    } else if (block && Array.isArray(block.transcript)) {
+      baseCount = block.transcript.length;
+    } else if (
+      activeConversation
+      && resolvedThreadId === currentConversationKey()
+      && Array.isArray(activeConversation.transcript)
+    ) {
+      baseCount = activeConversation.transcript.length;
+    } else if (resolvedThreadId === STATS_THREAD_ID) {
+      baseCount = 1;
+    }
     inlineMessageSequence += 1;
     const message = {
       ...messagePayload,
@@ -4155,15 +4311,16 @@ if (previewRoot && previewDataNode) {
   }
 
   function appendFurtherStudyMessage(sourceMessage) {
-    const block = currentBlock();
-    const payload = furtherStudyMessagePayload(block, sourceMessage);
-    if (!block || !payload) {
+    const conversation = currentConversationEntry();
+    const payload = furtherStudyMessagePayload(conversation, sourceMessage);
+    if (!conversation || !payload) {
       return;
     }
     const sourceKey = sourceMessage.question_id || sourceMessage.id || payload.questions.join("|");
     appendInlineMessage(payload, {
-      block,
-      dedupeKey: `further-study:${block.id}:${sourceKey}`,
+      block: currentBlock(),
+      threadId: currentConversationKey(),
+      dedupeKey: `further-study:${currentConversationKey()}:${sourceKey}`,
       closeSidebarOnMobile: true,
     });
   }
@@ -4357,7 +4514,8 @@ if (previewRoot && previewDataNode) {
   function renderPreview(scrollMode = "bottom") {
     const statsView = isStatsView();
     const block = currentBlock();
-    if (!statsView && !block) {
+    const collection = currentCollection();
+    if (!statsView && !block && !collection) {
       return;
     }
     closeObjectiveMenus();
@@ -4369,8 +4527,12 @@ if (previewRoot && previewDataNode) {
       closeGuardrailSheet();
       persistActiveBlockId(activeBlockId);
     } else {
-      activeBlockId = String(block.id);
-      persistActiveBlockId(activeBlockId);
+      if (collection) {
+        persistActiveBlockId(activeBlockId);
+      } else {
+        activeBlockId = String(block.id);
+        persistActiveBlockId(activeBlockId);
+      }
     }
     if (isMessengerPreview && !messengerMobileMedia.matches) {
       setMessengerMobileChatOpen(true);
@@ -4418,8 +4580,64 @@ if (previewRoot && previewDataNode) {
       return;
     }
 
+    if (collection) {
+      closeHeaderMenu();
+      closeFlagSheet();
+      closeGuardrailSheet();
+      const conversation = collectionConversationRowData(collection);
+      if (activeBlockTitle) {
+        activeBlockTitle.textContent = collection.title;
+      }
+      setAvatarContent(activeBlockAvatar, {
+        avatarUrl: conversation.avatarUrl,
+        avatarText: conversation.avatarText,
+        imageClass: "preview-chat-header-avatar-image",
+        isSquare: true,
+      });
+      if (activeBlockMeta) {
+        activeBlockMeta.hidden = !isMessengerPreview;
+        activeBlockMeta.textContent = conversation.previewTimestamp
+          ? `Last activity ${conversation.previewTimestamp}`
+          : "Tap Quiz to start this conversation.";
+      }
+      if (headerMenu) {
+        headerMenu.hidden = true;
+      }
+      if (headerCoverage && headerCoverageFill) {
+        const rawCoverage = Number(collection?.metrics?.coverage);
+        const hasCoverage = Number.isFinite(rawCoverage);
+        const coverage = hasCoverage ? Math.max(0, Math.min(rawCoverage, 100)) : 0;
+        headerCoverage.hidden = !hasCoverage;
+        if (hasCoverage) {
+          const coverageText = formatPercentage(coverage);
+          headerCoverageFill.style.width = `${coverage}%`;
+          headerCoverage.setAttribute("aria-valuenow", coverage.toFixed(1));
+          headerCoverage.setAttribute("aria-valuetext", `Coverage ${coverageText}`);
+          headerCoverage.title = `Coverage ${coverageText}`;
+        } else {
+          headerCoverageFill.style.width = "0%";
+          headerCoverage.setAttribute("aria-valuenow", "0");
+          headerCoverage.setAttribute("aria-valuetext", "Coverage unavailable");
+          headerCoverage.removeAttribute("title");
+        }
+      }
+      if (form) {
+        form.hidden = false;
+      }
+      renderCourseMetrics();
+      renderBlockSwitcher();
+      renderProjectSwitcher();
+      renderProjectPanel();
+      renderTranscript(scrollMode);
+      scheduleMessengerHeaderHeightSync();
+      syncComposerInputFromState();
+      syncComposerState();
+      updateComposerClearance();
+      return;
+    }
+
     const project = currentProject(block);
-    const conversation = conversationRowData(block);
+    const conversation = blockConversationRowData(block);
     if (activeBlockTitle) {
       activeBlockTitle.textContent = project ? `${block.title} · ${project.title}` : block.title;
     }
@@ -4502,7 +4720,7 @@ if (previewRoot && previewDataNode) {
   }
 
   async function postDraftAnswer(questionId, answerText, requestId) {
-    const block = currentBlock();
+    const block = currentActionBlock();
     if (!block) {
       return;
     }
@@ -4519,6 +4737,8 @@ if (previewRoot && previewDataNode) {
       body: JSON.stringify({
         question_id: questionId,
         answer_text: answerText,
+        thread_kind: isCollectionView() ? "collection" : "block",
+        thread_id: isCollectionView() ? Number(currentCollectionId() || 0) : Number(block.id || 0),
       }),
       credentials: "same-origin",
       signal: controller.signal,
@@ -4548,7 +4768,7 @@ if (previewRoot && previewDataNode) {
   }
 
   async function postPreviewAction(action, payload = null, options = {}) {
-    const block = currentBlock();
+    const block = currentActionBlock();
     if (!block) {
       return false;
     }
@@ -4559,14 +4779,22 @@ if (previewRoot && previewDataNode) {
     setComposerDisabled(true);
     let succeeded = false;
     try {
+      const requestPayload = payload ? { ...payload } : {};
+      if (isCollectionView()) {
+        requestPayload.thread_kind = "collection";
+        requestPayload.thread_id = Number(currentCollectionId() || 0);
+      } else {
+        requestPayload.thread_kind = "block";
+        requestPayload.thread_id = Number(block.id || 0);
+      }
       const responsePromise = fetch(actionUrl(block.id, action), {
         method: "POST",
         headers: {
-          "Content-Type": payload ? "application/json" : "text/plain;charset=UTF-8",
+          "Content-Type": "application/json",
           "X-CSRFToken": getCsrfToken(),
           "X-Requested-With": "XMLHttpRequest",
         },
-        body: payload ? JSON.stringify(payload) : "",
+        body: JSON.stringify(requestPayload),
         credentials: "same-origin",
       });
       const minimumDelayPromise = options.minDurationMs
@@ -4577,8 +4805,9 @@ if (previewRoot && previewDataNode) {
       if (!response.ok || !data.ok) {
         throw new Error(data.error || "Unable to update right now.");
       }
+      removeCalculatorInlineMessages(previewThreadKey(data.preview) || String(block.id || ""));
       previewState = data.preview;
-      activeBlockId = String(data.preview.active_block_id || block.id);
+      activeBlockId = previewThreadKey(data.preview) || String(data.preview.active_block_id || block.id);
       clearAnsweredQuestionSelections();
       renderPreview(options.scrollMode || "bottom");
       succeeded = true;
@@ -4603,8 +4832,8 @@ if (previewRoot && previewDataNode) {
       return;
     }
 
-    const block = currentBlock();
-    if (!block) {
+    const actionBlock = currentActionBlock();
+    if (!actionBlock) {
       return;
     }
 
@@ -4619,14 +4848,15 @@ if (previewRoot && previewDataNode) {
       setSidebarOpen(false);
     }
 
-    setOptimisticUserMessage(block.id, trimmed);
-    setQuizLoading(block.id, true);
+    const threadId = currentConversationKey();
+    setOptimisticUserMessage(threadId, trimmed);
+    setQuizLoading(threadId, true);
     renderTranscript();
     try {
       await postPreviewAction("chat", { question: trimmed }, { focusComposer, minDurationMs: 900 });
     } finally {
-      setOptimisticUserMessage(block.id, "");
-      setQuizLoading(block.id, false);
+      setOptimisticUserMessage(threadId, "");
+      setQuizLoading(threadId, false);
       renderTranscript();
     }
   }
@@ -4647,8 +4877,8 @@ if (previewRoot && previewDataNode) {
       }
       const block = currentBlock();
       if (block) {
-        setOptimisticUserMessage(block.id, trimmed || "Hint");
-        setQuizLoading(block.id, true);
+        setOptimisticUserMessage(String(block.id), trimmed || "Hint");
+        setQuizLoading(String(block.id), true);
         renderTranscript();
       }
       try {
@@ -4659,8 +4889,8 @@ if (previewRoot && previewDataNode) {
         );
       } finally {
         if (block) {
-          setOptimisticUserMessage(block.id, "");
-          setQuizLoading(block.id, false);
+          setOptimisticUserMessage(String(block.id), "");
+          setQuizLoading(String(block.id), false);
           renderTranscript();
         }
       }
@@ -4677,13 +4907,13 @@ if (previewRoot && previewDataNode) {
       resizeComposerInput();
       syncComposerState();
       updateComposerClearance();
-      const block = currentBlock();
+      const threadId = currentConversationKey();
       updateQuestionMessage(activeWaq.question_id, (message) => {
         message.draft_answer = "";
       });
-      if (block) {
-        setOptimisticUserMessage(block.id, trimmed);
-        setQuizLoading(block.id, true);
+      if (threadId) {
+        setOptimisticUserMessage(threadId, trimmed);
+        setQuizLoading(threadId, true);
         renderTranscript();
       }
       try {
@@ -4693,9 +4923,9 @@ if (previewRoot && previewDataNode) {
           { focusComposer: true, minDurationMs: 900, scrollMode: "bottom" },
         );
       } finally {
-        if (block) {
-          setOptimisticUserMessage(block.id, "");
-          setQuizLoading(block.id, false);
+        if (threadId) {
+          setOptimisticUserMessage(threadId, "");
+          setQuizLoading(threadId, false);
           renderTranscript();
         }
       }
@@ -4707,17 +4937,17 @@ if (previewRoot && previewDataNode) {
       return;
     }
     input.blur();
-    const block = currentBlock();
-    if (block) {
-      setQuizLoading(block.id, true);
+    const threadId = currentConversationKey();
+    if (threadId) {
+      setQuizLoading(threadId, true);
       renderTranscript();
     }
     let quizRequestSucceeded = false;
     try {
         quizRequestSucceeded = await postPreviewAction("quiz", null, { minDurationMs: 2000, scrollMode: "question" });
     } finally {
-      if (block) {
-        setQuizLoading(block.id, false);
+      if (threadId) {
+        setQuizLoading(threadId, false);
         renderTranscript(quizRequestSucceeded ? "question" : "preserve");
       }
     }
@@ -4741,13 +4971,13 @@ if (previewRoot && previewDataNode) {
       if (requestInFlight || button.disabled) {
         return;
       }
-      const block = currentBlock();
+      const threadId = currentConversationKey();
       const questionType = button.dataset.quizType || "";
       closeQuizMenu();
       renderPreview("preserve");
       input?.blur();
-      if (block) {
-        setQuizLoading(block.id, true);
+      if (threadId) {
+        setQuizLoading(threadId, true);
         renderTranscript();
       }
       let quizRequestSucceeded = false;
@@ -4760,8 +4990,8 @@ if (previewRoot && previewDataNode) {
             };
         quizRequestSucceeded = await postPreviewAction("quiz", requestPayload, { minDurationMs: 2000, scrollMode: "question" });
       } finally {
-        if (block) {
-          setQuizLoading(block.id, false);
+        if (threadId) {
+          setQuizLoading(threadId, false);
           renderTranscript(quizRequestSucceeded ? "question" : "preserve");
         }
       }
@@ -4876,7 +5106,7 @@ if (previewRoot && previewDataNode) {
       closeObjectiveMenus();
       input?.blur();
       if (block) {
-        setQuizLoading(block.id, true);
+        setQuizLoading(String(block.id), true);
         renderTranscript();
       }
       void (async () => {
@@ -4893,7 +5123,7 @@ if (previewRoot && previewDataNode) {
           );
         } finally {
           if (block) {
-            setQuizLoading(block.id, false);
+            setQuizLoading(String(block.id), false);
             renderTranscript(quizRequestSucceeded ? "question" : "preserve");
           }
         }

@@ -10,14 +10,18 @@ from urllib.parse import urlsplit
 from django.db import OperationalError, transaction
 from django.db.models import F
 
-from standalone.models import Course, CourseDemoAccess, CourseDemoValidationSession
+from standalone.models import Course, CourseBlockCollection, CourseDemoAccess, CourseDemoValidationSession
 from standalone.services.preview import (
     PREVIEW_SESSION_KEY,
     _empty_course_state,
+    draft_preview_collection_written_answer,
     draft_preview_written_answer,
+    request_preview_collection_quiz,
     request_preview_quiz,
+    send_preview_collection_chat_message,
     send_preview_chat_message,
     serialize_preview_state,
+    submit_preview_collection_answer,
     submit_preview_answer,
 )
 from standalone.services.preview_validation import (
@@ -178,6 +182,7 @@ def request_demo_preview_quiz(
     access: CourseDemoAccess,
     block,
     *,
+    collection: CourseBlockCollection | None = None,
     requested_question_type: str | None = None,
     preferred_objective_id: int | None = None,
     force_new: bool = False,
@@ -187,56 +192,112 @@ def request_demo_preview_quiz(
         with transaction.atomic():
             locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
             request = _demo_request(locked_access)
-            payload = request_preview_quiz(
-                request,
-                locked_access.course,
-                block,
-                requested_question_type=requested_question_type,
-                preferred_objective_id=preferred_objective_id,
-                force_new=force_new,
-                coding_only=coding_only,
-            )
+            if collection is not None:
+                payload = request_preview_collection_quiz(
+                    request,
+                    locked_access.course,
+                    collection,
+                    requested_question_type=requested_question_type,
+                )
+            else:
+                payload = request_preview_quiz(
+                    request,
+                    locked_access.course,
+                    block,
+                    requested_question_type=requested_question_type,
+                    preferred_objective_id=preferred_objective_id,
+                    force_new=force_new,
+                    coding_only=coding_only,
+                )
             for payload_block in payload.get("blocks", []):
                 payload_block["projects"] = []
             _persist_demo_states(locked_access, request)
     return payload
 
 
-def submit_demo_preview_answer(access: CourseDemoAccess, block, question_id: int, selected_answers=None, *, answer_text: str = "") -> dict:
+def submit_demo_preview_answer(
+    access: CourseDemoAccess,
+    block,
+    question_id: int,
+    selected_answers=None,
+    *,
+    collection: CourseBlockCollection | None = None,
+    answer_text: str = "",
+) -> dict:
     with _demo_access_lock(access.pk):
         with transaction.atomic():
             locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
             request = _demo_request(locked_access)
-            payload = submit_preview_answer(
-                request,
-                locked_access.course,
-                block,
-                question_id,
-                selected_answers or [],
-                answer_text=answer_text,
-            )
+            if collection is not None:
+                payload = submit_preview_collection_answer(
+                    request,
+                    locked_access.course,
+                    collection,
+                    question_id,
+                    selected_answers or [],
+                    answer_text=answer_text,
+                )
+            else:
+                payload = submit_preview_answer(
+                    request,
+                    locked_access.course,
+                    block,
+                    question_id,
+                    selected_answers or [],
+                    answer_text=answer_text,
+                )
             for payload_block in payload.get("blocks", []):
                 payload_block["projects"] = []
             _persist_demo_states(locked_access, request)
     return payload
 
 
-def draft_demo_preview_written_answer(access: CourseDemoAccess, block, question_id: int, answer_text: str) -> dict:
+def draft_demo_preview_written_answer(
+    access: CourseDemoAccess,
+    block,
+    question_id: int,
+    answer_text: str,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     with _demo_access_lock(access.pk):
         with transaction.atomic():
             locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
             request = _demo_request(locked_access)
-            payload = draft_preview_written_answer(request, locked_access.course, block, question_id, answer_text)
+            if collection is not None:
+                payload = draft_preview_collection_written_answer(
+                    request,
+                    locked_access.course,
+                    collection,
+                    question_id,
+                    answer_text,
+                )
+            else:
+                payload = draft_preview_written_answer(request, locked_access.course, block, question_id, answer_text)
             _persist_demo_states(locked_access, request)
     return payload
 
 
-def send_demo_preview_chat_message(access: CourseDemoAccess, block, question: str) -> dict:
+def send_demo_preview_chat_message(
+    access: CourseDemoAccess,
+    block,
+    question: str,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     with _demo_access_lock(access.pk):
         with transaction.atomic():
             locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
             request = _demo_request(locked_access)
-            payload = send_preview_chat_message(request, locked_access.course, block, question)
+            if collection is not None:
+                payload = send_preview_collection_chat_message(
+                    request,
+                    locked_access.course,
+                    collection,
+                    question,
+                )
+            else:
+                payload = send_preview_chat_message(request, locked_access.course, block, question)
             for payload_block in payload.get("blocks", []):
                 payload_block["projects"] = []
             _persist_demo_states(locked_access, request)

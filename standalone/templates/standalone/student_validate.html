@@ -2,8 +2,8 @@
 {% load static %}
 {% block title %}Validate | {{ course.title }}{% endblock %}
 {% block extra_head %}
-  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}">
-  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/css/student-preview.css' %}?v={{ static_asset_version }}">
+  <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}?v={{ static_asset_version }}">
 {% endblock %}
 {% block app_nav_links %}
   {% if not is_demo_mode %}
@@ -170,8 +170,8 @@
 {{ sidebar_preview_state|default:''|json_script:"validation-preview-data" }}
 {% endblock %}
 {% block extra_body %}
-  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}"></script>
-  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}"></script>
-  <script src="{% static 'standalone/js/math-render.js' %}"></script>
-  <script src="{% static 'standalone/js/student-validate.js' %}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/katex.min.js' %}?v={{ static_asset_version }}"></script>
+  <script src="{% static 'standalone/vendor/katex/dist/contrib/auto-render.min.js' %}?v={{ static_asset_version }}"></script>
+  <script src="{% static 'standalone/js/math-render.js' %}?v={{ static_asset_version }}"></script>
+  <script src="{% static 'standalone/js/student-validate.js' %}?v={{ static_asset_version }}"></script>
 {% endblock %}

@@ -12,6 +12,7 @@ from standalone.models import (
     PracticeAttempt,
     PracticeAttemptQuestion,
     PracticeMessage,
+    CourseBlockCollection,
     QuestionBankItem,
     QuestionFlag,
     ValidationAttempt,
@@ -20,14 +21,22 @@ from standalone.models import (
 )
 from standalone.services.metrics import refresh_enrollment_metrics
 from standalone.services.preview import (
+    PREVIEW_BLOCK_THREAD_KIND,
+    PREVIEW_COLLECTION_THREAD_KIND,
     PREVIEW_SESSION_KEY,
     _empty_course_state,
+    draft_preview_collection_written_answer,
     draft_preview_written_answer,
+    flag_preview_collection_question,
     flag_preview_question,
+    regenerate_preview_collection_numeric_feedback,
     regenerate_preview_numeric_feedback,
+    request_preview_collection_quiz,
     request_preview_quiz,
+    send_preview_collection_chat_message,
     send_preview_chat_message,
     serialize_preview_state,
+    submit_preview_collection_answer,
     submit_preview_answer,
 )
 
@@ -69,6 +78,7 @@ def _student_course_state(enrollment: Enrollment) -> dict:
     course = enrollment.course
     course_state = _empty_course_state()
     transcripts = course_state.setdefault("transcripts", {})
+    collection_threads = course_state.setdefault("collection_threads", {})
     max_sequence = 0
     for message in enrollment.practice_messages.select_related("block", "question").order_by("sequence", "created_at"):
         payload = dict(message.payload or {})
@@ -81,7 +91,19 @@ def _student_course_state(enrollment: Enrollment) -> dict:
             payload.setdefault("question_id", message.question_id)
         if message.source_blocks:
             payload.setdefault("source_blocks", message.source_blocks)
-        transcripts.setdefault(str(message.block_id), []).append(payload)
+        thread_kind = str(payload.get("thread_kind") or PREVIEW_BLOCK_THREAD_KIND)
+        thread_id = str(payload.get("thread_id") or (message.block_id if thread_kind == PREVIEW_BLOCK_THREAD_KIND else ""))
+        if thread_kind == PREVIEW_COLLECTION_THREAD_KIND and thread_id:
+            thread_state = collection_threads.setdefault(
+                thread_id,
+                {
+                    "transcript": [],
+                    "pending_question_id": None,
+                },
+            )
+            thread_state["transcript"].append(payload)
+        else:
+            transcripts.setdefault(str(message.block_id), []).append(payload)
         max_sequence = max(max_sequence, message.sequence)
     course_state["message_counter"] = max_sequence
 
@@ -103,6 +125,42 @@ def _student_course_state(enrollment: Enrollment) -> dict:
     )
     course_state["flagged_question_ids"] = [str(question_id) for question_id in flagged_ids]
 
+    thread_message_meta: dict[int, list[dict]] = {}
+    for block_id, transcript in transcripts.items():
+        for payload in transcript:
+            if payload.get("kind") != "feedback":
+                continue
+            question_id = int(payload.get("question_id") or 0)
+            if question_id <= 0:
+                continue
+            thread_message_meta.setdefault(question_id, []).append(
+                {
+                    "thread_kind": PREVIEW_BLOCK_THREAD_KIND,
+                    "thread_id": int(payload.get("thread_id") or block_id),
+                    "feedback_message_id": payload.get("id"),
+                    "answered_at": payload.get("created_at"),
+                }
+            )
+    for payloads in thread_message_meta.values():
+        payloads.sort(key=lambda item: str(item.get("answered_at") or ""))
+    for collection_id, thread_state in collection_threads.items():
+        for payload in thread_state.get("transcript", []):
+            if payload.get("kind") != "feedback":
+                continue
+            question_id = int(payload.get("question_id") or 0)
+            if question_id <= 0:
+                continue
+            thread_message_meta.setdefault(question_id, []).append(
+                {
+                    "thread_kind": PREVIEW_COLLECTION_THREAD_KIND,
+                    "thread_id": int(collection_id),
+                    "feedback_message_id": payload.get("id"),
+                    "answered_at": payload.get("created_at"),
+                }
+            )
+    for payloads in thread_message_meta.values():
+        payloads.sort(key=lambda item: str(item.get("answered_at") or ""))
+
     completed_events = []
     answers = (
         PracticeAttemptQuestion.objects.filter(
@@ -115,10 +173,16 @@ def _student_course_state(enrollment: Enrollment) -> dict:
     for answer in answers:
         question = answer.question
         answered_at = answer.attempt.completed_at or answer.created_at
+        collection_meta = None
+        candidates = thread_message_meta.get(question.pk) or []
+        if candidates:
+            collection_meta = candidates.pop(0)
         completed_events.append(
             {
                 "attempt_question_id": answer.pk,
                 "block_id": answer.attempt.block_id or question.block_id,
+                "thread_kind": collection_meta["thread_kind"] if collection_meta else PREVIEW_BLOCK_THREAD_KIND,
+                "thread_id": collection_meta["thread_id"] if collection_meta else (answer.attempt.block_id or question.block_id),
                 "question_id": question.pk,
                 "correct": answer.is_correct,
                 "answered_at": answered_at.isoformat(),
@@ -127,6 +191,7 @@ def _student_course_state(enrollment: Enrollment) -> dict:
                 "question_type": question.question_type,
                 "answer_text": answer.selected_answer,
                 "feedback": answer.feedback,
+                "feedback_message_id": collection_meta["feedback_message_id"] if collection_meta else "",
             }
         )
     course_state["completed_events"] = completed_events
@@ -142,6 +207,16 @@ def _student_course_state(enrollment: Enrollment) -> dict:
                         pending_questions[block_id] = None
                     continue
                 pending_questions[block_id] = message.get("question_id")
+    for collection_id, thread_state in collection_threads.items():
+        thread_state["pending_question_id"] = None
+        for message in thread_state.get("transcript", []):
+            if message.get("kind") != "question":
+                continue
+            if message.get("answered") or message.get("flagged"):
+                if thread_state.get("pending_question_id") == message.get("question_id"):
+                    thread_state["pending_question_id"] = None
+                continue
+            thread_state["pending_question_id"] = message.get("question_id")
     return course_state
 
 
@@ -223,6 +298,46 @@ def _sync_messages(enrollment: Enrollment, course_state: dict) -> None:
             question = None
             if question_id:
                 question = QuestionBankItem.objects.filter(pk=question_id, course=enrollment.course).first()
+            PracticeMessage.objects.update_or_create(
+                enrollment=enrollment,
+                message_id=message_id,
+                defaults={
+                    "block_id": int(block_id),
+                    "question": question,
+                    "sequence": sequence,
+                    "role": str(message.get("role") or "assistant")[:20],
+                    "kind": str(message.get("kind") or "text")[:30],
+                    "text": str(message.get("text") or ""),
+                    "payload": message,
+                    "source_blocks": list(message.get("source_blocks") or []),
+                },
+            )
+    collections_by_id = {
+        collection.pk: collection
+        for collection in CourseBlockCollection.objects.filter(course=enrollment.course).prefetch_related("blocks")
+    }
+    for collection_id, thread_state in course_state.get("collection_threads", {}).items():
+        collection = collections_by_id.get(int(collection_id or 0))
+        if collection is None:
+            continue
+        collection_block_ids = list(collection.blocks.order_by("order", "created_at", "pk").values_list("pk", flat=True))
+        anchor_block_id = collection_block_ids[0] if collection_block_ids else None
+        for message in thread_state.get("transcript", []):
+            fallback_sequence += 1
+            sequence = _message_sequence(message, fallback_sequence)
+            message_id = str(message.get("id") or f"student-practice-message-{sequence}")
+            message["id"] = message_id
+            message.setdefault("thread_kind", PREVIEW_COLLECTION_THREAD_KIND)
+            message.setdefault("thread_id", collection.pk)
+            question_id = message.get("question_id") or None
+            question = None
+            block_id = anchor_block_id
+            if question_id:
+                question = QuestionBankItem.objects.filter(pk=question_id, course=enrollment.course).first()
+                if question is not None:
+                    block_id = question.block_id
+            if block_id is None:
+                continue
             PracticeMessage.objects.update_or_create(
                 enrollment=enrollment,
                 message_id=message_id,
@@ -391,10 +506,23 @@ def _inject_validation_reminders(payload: dict, enrollment: Enrollment) -> dict:
     return payload
 
 
-def serialize_student_practice_state(enrollment: Enrollment, *, active_block_id=None) -> dict:
+def serialize_student_practice_state(
+    enrollment: Enrollment,
+    *,
+    active_block_id=None,
+    active_thread_kind: str | None = None,
+    active_thread_id: int | None = None,
+) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = serialize_preview_state(request, enrollment.course, active_block_id=active_block_id, project_enrollment=enrollment)
+    payload = serialize_preview_state(
+        request,
+        enrollment.course,
+        active_block_id=active_block_id,
+        active_thread_kind=active_thread_kind,
+        active_thread_id=active_thread_id,
+        project_enrollment=enrollment,
+    )
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)
 
@@ -405,37 +533,73 @@ def request_student_practice_quiz(
     requested_question_type: str | None = None,
     *,
     coding_only: bool = False,
+    collection: CourseBlockCollection | None = None,
 ) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = request_preview_quiz(
-        request,
-        enrollment.course,
-        block,
-        requested_question_type=requested_question_type,
-        coding_only=coding_only,
-    )
+    if collection is not None:
+        payload = request_preview_collection_quiz(
+            request,
+            enrollment.course,
+            collection,
+            requested_question_type=requested_question_type,
+        )
+    else:
+        payload = request_preview_quiz(
+            request,
+            enrollment.course,
+            block,
+            requested_question_type=requested_question_type,
+            coding_only=coding_only,
+        )
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)
 
 
-def draft_student_practice_written_answer(enrollment: Enrollment, block, question_id: int, answer_text: str) -> dict:
+def draft_student_practice_written_answer(
+    enrollment: Enrollment,
+    block,
+    question_id: int,
+    answer_text: str,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
+    if collection is not None:
+        return draft_preview_collection_written_answer(request, enrollment.course, collection, question_id, answer_text)
     return draft_preview_written_answer(request, enrollment.course, block, question_id, answer_text)
 
 
-def submit_student_practice_answer(enrollment: Enrollment, block, question_id: int, selected_answers=None, *, answer_text: str = "") -> dict:
+def submit_student_practice_answer(
+    enrollment: Enrollment,
+    block,
+    question_id: int,
+    selected_answers=None,
+    *,
+    answer_text: str = "",
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = submit_preview_answer(
-        request,
-        enrollment.course,
-        block,
-        question_id,
-        selected_answers,
-        answer_text=answer_text,
-    )
+    if collection is not None:
+        payload = submit_preview_collection_answer(
+            request,
+            enrollment.course,
+            collection,
+            question_id,
+            selected_answers,
+            answer_text=answer_text,
+        )
+    else:
+        payload = submit_preview_answer(
+            request,
+            enrollment.course,
+            block,
+            question_id,
+            selected_answers,
+            answer_text=answer_text,
+        )
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course))
     return _inject_validation_reminders(payload, enrollment)
 
@@ -445,31 +609,60 @@ def regenerate_student_practice_numeric_feedback(
     block,
     question_id: int,
     feedback_message_id: str,
+    *,
+    collection: CourseBlockCollection | None = None,
 ) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = regenerate_preview_numeric_feedback(
-        request,
-        enrollment.course,
-        block,
-        question_id,
-        feedback_message_id,
-    )
+    if collection is not None:
+        payload = regenerate_preview_collection_numeric_feedback(
+            request,
+            enrollment.course,
+            collection,
+            question_id,
+            feedback_message_id,
+        )
+    else:
+        payload = regenerate_preview_numeric_feedback(
+            request,
+            enrollment.course,
+            block,
+            question_id,
+            feedback_message_id,
+        )
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)
 
 
-def send_student_practice_chat_message(enrollment: Enrollment, block, question: str) -> dict:
+def send_student_practice_chat_message(
+    enrollment: Enrollment,
+    block,
+    question: str,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = send_preview_chat_message(request, enrollment.course, block, question)
+    if collection is not None:
+        payload = send_preview_collection_chat_message(request, enrollment.course, collection, question)
+    else:
+        payload = send_preview_chat_message(request, enrollment.course, block, question)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)
 
 
-def flag_student_practice_question(enrollment: Enrollment, block, question_id: int) -> dict:
+def flag_student_practice_question(
+    enrollment: Enrollment,
+    block,
+    question_id: int,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> dict:
     course_state = _student_course_state(enrollment)
     request = _fake_request(enrollment.course, course_state)
-    payload = flag_preview_question(request, enrollment.course, block, question_id)
+    if collection is not None:
+        payload = flag_preview_collection_question(request, enrollment.course, collection, question_id)
+    else:
+        payload = flag_preview_question(request, enrollment.course, block, question_id)
     _sync_state_to_enrollment(enrollment, _course_state_from_request(request, enrollment.course), refresh_metrics=False)
     return _inject_validation_reminders(payload, enrollment)

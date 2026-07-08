@@ -12,7 +12,15 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from openai import OpenAI
 
-from standalone.models import Course, CourseBlock, LearningObjective, LearningObjectiveCorrection, PracticeAttemptQuestion, QuestionBankItem
+from standalone.models import (
+    Course,
+    CourseBlock,
+    CourseBlockCollection,
+    LearningObjective,
+    LearningObjectiveCorrection,
+    PracticeAttemptQuestion,
+    QuestionBankItem,
+)
 from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
 from standalone.services.practice_scoring import (
     combine_block_practice_metrics,
@@ -72,6 +80,8 @@ PREVIEW_STATS_QUESTION_TYPE_ORDER = {
     QuestionBankItem.QuestionType.MAQ: 2,
     QuestionBankItem.QuestionType.WAQ: 3,
 }
+PREVIEW_BLOCK_THREAD_KIND = "block"
+PREVIEW_COLLECTION_THREAD_KIND = "collection"
 
 
 def _empty_course_state() -> dict:
@@ -85,6 +95,7 @@ def _empty_course_state() -> dict:
         "written_answer_drafts": {},
         "completed_events": [],
         "progress_milestones": {},
+        "collection_threads": {},
     }
 
 
@@ -115,11 +126,19 @@ def _next_message_id(course_state: dict) -> str:
     return f"preview-message-{course_state['message_counter']}"
 
 
-def _block_welcome_message_text(block_title: str) -> str:
+def _welcome_message_text(title: str) -> str:
     return (
-        f'Welcome to {block_title}. Tap the "Quiz" button to generate a quiz question for this topic, '
+        f'Welcome to {title}. Tap the "Quiz" button to generate a quiz question for this topic, '
         "or ask about anything in the course."
     )
+
+
+def _block_welcome_message_text(block_title: str) -> str:
+    return _welcome_message_text(block_title)
+
+
+def _collection_welcome_message_text(collection_title: str) -> str:
+    return _welcome_message_text(collection_title)
 
 
 def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dict]:
@@ -132,10 +151,42 @@ def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dic
                 "created_at": timezone.now().isoformat(),
                 "role": "assistant",
                 "kind": "text",
+                "thread_kind": PREVIEW_BLOCK_THREAD_KIND,
+                "thread_id": block.pk,
                 "text": _block_welcome_message_text(block.title),
                 "is_block_welcome": True,
                 "inline_cta_label": "Test Mode",
                 "source_blocks": [block.title],
+            }
+        )
+    return transcript
+
+
+def _collection_thread_state(course_state: dict, collection: CourseBlockCollection) -> dict:
+    return course_state.setdefault("collection_threads", {}).setdefault(
+        str(collection.pk),
+        {
+            "transcript": [],
+            "pending_question_id": None,
+        },
+    )
+
+
+def _ensure_collection_transcript(course_state: dict, collection: CourseBlockCollection) -> list[dict]:
+    thread_state = _collection_thread_state(course_state, collection)
+    transcript = thread_state.setdefault("transcript", [])
+    if not transcript:
+        transcript.append(
+            {
+                "id": _next_message_id(course_state),
+                "created_at": timezone.now().isoformat(),
+                "role": "assistant",
+                "kind": "text",
+                "thread_kind": PREVIEW_COLLECTION_THREAD_KIND,
+                "thread_id": collection.pk,
+                "text": _collection_welcome_message_text(collection.title),
+                "is_collection_welcome": True,
+                "source_blocks": [collection.title],
             }
         )
     return transcript
@@ -148,6 +199,23 @@ def _append_message(course_state: dict, block: CourseBlock, role: str, kind: str
         "created_at": timezone.now().isoformat(),
         "role": role,
         "kind": kind,
+        "thread_kind": PREVIEW_BLOCK_THREAD_KIND,
+        "thread_id": block.pk,
+        **data,
+    }
+    transcript.append(message)
+    return message
+
+
+def _append_collection_message(course_state: dict, collection: CourseBlockCollection, role: str, kind: str, **data) -> dict:
+    transcript = _ensure_collection_transcript(course_state, collection)
+    message = {
+        "id": _next_message_id(course_state),
+        "created_at": timezone.now().isoformat(),
+        "role": role,
+        "kind": kind,
+        "thread_kind": PREVIEW_COLLECTION_THREAD_KIND,
+        "thread_id": collection.pk,
         **data,
     }
     transcript.append(message)
@@ -177,6 +245,18 @@ def _first_active_block(course: Course):
 
 def _preview_blocks(course: Course):
     return list(course.blocks.select_related("config").prefetch_related("learning_objectives").order_by("order", "created_at"))
+
+
+def _collection_blocks_for_preview(course: Course, collection: CourseBlockCollection, blocks: list[CourseBlock] | None = None) -> list[CourseBlock]:
+    preview_blocks = blocks or _preview_blocks(course)
+    collection_block_ids = set(
+        collection.blocks.order_by("order", "created_at", "pk").values_list("pk", flat=True)
+    )
+    return [
+        block
+        for block in preview_blocks
+        if block.pk in collection_block_ids and _block_is_accessible(course, block)
+    ]
 
 
 def _flagged_question_ids(course_state: dict) -> set[int]:
@@ -524,6 +604,76 @@ def _fallback_preview_question_types(
     return fallback_types
 
 
+def _collection_presented_question_mix(course_state: dict, collection: CourseBlockCollection) -> tuple[dict[str, int], int]:
+    transcript = _ensure_collection_transcript(course_state, collection)
+    type_counts: dict[str, int] = defaultdict(int)
+    presented_total = 0
+    for message in transcript:
+        if message.get("kind") != "question":
+            continue
+        question_type = str(message.get("question_type") or "").strip()
+        if not question_type:
+            continue
+        type_counts[question_type] += 1
+        presented_total += 1
+    return dict(type_counts), presented_total
+
+
+def _collection_delivery_type_targets(blocks: list[CourseBlock]) -> dict[str, float]:
+    totals = {
+        QuestionBankItem.QuestionType.MCQ: 0.0,
+        QuestionBankItem.QuestionType.NUM: 0.0,
+        QuestionBankItem.QuestionType.MAQ: 0.0,
+        QuestionBankItem.QuestionType.WAQ: 0.0,
+    }
+    for block in blocks:
+        targets = block.question_type_ratio_targets()
+        for question_type in totals:
+            totals[question_type] += float(targets.get(question_type, 0.0) or 0.0)
+    total = sum(totals.values())
+    if total <= 0:
+        return {QuestionBankItem.QuestionType.MCQ: 100.0}
+    return {
+        question_type: (value * 100.0 / total)
+        for question_type, value in totals.items()
+        if value > 0
+    }
+
+
+def _ordered_collection_question_types(
+    course_state: dict,
+    collection: CourseBlockCollection,
+    blocks: list[CourseBlock],
+    requested_question_type: str | None = None,
+) -> list[str]:
+    if requested_question_type is not None:
+        ordered: list[str] = []
+        for block in blocks:
+            ordered.extend(_fallback_preview_question_types(block.course, block, course_state, requested_question_type))
+        deduped: list[str] = []
+        for question_type in ordered:
+            if question_type not in deduped:
+                deduped.append(question_type)
+        return deduped or [QuestionBankItem.QuestionType.MCQ]
+
+    targets = _collection_delivery_type_targets(blocks)
+    type_counts, presented_total = _collection_presented_question_mix(course_state, collection)
+    ranked = []
+    for question_type, target_ratio in targets.items():
+        current_ratio = (type_counts.get(question_type, 0) * 100.0 / presented_total) if presented_total else 0.0
+        gap = target_ratio - current_ratio
+        ranked.append(
+            (
+                -gap,
+                -target_ratio,
+                PREVIEW_QUESTION_TYPE_PRIORITY.get(question_type, 99),
+                question_type,
+            )
+        )
+    ranked.sort()
+    return [question_type for _gap, _target, _priority, question_type in ranked] or [QuestionBankItem.QuestionType.MCQ]
+
+
 def _course_question_queryset(
     course: Course,
     block: CourseBlock,
@@ -739,6 +889,17 @@ def _generation_objective_ids_for_block(course_state: dict, block: CourseBlock) 
 
 def _pending_question(course: Course, block: CourseBlock, course_state: dict):
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
+    if not pending_question_id:
+        return None
+    return course.question_bank_items.filter(
+        pk=pending_question_id,
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+        status=QuestionBankItem.Status.APPROVED,
+    ).select_related("learning_objective", "block", "source_chunk").first()
+
+
+def _collection_pending_question(course: Course, collection: CourseBlockCollection, course_state: dict):
+    pending_question_id = _collection_thread_state(course_state, collection).get("pending_question_id")
     if not pending_question_id:
         return None
     return course.question_bank_items.filter(
@@ -975,6 +1136,116 @@ def _mark_question_presented(course_state: dict, block: CourseBlock, question: Q
     return state
 
 
+def _mark_collection_question_presented(
+    course_state: dict,
+    collection: CourseBlockCollection,
+    question: QuestionBankItem,
+) -> dict:
+    state = _question_state(course_state, question.pk)
+    state["times_presented"] += 1
+    state["last_presented_sequence"] = course_state.get("completion_sequence", 0)
+    _collection_thread_state(course_state, collection)["pending_question_id"] = question.pk
+    return state
+
+
+def _question_available_for_collection(
+    course: Course,
+    block: CourseBlock,
+    course_state: dict,
+    question_type: str,
+) -> bool:
+    if not _manual_preview_question_type_allowed(block, question_type):
+        return False
+    for coding_preference in _ordered_preview_coding_preferences(course, block, course_state, question_type):
+        if _pick_retry_question(course, block, course_state, question_type, coding_preference=coding_preference) is not None:
+            return True
+        if _pick_unseen_question(course, block, course_state, question_type, coding_preference=coding_preference) is not None:
+            return True
+    return True
+
+
+def _ensure_question_for_collection(
+    course: Course,
+    collection: CourseBlockCollection,
+    blocks: list[CourseBlock],
+    course_state: dict,
+    requested_question_type: str | None = None,
+    *,
+    force_new: bool = False,
+) -> tuple[QuestionBankItem | None, bool]:
+    pending_question = _collection_pending_question(course, collection, course_state)
+    if force_new and pending_question is not None and pending_question.pk not in _flagged_question_ids(course_state):
+        raise ValueError("Answer or flag the current question before generating a fresh question.")
+    if pending_question is not None and not force_new and pending_question.pk not in _flagged_question_ids(course_state):
+        return pending_question, False
+
+    ordered_types = _ordered_collection_question_types(
+        course_state,
+        collection,
+        blocks,
+        requested_question_type=requested_question_type,
+    )
+
+    for question_type in ordered_types:
+        candidate_blocks = [block for block in blocks if _question_available_for_collection(course, block, course_state, question_type)]
+        random.shuffle(candidate_blocks)
+        for block in candidate_blocks:
+            for coding_preference in _ordered_preview_coding_preferences(course, block, course_state, question_type):
+                question = _pick_retry_question(
+                    course,
+                    block,
+                    course_state,
+                    question_type,
+                    coding_preference=coding_preference,
+                )
+                if question is not None:
+                    return question, True
+            for coding_preference in _ordered_preview_coding_preferences(course, block, course_state, question_type):
+                question = _pick_unseen_question(
+                    course,
+                    block,
+                    course_state,
+                    question_type,
+                    coding_preference=coding_preference,
+                )
+                if question is not None:
+                    return question, True
+
+    if not course_question_generation_budget(course).can_generate:
+        raise QuestionGenerationUnavailableError(live_generation_unavailable_message(course))
+
+    for question_type in ordered_types:
+        candidate_blocks = [block for block in blocks if _manual_preview_question_type_allowed(block, question_type)]
+        random.shuffle(candidate_blocks)
+        for block in candidate_blocks:
+            question, _validation = generate_question_pair_for_block(
+                block,
+                preferred_objective_ids=_generation_objective_ids_for_block(course_state, block),
+                strict_preferred_objectives=False,
+                question_type=question_type,
+                raise_generation_errors=False,
+                allow_numeric_recent_angle_fallback=True,
+                force_coding=False,
+            )
+            if question is not None:
+                return question, True
+
+    for block in random.sample(blocks, len(blocks)):
+        question, _validation = generate_question_pair_for_block(
+            block,
+            preferred_objective_ids=_generation_objective_ids_for_block(course_state, block),
+            strict_preferred_objectives=False,
+            question_type=None,
+            raise_generation_errors=False,
+            allow_numeric_recent_angle_fallback=True,
+            force_coding=False,
+        )
+        if question is not None:
+            return question, True
+
+    return None, False
+
+
 def request_preview_quiz(
     request,
     course: Course,
@@ -1084,6 +1355,127 @@ def request_preview_quiz(
     return serialize_preview_state(request, course, active_block_id=block.pk)
 
 
+def request_preview_collection_quiz(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    *,
+    requested_question_type: str | None = None,
+) -> dict:
+    course_state = _course_state(request, course)
+    blocks = _collection_blocks_for_preview(course, collection)
+    _ensure_collection_transcript(course_state, collection)
+    if not blocks:
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text="This collection does not have any released blocks yet.",
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    try:
+        question, is_new_request = _ensure_question_for_collection(
+            course,
+            collection,
+            blocks,
+            course_state,
+            requested_question_type=requested_question_type,
+        )
+    except QuestionGenerationError as exc:
+        error_text = (
+            str(exc)
+            if isinstance(exc, QuestionGenerationUnavailableError)
+            else "I couldn't get a fresh question for this collection just now. Please try Quiz again."
+        )
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text=error_text,
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    if question is None:
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text="I couldn't build a suitable question for this collection yet. Add more notes or learning objectives and try again.",
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    if is_new_request:
+        _mark_collection_question_presented(course_state, collection, question)
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "question",
+            question_id=question.pk,
+            question_type=question.question_type,
+            question_type_label=question.question_type_label(),
+            text=question.stem,
+            options=random.sample(question.all_answer_options(), len(question.all_answer_options())),
+            block_label=question.block.title,
+            learning_objective_id=question.learning_objective_id,
+            learning_objective=(question.learning_objective.text if question.learning_objective else "General course understanding"),
+            further_study_questions=further_study_questions_for_question(question),
+            is_numerical=question.is_numeric(),
+            is_coding_question=question.is_coding_question,
+            coding_language=question.coding_language,
+            coding_question_kind=question.coding_question_kind,
+            code_snippet=question.code_snippet,
+            answered=False,
+            flagged=False,
+        )
+    else:
+        transcript = _ensure_collection_transcript(course_state, collection)
+        for index in range(len(transcript) - 1, -1, -1):
+            message = transcript[index]
+            if (
+                message.get("kind") == "question"
+                and int(message.get("question_id") or 0) == question.pk
+                and not message.get("answered")
+                and not message.get("flagged")
+            ):
+                if index != len(transcript) - 1:
+                    transcript.append(transcript.pop(index))
+                break
+
+    request.session.modified = True
+    return serialize_preview_state(
+        request,
+        course,
+        active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+        active_thread_id=collection.pk,
+    )
+
+
 def save_preview_objective_guardrail(
     request,
     course: Course,
@@ -1134,6 +1526,42 @@ def draft_preview_written_answer(request, course: Course, block: CourseBlock, qu
 
     draft = _written_answer_draft(course_state, question.pk)
     alignment = _draft_written_answer_alignment(question, block, normalized_answer, draft)
+    draft.update(
+        {
+            "answer_text": alignment["answer_text"],
+            "alignment_score": alignment["alignment_score"],
+            "alignment_state": alignment["alignment_state"],
+        }
+    )
+    request.session.modified = True
+    return {
+        "question_id": question.pk,
+        "answer_text": alignment["answer_text"],
+        "alignment_score": alignment["alignment_score"],
+        "alignment_state": alignment["alignment_state"],
+    }
+
+
+def draft_preview_collection_written_answer(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    question_id: int,
+    answer_text: str,
+) -> dict:
+    course_state = _course_state(request, course)
+    question = _collection_pending_question(course, collection, course_state)
+    normalized_answer = _normalize_written_answer_text(answer_text)
+    if question is None or question.pk != question_id or not question.is_written_answer():
+        return {
+            "question_id": question_id,
+            "answer_text": normalized_answer,
+            "alignment_score": 0,
+            "alignment_state": "drafting",
+        }
+
+    draft = _written_answer_draft(course_state, question.pk)
+    alignment = _draft_written_answer_alignment(question, question.block, normalized_answer, draft)
     draft.update(
         {
             "answer_text": alignment["answer_text"],
@@ -1658,6 +2086,107 @@ def regenerate_preview_numeric_feedback(
     return serialize_preview_state(request, course, active_block_id=block.pk)
 
 
+def regenerate_preview_collection_numeric_feedback(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    question_id: int,
+    feedback_message_id: str,
+) -> dict:
+    course_state = _course_state(request, course)
+    transcript = _ensure_collection_transcript(course_state, collection)
+    feedback_message = next(
+        (
+            message
+            for message in transcript
+            if message.get("kind") == "feedback" and str(message.get("id", "")) == str(feedback_message_id)
+        ),
+        None,
+    )
+    if feedback_message is None:
+        raise ValueError("Choose a numeric feedback message from this collection first.")
+    if int(feedback_message.get("question_id") or 0) != int(question_id or 0):
+        raise ValueError("That feedback message no longer matches the selected question.")
+    if not bool(feedback_message.get("can_regenerate_numeric_feedback")):
+        raise ValueError("Only numerical question feedback can be regenerated.")
+
+    question = course.question_bank_items.filter(
+        pk=question_id,
+        course=course,
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+        status=QuestionBankItem.Status.APPROVED,
+    ).select_related("learning_objective", "source_chunk", "linked_question", "block").first()
+    if question is None or not question.is_numeric():
+        raise ValueError("Choose a numerical practice question from this collection.")
+
+    selected_answer_text = str(feedback_message.get("selected_answer_text", "")).strip()
+    if not selected_answer_text:
+        raise ValueError("This numeric feedback message does not have a stored answer choice to regenerate from.")
+    is_correct = bool(feedback_message.get("correct"))
+
+    updated_feedback = regenerate_stored_numeric_feedback(
+        stem=question.stem,
+        explanation_text=question.explanation,
+        numeric_metadata=question.numeric_metadata if isinstance(question.numeric_metadata, dict) else {},
+        objective_text=getattr(question.learning_objective, "text", ""),
+        chunk_text=getattr(question.source_chunk, "text", ""),
+        objective_symbol_heuristics=getattr(question.learning_objective, "symbol_heuristics", {}),
+    )
+    refreshed_metadata = dict(question.numeric_metadata or {})
+    refreshed_metadata["feedback_v2"] = updated_feedback
+
+    with transaction.atomic():
+        question_ids = [question.pk]
+        if question.linked_question_id:
+            question_ids.append(question.linked_question_id)
+        for item in QuestionBankItem.objects.select_for_update().filter(pk__in=question_ids):
+            numeric_metadata = dict(item.numeric_metadata or {})
+            numeric_metadata["feedback_v2"] = updated_feedback
+            item.numeric_metadata = numeric_metadata
+            item.save(update_fields=["numeric_metadata", "updated_at"])
+
+    refreshed_question = course.question_bank_items.filter(pk=question.pk).select_related("learning_objective", "source_chunk").first()
+    if refreshed_question is None:
+        raise ValueError("That numerical question is no longer available.")
+    new_feedback_text = format_numeric_answer_feedback(
+        stem=refreshed_question.stem,
+        explanation_text=refreshed_question.explanation,
+        numeric_metadata=refreshed_question.numeric_metadata,
+        selected_answer_text=selected_answer_text,
+        is_correct=is_correct,
+        objective_text=getattr(refreshed_question.learning_objective, "text", ""),
+        chunk_text=getattr(refreshed_question.source_chunk, "text", ""),
+        objective_symbol_heuristics=getattr(refreshed_question.learning_objective, "symbol_heuristics", {}),
+    )
+    if not _replace_feedback_message_text(
+        transcript,
+        feedback_message_id=feedback_message_id,
+        question_id=question_id,
+        new_feedback_text=new_feedback_text,
+    ):
+        raise ValueError("That numeric feedback message is no longer available.")
+    feedback_message["regenerated_at"] = timezone.now().isoformat()
+
+    completed_event = _completed_event_for_feedback(course_state, feedback_message_id, question_id)
+    if completed_event is not None:
+        completed_event["feedback"] = new_feedback_text
+        completed_event["feedback_message_id"] = feedback_message_id
+        attempt_question_id = int(completed_event.get("attempt_question_id") or 0)
+        if attempt_question_id:
+            PracticeAttemptQuestion.objects.filter(pk=attempt_question_id).update(
+                feedback=new_feedback_text,
+                updated_at=timezone.now(),
+            )
+
+    request.session.modified = True
+    return serialize_preview_state(
+        request,
+        course,
+        active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+        active_thread_id=collection.pk,
+    )
+
+
 def submit_preview_answer(request, course: Course, block: CourseBlock, question_id: int, selected_answers=None, *, answer_text: str = "") -> dict:
     course_state = _course_state(request, course)
     pending_question_id = course_state.setdefault("pending_questions", {}).get(str(block.pk))
@@ -1725,6 +2254,8 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
     course_state.setdefault("completed_events", []).append(
         {
             "block_id": block.pk,
+            "thread_kind": PREVIEW_BLOCK_THREAD_KIND,
+            "thread_id": block.pk,
             "question_id": question.pk,
             "correct": is_correct,
             "answered_at": timezone.now().isoformat(),
@@ -1743,6 +2274,112 @@ def submit_preview_answer(request, course: Course, block: CourseBlock, question_
 
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
+
+
+def submit_preview_collection_answer(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    question_id: int,
+    selected_answers=None,
+    *,
+    answer_text: str = "",
+) -> dict:
+    course_state = _course_state(request, course)
+    pending_question = _collection_pending_question(course, collection, course_state)
+    question = course.question_bank_items.filter(
+        pk=question_id,
+        course=course,
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+        status=QuestionBankItem.Status.APPROVED,
+    ).select_related("learning_objective", "block", "source_chunk").first()
+    if pending_question is None or question is None or pending_question.pk != question_id:
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    transcript = _ensure_collection_transcript(course_state, collection)
+    normalized_answers = _normalize_submitted_answers(selected_answers)
+    normalized_answer_text = _normalize_written_answer_text(answer_text)
+    written_alignment = None
+    if question.is_written_answer():
+        is_correct, written_alignment, feedback_text = _grade_written_answer_response(question, question.block, normalized_answer_text)
+        answer_display_text = normalized_answer_text
+    else:
+        is_correct, missing_answers, extra_answers = _grade_question_response(question, normalized_answers)
+        feedback_text = _feedback_text(question, normalized_answers, is_correct, missing_answers, extra_answers)
+        answer_display_text = ", ".join(normalized_answers)
+    include_keep_going_line = _should_add_keep_going_line(transcript)
+
+    for message in reversed(transcript):
+        if message.get("kind") == "question" and message.get("question_id") == question_id and not message.get("answered"):
+            message["answered"] = True
+            if question.is_written_answer():
+                message["submitted_text"] = answer_display_text
+                message["alignment_score"] = written_alignment["alignment_score"] if written_alignment else 0
+                message["alignment_state"] = written_alignment["alignment_state"] if written_alignment else "drafting"
+                message["model_answer_revealed"] = not is_correct
+                message["model_answer"] = question.correct_answer if not is_correct else ""
+                message["draft_answer"] = ""
+            else:
+                message["selected_answers"] = normalized_answers
+                message["selected_answer"] = normalized_answers[0] if len(normalized_answers) == 1 else ""
+                message["correct_answers"] = question.correct_answers()
+            break
+
+    _append_collection_message(course_state, collection, "user", "answer", text=answer_display_text)
+    feedback_message = _append_collection_message(
+        course_state,
+        collection,
+        "assistant",
+        "feedback",
+        text=_feedback_with_keep_going_line(course_state, feedback_text) if include_keep_going_line else feedback_text,
+        correct=is_correct,
+        question_id=question.pk,
+        question_type=question.question_type,
+        selected_answer_text=normalized_answers[0] if normalized_answers else answer_display_text,
+        can_regenerate_numeric_feedback=question.is_numeric(),
+        source_blocks=[question.block.title],
+    )
+
+    course_state["completion_sequence"] = course_state.get("completion_sequence", 0) + 1
+    state = _question_state(course_state, question_id)
+    if is_correct:
+        state["times_correct"] += 1
+        state["retired_at"] = timezone.now().isoformat()
+    else:
+        state["times_incorrect"] += 1
+    course_state.setdefault("completed_events", []).append(
+        {
+            "block_id": question.block.pk,
+            "thread_kind": PREVIEW_COLLECTION_THREAD_KIND,
+            "thread_id": collection.pk,
+            "question_id": question.pk,
+            "correct": is_correct,
+            "answered_at": timezone.now().isoformat(),
+            "learning_objective_id": question.learning_objective_id,
+            "source_chunk_id": question.source_chunk_id,
+            "question_type": question.question_type,
+            "selected_answers": normalized_answers,
+            "answer_text": answer_display_text,
+            "feedback": feedback_text,
+            "feedback_message_id": feedback_message["id"],
+        }
+    )
+    _collection_thread_state(course_state, collection)["pending_question_id"] = None
+    _clear_written_answer_draft(course_state, question_id)
+    _refresh_block_progress_message(course_state, question.block)
+
+    request.session.modified = True
+    return serialize_preview_state(
+        request,
+        course,
+        active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+        active_thread_id=collection.pk,
+    )
 
 
 def flag_preview_question(
@@ -1810,6 +2447,83 @@ def flag_preview_question(
     )
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
+
+
+def flag_preview_collection_question(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    question_id: int,
+    *,
+    instruction: str = "",
+    learning_objective_id: int | None = None,
+) -> dict:
+    course_state = _course_state(request, course)
+    question = course.question_bank_items.filter(
+        pk=question_id,
+        course=course,
+        bank_type=QuestionBankItem.BankType.PRACTICE,
+    ).select_related("linked_question", "learning_objective", "block").first()
+    if question is None:
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    cleaned_instruction = sanitize_assistant_guidance(instruction)
+    if cleaned_instruction:
+        correction_objective = question.learning_objective
+        if correction_objective is None:
+            correction_objective = question.block.learning_objectives.filter(pk=learning_objective_id or 0).first()
+        if correction_objective is None:
+            raise ValueError("Choose a learning objective before saving a correction note for this question.")
+        LearningObjectiveCorrection.objects.create(
+            learning_objective=correction_objective,
+            question=question,
+            created_by=getattr(request, "user", None),
+            instruction=cleaned_instruction,
+            question_stem_snapshot=question.stem,
+        )
+
+    flagged_ids = course_state.setdefault("flagged_question_ids", [])
+    for linked_question_id in filter(None, [question.pk, question.linked_question_id]):
+        if str(linked_question_id) not in flagged_ids:
+            flagged_ids.append(str(linked_question_id))
+
+    transcript = _ensure_collection_transcript(course_state, collection)
+    for message in reversed(transcript):
+        if message.get("kind") == "question" and message.get("question_id") == question.pk:
+            message["flagged"] = True
+            message["answered"] = True
+            break
+
+    thread_state = _collection_thread_state(course_state, collection)
+    if thread_state.get("pending_question_id") == question.pk:
+        thread_state["pending_question_id"] = None
+    _clear_written_answer_draft(course_state, question.pk)
+
+    _append_collection_message(
+        course_state,
+        collection,
+        "assistant",
+        "text",
+        text=(
+            f"Thanks. I saved that correction note against {question.learning_objective.code if question.learning_objective else correction_objective.code}, "
+            "and I won't show this question or its linked validation variant again here."
+            if cleaned_instruction
+            else "Thanks. I won't show this question again here, and its linked validation question has been removed too."
+        ),
+        source_blocks=[question.block.title],
+    )
+    request.session.modified = True
+    return serialize_preview_state(
+        request,
+        course,
+        active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+        active_thread_id=collection.pk,
+    )
 
 
 def _keyword_set(text: str) -> set[str]:
@@ -1983,9 +2697,11 @@ def _normalize_chat_answer_text(text: str) -> str:
     return "\n\n".join(blocks).strip()
 
 
-def _block_source_documents(course: Course):
+def _block_source_documents(course: Course, allowed_block_ids: set[int] | None = None):
     documents = []
     for block in course.blocks.prefetch_related("learning_objectives", "assets", "content_chunks").all():
+        if allowed_block_ids is not None and block.pk not in allowed_block_ids:
+            continue
         extracted_parts = [block.summary.strip()] if block.summary.strip() else []
         extracted_parts.extend(objective.text.strip() for objective in block.learning_objectives.all() if objective.text.strip())
         extracted_parts.extend(asset.extracted_text[:240].strip() for asset in block.assets.all() if asset.extracted_text.strip())
@@ -1995,9 +2711,11 @@ def _block_source_documents(course: Course):
     return documents
 
 
-def _chat_source_snippets(course: Course):
+def _chat_source_snippets(course: Course, allowed_block_ids: set[int] | None = None):
     snippets = []
     for block in course.blocks.prefetch_related("learning_objectives", "assets", "content_chunks").all():
+        if allowed_block_ids is not None and block.pk not in allowed_block_ids:
+            continue
         if block.summary.strip():
             snippets.append({"block": block, "text": block.summary.strip(), "kind": "summary", "bias": 3})
         for objective in block.learning_objectives.all():
@@ -2014,10 +2732,11 @@ def _chat_source_snippets(course: Course):
     return snippets
 
 
-def _retrieve_chat_snippets(course: Course, block: CourseBlock, question: str):
+def _retrieve_chat_snippets(course: Course, block: CourseBlock, question: str, allowed_block_ids: set[int] | None = None):
     question_keywords = _keyword_set(question)
     ranked = []
-    for snippet in _chat_source_snippets(course):
+    snippets = _chat_source_snippets(course, allowed_block_ids=allowed_block_ids)
+    for snippet in snippets:
         block_title_keywords = _keyword_set(snippet["block"].title)
         snippet_keywords = _keyword_set(f"{snippet['block'].title} {snippet['text']}")
         overlap = len(question_keywords & snippet_keywords)
@@ -2031,11 +2750,10 @@ def _retrieve_chat_snippets(course: Course, block: CourseBlock, question: str):
     if selected:
         return selected
 
-    return [snippet for snippet in _chat_source_snippets(course) if snippet["block"].pk == block.pk][:PREVIEW_CHAT_RETRIEVAL_LIMIT]
+    return [snippet for snippet in snippets if snippet["block"].pk == block.pk][:PREVIEW_CHAT_RETRIEVAL_LIMIT]
 
 
-def _recent_chat_context(course_state: dict, block: CourseBlock) -> str:
-    transcript = _ensure_block_transcript(course_state, block)
+def _recent_chat_context(transcript: list[dict]) -> str:
     lines = []
     for message in transcript[-PREVIEW_CHAT_HISTORY_LIMIT:]:
         if message.get("kind") == "loading":
@@ -2055,12 +2773,20 @@ def _recent_chat_context(course_state: dict, block: CourseBlock) -> str:
     return "\n".join(lines[-PREVIEW_CHAT_HISTORY_LIMIT:])
 
 
-def _openai_chat_reply(course_state: dict, course: Course, block: CourseBlock, question: str) -> tuple[str, list[str]]:
-    snippets = _retrieve_chat_snippets(course, block, question)
+def _openai_chat_reply(
+    course_state: dict,
+    course: Course,
+    block: CourseBlock,
+    question: str,
+    *,
+    transcript: list[dict] | None = None,
+    allowed_block_ids: set[int] | None = None,
+) -> tuple[str, list[str]]:
+    snippets = _retrieve_chat_snippets(course, block, question, allowed_block_ids=allowed_block_ids)
     if not snippets:
-        return _fallback_chat_reply(course, block, question)
+        return _fallback_chat_reply(course, block, question, allowed_block_ids=allowed_block_ids)
 
-    recent_chat = _recent_chat_context(course_state, block)
+    recent_chat = _recent_chat_context(transcript or _ensure_block_transcript(course_state, block))
     source_block_titles = []
     for snippet in snippets:
         if snippet["block"].title not in source_block_titles:
@@ -2116,16 +2842,22 @@ Student question:
     )
     answer = _normalize_chat_answer_text((getattr(response, "output_text", "") or "").strip())
     if not answer:
-        return _fallback_chat_reply(course, block, question)
+        return _fallback_chat_reply(course, block, question, allowed_block_ids=allowed_block_ids)
 
     source_blocks = source_block_titles if any(title != block.title for title in source_block_titles) else []
     return answer, source_blocks
 
 
-def _fallback_chat_reply(course: Course, block: CourseBlock, question: str) -> tuple[str, list[str]]:
+def _fallback_chat_reply(
+    course: Course,
+    block: CourseBlock,
+    question: str,
+    *,
+    allowed_block_ids: set[int] | None = None,
+) -> tuple[str, list[str]]:
     question_keywords = _keyword_set(question)
     ranked = []
-    for candidate_block, document in _block_source_documents(course):
+    for candidate_block, document in _block_source_documents(course, allowed_block_ids=allowed_block_ids):
         score = len(question_keywords & _keyword_set(f"{candidate_block.title} {document}"))
         ranked.append((score, candidate_block, document))
     ranked.sort(key=lambda item: (item[0], item[1].order), reverse=True)
@@ -2194,10 +2926,11 @@ def send_preview_chat_message(request, course: Course, block: CourseBlock, quest
         request.session.modified = True
         return serialize_preview_state(request, course, active_block_id=block.pk)
 
+    transcript = _ensure_block_transcript(course_state, block)
     answer, source_blocks = _fallback_chat_reply(course, block, question)
     if settings.OPENAI_API_KEY:
         try:
-            answer, source_blocks = _openai_chat_reply(course_state, course, block, question)
+            answer, source_blocks = _openai_chat_reply(course_state, course, block, question, transcript=transcript)
         except Exception:
             answer, source_blocks = _fallback_chat_reply(course, block, question)
     answer = _normalize_chat_answer_text(answer)
@@ -2217,6 +2950,112 @@ def send_preview_chat_message(request, course: Course, block: CourseBlock, quest
     )
     request.session.modified = True
     return serialize_preview_state(request, course, active_block_id=block.pk)
+
+
+def send_preview_collection_chat_message(
+    request,
+    course: Course,
+    collection: CourseBlockCollection,
+    question: str,
+) -> dict:
+    course_state = _course_state(request, course)
+    blocks = _collection_blocks_for_preview(course, collection)
+    transcript = _ensure_collection_transcript(course_state, collection)
+    pending_question = _collection_pending_question(course, collection, course_state)
+    if pending_question is not None and pending_question.is_written_answer():
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text="Finish the written answer before asking a related question.",
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    if len(question) > settings.CHAT_MAX_QUESTION_LENGTH:
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text=f"Please keep your message under {settings.CHAT_MAX_QUESTION_LENGTH} characters.",
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    _append_collection_message(course_state, collection, "user", "text", text=question)
+    if _is_inappropriate_chat_message(question):
+        _append_collection_message(
+            course_state,
+            collection,
+            "assistant",
+            "text",
+            text=PREVIEW_INAPPROPRIATE_MESSAGE_WARNING,
+            source_blocks=[collection.title],
+        )
+        request.session.modified = True
+        return serialize_preview_state(
+            request,
+            course,
+            active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+            active_thread_id=collection.pk,
+        )
+
+    anchor_block = blocks[0] if blocks else _first_active_block(course)
+    allowed_block_ids = {block.pk for block in blocks}
+    answer, source_blocks = _fallback_chat_reply(course, anchor_block, question, allowed_block_ids=allowed_block_ids)
+    if settings.OPENAI_API_KEY:
+        try:
+            answer, source_blocks = _openai_chat_reply(
+                course_state,
+                course,
+                anchor_block,
+                question,
+                transcript=transcript,
+                allowed_block_ids=allowed_block_ids,
+            )
+        except Exception:
+            answer, source_blocks = _fallback_chat_reply(course, anchor_block, question, allowed_block_ids=allowed_block_ids)
+    answer = _normalize_chat_answer_text(answer)
+    objective_texts: list[str] = []
+    for block in blocks:
+        objective_texts.extend(list(block.learning_objectives.values_list("text", flat=True)[:2]))
+        if len(objective_texts) >= 4:
+            break
+    _append_collection_message(
+        course_state,
+        collection,
+        "assistant",
+        "text",
+        text=answer,
+        source_blocks=source_blocks,
+        further_study_questions=further_study_questions_for_chat(
+            question=question,
+            answer=answer,
+            block_title=collection.title,
+            objective_texts=objective_texts[:4],
+        ),
+    )
+    request.session.modified = True
+    return serialize_preview_state(
+        request,
+        course,
+        active_thread_kind=PREVIEW_COLLECTION_THREAD_KIND,
+        active_thread_id=collection.pk,
+    )
 
 
 def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
@@ -2270,6 +3109,43 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "target_question_count": target_question_count,
         "advanced_question_start_percent": advanced_question_start_percent,
         "advanced_question_types_unlocked": advanced_question_types_unlocked,
+    }
+
+
+def _collection_metrics(course_state: dict, collection: CourseBlockCollection, blocks: list[CourseBlock]) -> dict:
+    block_ids = {block.pk for block in blocks}
+    completed_events = [
+        event
+        for event in course_state.get("completed_events", [])
+        if str(event.get("thread_kind") or "") == PREVIEW_COLLECTION_THREAD_KIND
+        and int(event.get("thread_id") or 0) == collection.pk
+        and int(event.get("block_id") or 0) in block_ids
+    ]
+    completed_count = len(completed_events)
+    correct_count = sum(1 for event in completed_events if event.get("correct"))
+    incorrect_count = max(0, completed_count - correct_count)
+    covered_objective_ids = {
+        int(event["learning_objective_id"])
+        for event in completed_events
+        if event.get("correct") and event.get("learning_objective_id") is not None
+    }
+    total_objective_ids = {
+        objective.pk
+        for block in blocks
+        for objective in block.learning_objectives.all()
+    }
+    total_objective_count = len(total_objective_ids)
+    covered_objective_count = len(covered_objective_ids)
+    mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
+    coverage = round((covered_objective_count * 100 / total_objective_count), 2) if total_objective_count else 0.0
+    return {
+        "mastery": mastery,
+        "coverage": coverage,
+        "completed_count": completed_count,
+        "correct_count": correct_count,
+        "incorrect_count": incorrect_count,
+        "covered_objective_count": covered_objective_count,
+        "total_objective_count": total_objective_count,
     }
 
 
@@ -2446,7 +3322,13 @@ def _covered_objective_ids(course_state: dict, block: CourseBlock) -> set[int]:
     }
 
 
-def _serialized_transcript(course_state: dict, transcript: list[dict], block: CourseBlock) -> list[dict]:
+def _serialized_transcript(
+    course_state: dict,
+    transcript: list[dict],
+    block: CourseBlock | None = None,
+    *,
+    welcome_title: str = "",
+) -> list[dict]:
     question_ids = {
         int(message["question_id"])
         for message in transcript
@@ -2459,16 +3341,21 @@ def _serialized_transcript(course_state: dict, transcript: list[dict], block: Co
     serialized_messages = []
     for message in transcript:
         message_payload = dict(message)
+        replacement_title = welcome_title or (block.title if block is not None else "")
         if (
             message_payload.get("role") == "assistant"
             and message_payload.get("kind") == "text"
             and (
                 message_payload.get("is_block_welcome")
-                or str(message_payload.get("text") or "").startswith(f"Welcome to {block.title}.")
+                or message_payload.get("is_collection_welcome")
+                or (replacement_title and str(message_payload.get("text") or "").startswith(f"Welcome to {replacement_title}."))
             )
         ):
-            message_payload["text"] = _block_welcome_message_text(block.title)
-            message_payload["is_block_welcome"] = True
+            message_payload["text"] = _welcome_message_text(replacement_title)
+            if message_payload.get("is_collection_welcome"):
+                message_payload["is_collection_welcome"] = True
+            else:
+                message_payload["is_block_welcome"] = True
             message_payload["inline_cta_label"] = "Test Mode"
         if message_payload.get("kind") == "question":
             question = questions_by_id.get(int(message_payload.get("question_id") or 0))
@@ -2491,7 +3378,16 @@ def _serialized_transcript(course_state: dict, transcript: list[dict], block: Co
     return serialized_messages
 
 
-def serialize_preview_state(request, course: Course, *, active_block_id=None, project_enrollment=None, include_projects: bool = True) -> dict:
+def serialize_preview_state(
+    request,
+    course: Course,
+    *,
+    active_block_id=None,
+    active_thread_kind: str | None = None,
+    active_thread_id: int | None = None,
+    project_enrollment=None,
+    include_projects: bool = True,
+) -> dict:
     course_state = _course_state(request, course)
     blocks = _preview_blocks(course)
     active_block_id = active_block_id or (_first_active_block(course).pk if blocks else None)
@@ -2536,14 +3432,53 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
                 "target_question_count": block.preview_target_question_count,
                 "available_manual_question_types": _manual_preview_question_types(block),
                 "has_pending_question": bool(pending_questions.get(str(block.pk))),
-                "transcript": _serialized_transcript(course_state, transcript, block),
+                "transcript": _serialized_transcript(course_state, transcript, block, welcome_title=block.title),
                 "metrics": block_metrics,
                 "projects": project_map.get(block.pk, []),
             }
         )
         course_metric_pairs.append({"block": block, "metrics": block_metrics})
+    serialized_collections = []
+    for collection in CourseBlockCollection.objects.filter(course=course).prefetch_related("blocks").order_by("created_at", "pk"):
+        collection_blocks = _collection_blocks_for_preview(course, collection, blocks)
+        if not collection_blocks:
+            continue
+        transcript = _ensure_collection_transcript(course_state, collection)
+        metrics = _collection_metrics(course_state, collection, collection_blocks)
+        serialized_collections.append(
+            {
+                "id": collection.pk,
+                "title": collection.title,
+                "block_ids": [block.pk for block in collection_blocks],
+                "anchor_block_id": collection_blocks[0].pk,
+                "available_manual_question_types": sorted(
+                    {
+                        question_type
+                        for block in collection_blocks
+                        for question_type in _manual_preview_question_types(block)
+                        if question_type in {
+                            QuestionBankItem.QuestionType.MCQ,
+                            QuestionBankItem.QuestionType.NUM,
+                            QuestionBankItem.QuestionType.MAQ,
+                            QuestionBankItem.QuestionType.WAQ,
+                        }
+                    }
+                ),
+                "transcript": _serialized_transcript(
+                    course_state,
+                    transcript,
+                    welcome_title=collection.title,
+                ),
+                "metrics": metrics,
+                "covered_objective_count": metrics["covered_objective_count"],
+                "total_objective_count": metrics["total_objective_count"],
+                "has_pending_question": bool(_collection_thread_state(course_state, collection).get("pending_question_id")),
+            }
+        )
     course_metrics = _course_metrics(course, serialized_blocks, course_metric_pairs)
     request.session.modified = True
+    resolved_thread_kind = active_thread_kind or PREVIEW_BLOCK_THREAD_KIND
+    resolved_thread_id = active_thread_id or active_block_id
     return {
         "course": {
             "id": course.pk,
@@ -2553,5 +3488,8 @@ def serialize_preview_state(request, course: Course, *, active_block_id=None, pr
             "stats": _course_stats(course_state, serialized_blocks, course_metrics),
         },
         "active_block_id": active_block_id,
+        "active_thread_kind": resolved_thread_kind,
+        "active_thread_id": resolved_thread_id,
         "blocks": serialized_blocks,
+        "collections": serialized_collections,
     }

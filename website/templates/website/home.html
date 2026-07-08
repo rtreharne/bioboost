@@ -4,9 +4,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="refresh" content="{{ redirect_delay_seconds }};url={{ cta_url }}" />
   <title>ForeverPhysics</title>
-  <link rel="stylesheet" href="{% static 'website/css/landing.css' %}">
+  <link rel="stylesheet" href="{% static 'website/css/landing.css' %}?v={{ static_asset_version }}">
 </head>
 <body>
   <main class="landing-shell">
@@ -15,7 +14,7 @@
       style="background-image: url('{% static "standalone/img/ninepointeightonebackground.png" %}');"
     >
       <div class="landing-hero__content">
-        <h1 class="landing-title">ForeverPhysics</h1>
+        <h1 class="landing-title" data-home-title>ForeverPhysics</h1>
         <section
           class="landing-loader"
           data-home-loader
@@ -26,11 +25,6 @@
         >
           <p class="landing-loader__label">
             Opening OCR Physics demo
-            <span class="landing-loader__dots" aria-hidden="true">
-              <span></span>
-              <span></span>
-              <span></span>
-            </span>
           </p>
           <div class="landing-loader__track" aria-hidden="true">
             <span class="landing-loader__fill"></span>
@@ -56,7 +50,9 @@
   <script>
     (() => {
       const loader = document.querySelector("[data-home-loader]");
+      const rotator = document.querySelector("[data-feature-rotator]");
       const featureItems = Array.from(document.querySelectorAll("[data-feature-item]"));
+      const homeTitle = document.querySelector("[data-home-title]");
       if (!loader) {
         return;
       }
@@ -67,35 +63,91 @@
         return;
       }
 
-      if (featureItems.length > 1) {
-        let activeIndex = 0;
-        const featureIntervalMs = Math.max(2400, Math.floor(delayMs / featureItems.length));
-        const featureTransitionMs = Math.min(1100, Math.max(850, Math.floor(featureIntervalMs * 0.3)));
-        const featureHoldMs = Math.max(900, featureIntervalMs - featureTransitionMs);
-        const rotator = document.querySelector("[data-feature-rotator]");
+      let redirectTimeoutId = 0;
+      let featureAdvanceTimeoutId = 0;
+      let featureExitTimeoutId = 0;
+      let activeIndex = Math.max(0, featureItems.findIndex((item) => item.hasAttribute("data-active")));
+      const featureIntervalMs = featureItems.length > 1 ? Math.max(2400, Math.floor(delayMs / featureItems.length)) : 0;
+      const featureTransitionMs = featureItems.length > 1
+        ? Math.min(1100, Math.max(850, Math.floor(featureIntervalMs * 0.3)))
+        : 0;
+      const featureHoldMs = featureItems.length > 1 ? Math.max(900, featureIntervalMs - featureTransitionMs) : 0;
 
+      const queueRedirect = (timeoutMs) => {
+        window.clearTimeout(redirectTimeoutId);
+        redirectTimeoutId = window.setTimeout(() => {
+          window.location.assign(redirectUrl);
+        }, Math.max(0, timeoutMs));
+      };
+
+      const advanceFeature = () => {
+        if (featureItems.length <= 1) {
+          return;
+        }
+        const currentItem = featureItems[activeIndex];
+        currentItem?.removeAttribute("data-active");
+        currentItem?.setAttribute("data-exiting", "true");
+
+        featureExitTimeoutId = window.setTimeout(() => {
+          currentItem?.removeAttribute("data-exiting");
+          activeIndex = (activeIndex + 1) % featureItems.length;
+          featureItems[activeIndex]?.setAttribute("data-active", "true");
+          scheduleNextFeature(featureHoldMs);
+        }, featureTransitionMs);
+      };
+
+      const scheduleNextFeature = (timeoutMs) => {
+        if (featureItems.length <= 1) {
+          return;
+        }
+        window.clearTimeout(featureAdvanceTimeoutId);
+        featureAdvanceTimeoutId = window.setTimeout(advanceFeature, timeoutMs);
+      };
+
+      if (featureItems.length > 1) {
         if (rotator) {
           rotator.style.setProperty("--landing-feature-transition-duration", `${featureTransitionMs}ms`);
         }
-
-        const queueNextFeature = () => {
-          featureItems[activeIndex].removeAttribute("data-active");
-          featureItems[activeIndex].setAttribute("data-exiting", "true");
-
-          window.setTimeout(() => {
-            featureItems[activeIndex].removeAttribute("data-exiting");
-            activeIndex = (activeIndex + 1) % featureItems.length;
-            featureItems[activeIndex].setAttribute("data-active", "true");
-            window.setTimeout(queueNextFeature, featureHoldMs);
-          }, featureTransitionMs);
-        };
-
-        window.setTimeout(queueNextFeature, featureHoldMs);
+        featureItems.forEach((item, index) => {
+          if (index !== activeIndex) {
+            item.removeAttribute("data-active");
+          }
+          item.removeAttribute("data-exiting");
+        });
+        featureItems[activeIndex]?.setAttribute("data-active", "true");
+        scheduleNextFeature(featureHoldMs);
       }
 
-      window.setTimeout(() => {
-        window.location.assign(redirectUrl);
-      }, delayMs);
+      const fitHomeTitle = () => {
+        if (!homeTitle) {
+          return;
+        }
+
+        homeTitle.style.removeProperty("--landing-title-size");
+        homeTitle.style.removeProperty("--landing-title-scale");
+
+        if (!window.matchMedia("(min-width: 641px)").matches) {
+          return;
+        }
+
+        const titleStyles = window.getComputedStyle(homeTitle);
+        const baseSize = Number.parseFloat(titleStyles.fontSize) || 0;
+        const minSize = Math.max(40, baseSize * 0.6);
+        const availableWidth = homeTitle.clientWidth;
+        if (!availableWidth || !baseSize) {
+          return;
+        }
+
+        let nextSize = baseSize;
+        while (homeTitle.scrollWidth > availableWidth && nextSize > minSize) {
+          nextSize -= 1;
+          homeTitle.style.setProperty("--landing-title-size", `${nextSize}px`);
+        }
+      };
+
+      fitHomeTitle();
+      window.addEventListener("resize", fitHomeTitle, { passive: true });
+      queueRedirect(delayMs);
     })();
   </script>
 </body>

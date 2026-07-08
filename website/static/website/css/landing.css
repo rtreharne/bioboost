@@ -40,20 +40,31 @@ body {
   align-items: center;
   justify-content: center;
   gap: 1.1rem;
-  width: min(100%, 34rem);
+  width: 100%;
   max-width: 100%;
   text-align: center;
 }
 
 .landing-title {
+  display: block;
   margin: 0;
+  margin-inline: auto;
   color: #1f6fd1;
+  width: 100%;
   max-width: 100%;
-  font-size: clamp(2.45rem, 11vw, 5.5rem);
+  font-size: var(--landing-title-size, clamp(2.45rem, 11vw, 5.5rem));
   line-height: 1;
   letter-spacing: 0;
   font-weight: 800;
+  text-align: center;
   text-wrap: balance;
+}
+
+@media (min-width: 641px) {
+  .landing-title {
+    white-space: nowrap;
+    text-wrap: nowrap;
+  }
 }
 
 .landing-features {
@@ -120,28 +131,6 @@ body {
   font-weight: 800;
   line-height: 1.2;
   text-align: center;
-}
-
-.landing-loader__dots {
-  display: inline-flex;
-  gap: 0.18rem;
-}
-
-.landing-loader__dots span {
-  width: 0.28rem;
-  height: 0.28rem;
-  border-radius: 999px;
-  background: currentColor;
-  animation: landing-loader-dot 1.2s ease-in-out infinite;
-  opacity: 0.3;
-}
-
-.landing-loader__dots span:nth-child(2) {
-  animation-delay: 0.18s;
-}
-
-.landing-loader__dots span:nth-child(3) {
-  animation-delay: 0.36s;
 }
 
 .landing-loader__track {
@@ -242,11 +231,9 @@ body {
   .landing-loader__label {
     font-size: 0.9rem;
   }
-
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .landing-loader__dots span,
   .landing-loader__fill,
   .landing-loader__fill::after {
     animation: none;
@@ -274,19 +261,5 @@ body {
 
   to {
     transform: translateX(100%);
-  }
-}
-
-@keyframes landing-loader-dot {
-  0%,
-  80%,
-  100% {
-    opacity: 0.3;
-    transform: translateY(0);
-  }
-
-  40% {
-    opacity: 1;
-    transform: translateY(-0.12rem);
   }
 }

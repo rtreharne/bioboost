@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}NINE POINT EIGHT ONE{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'standalone/css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'standalone/css/app.css' %}?v={{ static_asset_version }}">
   {% block extra_head %}{% endblock %}
 </head>
 <body class="app-body{% if is_demo_mode %} app-body--demo{% endif %}{% if is_embed_mode %} app-body--embed{% endif %}{% block body_class %}{% endblock %}">

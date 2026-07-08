@@ -6927,6 +6927,268 @@ print(result)""",
         self.assertContains(reload_response, "Question one?")
         self.assertContains(reload_response, "Correct.")
 
+    def test_student_practice_state_includes_collection_conversations(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        first_block, _, _, _ = self.create_preview_content_block(course, title="Particles", order=1)
+        second_block, _, _, _ = self.create_preview_content_block(course, title="Fields", order=2)
+        collection = CourseBlockCollection.objects.create(course=course, title="Paper 1")
+        collection.blocks.add(first_block, second_block)
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["preview_state"]["collections"],
+            [
+                {
+                    "id": collection.pk,
+                    "title": "Paper 1",
+                    "block_ids": [first_block.pk, second_block.pk],
+                    "anchor_block_id": first_block.pk,
+                    "available_manual_question_types": ["maq", "mcq", "waq"],
+                    "transcript": response.context["preview_state"]["collections"][0]["transcript"],
+                    "metrics": {
+                        "mastery": 0.0,
+                        "coverage": 0.0,
+                        "completed_count": 0,
+                        "correct_count": 0,
+                        "incorrect_count": 0,
+                        "covered_objective_count": 0,
+                        "total_objective_count": 2,
+                    },
+                    "covered_objective_count": 0,
+                    "total_objective_count": 2,
+                    "has_pending_question": False,
+                }
+            ],
+        )
+
+    def test_student_practice_collection_quiz_updates_collection_transcript_only(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        first_block, _, first_objective, first_chunk = self.create_preview_content_block(course, title="Particles", order=1)
+        second_block, _, second_objective, second_chunk = self.create_preview_content_block(course, title="Fields", order=2)
+        collection = CourseBlockCollection.objects.create(course=course, title="Paper 1")
+        collection.blocks.add(first_block, second_block)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Collection question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="collection-thread-question",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, first_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        self.assertEqual(preview["active_thread_kind"], "collection")
+        self.assertEqual(preview["active_thread_id"], collection.pk)
+        collection_payload = next(item for item in preview["collections"] if item["id"] == collection.pk)
+        question_messages = [message for message in collection_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], question.pk)
+        first_block_payload = next(item for item in preview["blocks"] if item["id"] == first_block.pk)
+        self.assertFalse(any(message["kind"] == "question" for message in first_block_payload["transcript"]))
+
+    def test_teacher_preview_collection_quiz_stays_in_collection_thread(self):
+        course = self.create_course()
+        first_block, _, first_objective, first_chunk = self.create_preview_content_block(course, title="Particles", order=1)
+        second_block, _, _, _ = self.create_preview_content_block(course, title="Fields", order=2)
+        collection = CourseBlockCollection.objects.create(course=course, title="Paper 1")
+        collection.blocks.add(first_block, second_block)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview collection question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="preview-collection-thread-question",
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, first_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        self.assertEqual(preview["active_thread_kind"], "collection")
+        self.assertEqual(preview["active_thread_id"], collection.pk)
+        collection_payload = next(item for item in preview["collections"] if item["id"] == collection.pk)
+        question_messages = [message for message in collection_payload["transcript"] if message["kind"] == "question"]
+        self.assertTrue(question_messages)
+        self.assertEqual(question_messages[-1]["thread_kind"], "collection")
+        self.assertIn(question_messages[-1]["block_label"], {first_block.title, second_block.title})
+        first_block_payload = next(item for item in preview["blocks"] if item["id"] == first_block.pk)
+        self.assertFalse(any(message["kind"] == "question" for message in first_block_payload["transcript"]))
+
+    def test_student_practice_collection_answer_updates_collection_coverage(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        first_block, _, first_objective, first_chunk = self.create_preview_content_block(course, title="Particles", order=1)
+        second_block, _, second_objective, second_chunk = self.create_preview_content_block(course, title="Fields", order=2)
+        collection = CourseBlockCollection.objects.create(course=course, title="Paper 1")
+        collection.blocks.add(first_block, second_block)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Coverage question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="collection-coverage-question",
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=second_block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second collection question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="collection-coverage-second-question",
+        )
+
+        self.client.force_login(self.student)
+        self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, first_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        )
+        answer_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, first_block.pk, "answer"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk, "question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        preview = answer_response.json()["preview"]
+        collection_payload = next(item for item in preview["collections"] if item["id"] == collection.pk)
+        self.assertEqual(collection_payload["metrics"]["mastery"], 100.0)
+        self.assertEqual(collection_payload["metrics"]["coverage"], 50.0)
+        self.assertEqual(collection_payload["metrics"]["covered_objective_count"], 1)
+        self.assertEqual(collection_payload["metrics"]["total_objective_count"], 2)
+        first_block_payload = next(item for item in preview["blocks"] if item["id"] == first_block.pk)
+        self.assertEqual(first_block_payload["metrics"]["coverage"], 100.0)
+
+    def test_student_practice_collection_default_quiz_maintains_type_ratio_ordering(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        Enrollment.objects.create(course=course, student=self.student)
+        numeric_block, _, numeric_objective, numeric_chunk = self.create_preview_content_block(course, title="Calculations", order=1)
+        maq_block, _, maq_objective, maq_chunk = self.create_preview_content_block(course, title="Concepts", order=2)
+        numeric_block.config.numeric_ratio_percent = 100
+        numeric_block.config.maq_ratio_percent = 0
+        numeric_block.config.waq_ratio_percent = 0
+        numeric_block.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        maq_block.config.numeric_ratio_percent = 0
+        maq_block.config.maq_ratio_percent = 100
+        maq_block.config.waq_ratio_percent = 0
+        maq_block.config.save(update_fields=["numeric_ratio_percent", "maq_ratio_percent", "waq_ratio_percent", "updated_at"])
+        collection = CourseBlockCollection.objects.create(course=course, title="Mixed practice")
+        collection.blocks.add(numeric_block, maq_block)
+        numeric_question = QuestionBankItem.objects.create(
+            course=course,
+            block=numeric_block,
+            learning_objective=numeric_objective,
+            source_chunk=numeric_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Numeric collection question?",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="4",
+            distractors=["3", "5", "6"],
+            explanation="4.",
+            question_hash="collection-ratio-numeric",
+            is_numerical=True,
+        )
+        maq_question = QuestionBankItem.objects.create(
+            course=course,
+            block=maq_block,
+            learning_objective=maq_objective,
+            source_chunk=maq_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="MAQ collection question?",
+            question_type=QuestionBankItem.QuestionType.MAQ,
+            correct_answer="A",
+            additional_correct_answers=["B"],
+            distractors=["C", "D"],
+            explanation="AB.",
+            question_hash="collection-ratio-maq",
+        )
+
+        self.client.force_login(self.student)
+        first_quiz = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, numeric_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        ).json()["preview"]
+        first_collection = next(item for item in first_quiz["collections"] if item["id"] == collection.pk)
+        first_question = [message for message in first_collection["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(first_question["question_id"], numeric_question.pk)
+        self.assertEqual(first_question["question_type"], QuestionBankItem.QuestionType.NUM)
+
+        self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, numeric_block.pk, "answer"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk, "question_id": numeric_question.pk, "answer": "4"}),
+            content_type="application/json",
+        )
+        second_quiz = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, numeric_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        ).json()["preview"]
+        second_collection = next(item for item in second_quiz["collections"] if item["id"] == collection.pk)
+        second_question = [message for message in second_collection["transcript"] if message["kind"] == "question"][-1]
+        self.assertEqual(second_question["question_id"], maq_question.pk)
+        self.assertEqual(second_question["question_type"], QuestionBankItem.QuestionType.MAQ)
+
+    def test_student_practice_omits_collections_without_released_blocks(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student)
+        future_block = CourseBlock.objects.create(
+            course=course,
+            title="Future topic",
+            order=1,
+            available_from=timezone.localdate() + timedelta(days=5),
+        )
+        LearningObjective.objects.create(block=future_block, code="F1", text="Future objective")
+        collection = CourseBlockCollection.objects.create(course=course, title="Future set")
+        collection.blocks.add(future_block)
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["preview_state"]["collections"], [])
+
     @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-5.5")
     def test_student_practice_can_regenerate_numeric_feedback_and_persist_override(self):
         course = self.create_course()
@@ -14716,6 +14978,46 @@ print(result)""",
         reload_response = other_client.get(demo_url)
         self.assertContains(reload_response, "Question one?")
         self.assertContains(reload_response, "Correct.")
+
+    def test_public_demo_collection_quiz_stays_in_collection_thread(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        first_block, _, first_objective, first_chunk = self.create_preview_content_block(course, title="Particles", order=1)
+        second_block, _, _, _ = self.create_preview_content_block(course, title="Fields", order=2)
+        collection = CourseBlockCollection.objects.create(course=course, title="Paper 1")
+        collection.blocks.add(first_block, second_block)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Demo collection question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="demo-collection-thread-question",
+        )
+
+        response = self.client.post(
+            reverse("standalone:demo_practice_action", args=[access.token, first_block.pk, "quiz"]),
+            data=json.dumps({"thread_kind": "collection", "thread_id": collection.pk}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        self.assertEqual(preview["active_thread_kind"], "collection")
+        self.assertEqual(preview["active_thread_id"], collection.pk)
+        collection_payload = next(item for item in preview["collections"] if item["id"] == collection.pk)
+        question_messages = [message for message in collection_payload["transcript"] if message["kind"] == "question"]
+        self.assertTrue(question_messages)
+        self.assertEqual(question_messages[-1]["thread_kind"], "collection")
+        self.assertIn(question_messages[-1]["block_label"], {first_block.title, second_block.title})
+        first_block_payload = next(item for item in preview["blocks"] if item["id"] == first_block.pk)
+        self.assertFalse(any(message["kind"] == "question" for message in first_block_payload["transcript"]))
 
     def test_public_demo_practice_get_does_not_rewrite_unchanged_shared_state(self):
         course = self.create_course()
