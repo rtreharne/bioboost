@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from django.conf import settings
 from openai import OpenAI, OpenAIError
 
+from standalone.services.math_questions import (
+    MATH_GENERATION_MODE_CONTEXTUAL_NUMERIC,
+    MATH_GENERATION_MODE_SYMBOLIC,
+    classify_math_objective,
+    is_math_generation_target,
+)
 from standalone.services.symbol_heuristics import (
     deterministic_symbol_heuristics_for_objective,
     normalize_objective_symbol_heuristics,
@@ -39,7 +45,7 @@ NUMERIC_SIGNAL_TERMS = (
     "pressure",
 )
 NUMERIC_UNIT_PATTERN = re.compile(
-    r"\b(?:kg|g|mg|m|cm|mm|km|s|ms|h|hz|khz|mhz|ghz|n|kn|j|kj|w|kw|v|mv|a|ma|ohm|pa|kpa|mpa|mol|m/s|m s-1|m/s\^2|m s-2|cm\^3|m\^3|%)\b",
+    r"\b(?:kg|g|mg|m|cm|mm|km|s|ms|h|hz|khz|mhz|ghz|n|kn|j|kj|w|kw|v|mv|a|ma|ohm|pa|kpa|mpa|mol|m/s|m s-1|m/s\^2|m s-2|cm\^2|cm\^3|m\^2|m\^3|%)\b",
     re.IGNORECASE,
 )
 NUMERIC_EXPRESSION_VERSION = "expression-v2"
@@ -66,6 +72,20 @@ ALLOWED_EXPRESSION_FUNCTIONS = {
 }
 ALLOWED_EXPRESSION_CONSTANTS = {"pi": math.pi, "e": math.e}
 LITERAL_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})")
+UNIT_SUPERSCRIPT_TRANSLATION = str.maketrans({
+    "⁰": "0",
+    "¹": "1",
+    "²": "2",
+    "³": "3",
+    "⁴": "4",
+    "⁵": "5",
+    "⁶": "6",
+    "⁷": "7",
+    "⁸": "8",
+    "⁹": "9",
+    "⁻": "-",
+    "⁺": "+",
+})
 PRETTY_TEX_FUNCTIONS = {
     "sin": r"\sin",
     "cos": r"\cos",
@@ -178,6 +198,25 @@ NUMERIC_OBJECTIVE_TARGET_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+NUMERIC_SYMBOLIC_MATH_OBJECTIVE_PATTERNS = (
+    re.compile(r"\bsurd\b", re.IGNORECASE),
+    re.compile(r"\bexact\b[\w\s-]{0,24}\b(?:form|value|notation)\b", re.IGNORECASE),
+    re.compile(r"\bsimplif(?:y|ying|ied)\b", re.IGNORECASE),
+    re.compile(r"\bfactoris(?:e|ing|ed|ation)\b", re.IGNORECASE),
+    re.compile(r"\bexpand(?:ing|ed)?\b", re.IGNORECASE),
+    re.compile(r"\brearrang(?:e|ing|ed)\b", re.IGNORECASE),
+    re.compile(r"\brationalis(?:e|ing|ed|ation)\b", re.IGNORECASE),
+    re.compile(r"\binequalit(?:y|ies)\b", re.IGNORECASE),
+    re.compile(r"\binterval notation\b", re.IGNORECASE),
+    re.compile(r"\bset notation\b", re.IGNORECASE),
+    re.compile(r"\bdifferentiat(?:e|ing|ion)\b", re.IGNORECASE),
+    re.compile(r"\bintegrat(?:e|ing|ion|als?)\b", re.IGNORECASE),
+    re.compile(r"\bderivative\b", re.IGNORECASE),
+    re.compile(r"\bantiderivative\b", re.IGNORECASE),
+    re.compile(r"\bsketch\b[\w\s-]{0,24}\bgraph\b", re.IGNORECASE),
+    re.compile(r"\btrig(?:onometric)? identities?\b", re.IGNORECASE),
+    re.compile(r"\bproof\b", re.IGNORECASE),
+)
 GENERIC_OBJECTIVE_SCOPE_PATTERN = re.compile(
     r"\b(?:key ideas?|overview|introduction|fundamentals?|basics?|general principles?|core ideas?)\b",
     re.IGNORECASE,
@@ -282,6 +321,11 @@ def objective_has_numeric_intent(objective_text: str) -> bool:
     normalized = str(objective_text or "").strip().lower()
     if not normalized:
         return False
+    math_mode = classify_math_objective(objective_text)
+    if math_mode == MATH_GENERATION_MODE_SYMBOLIC:
+        return False
+    if math_mode == MATH_GENERATION_MODE_CONTEXTUAL_NUMERIC:
+        return True
     if NUMERIC_OBJECTIVE_EXPLICIT_ACTION_PATTERN.search(normalized):
         return True
     if NUMERIC_OBJECTIVE_CONTEXTUAL_ACTION_PATTERN.search(normalized) and NUMERIC_OBJECTIVE_TARGET_PATTERN.search(normalized):
@@ -291,7 +335,23 @@ def objective_has_numeric_intent(objective_text: str) -> bool:
     return False
 
 
+def _objective_prefers_symbolic_math_mcq(objective_text: str, chunk_text: str = "") -> bool:
+    if classify_math_objective(objective_text, chunk_text) == MATH_GENERATION_MODE_SYMBOLIC:
+        return True
+    if not is_math_generation_target(objective_text=objective_text, chunk_text=chunk_text):
+        return False
+    combined = _normalize_text(f"{objective_text} {chunk_text}")
+    return any(pattern.search(combined) for pattern in NUMERIC_SYMBOLIC_MATH_OBJECTIVE_PATTERNS)
+
+
 def supports_local_numeric_mcq(objective_text: str, chunk_text: str) -> bool:
+    math_mode = classify_math_objective(objective_text, chunk_text)
+    if math_mode == MATH_GENERATION_MODE_SYMBOLIC:
+        return False
+    if not objective_has_numeric_intent(objective_text):
+        return False
+    if _objective_prefers_symbolic_math_mcq(objective_text, chunk_text):
+        return False
     combined = f"{objective_text}\n{chunk_text}"
     lowered = str(combined or "").lower()
     if not chunk_has_numeric_signal(combined):
@@ -325,6 +385,17 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", decoded.strip())
 
 
+def _normalize_unit_text(value: str) -> str:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return ""
+    normalized = normalized.translate(UNIT_SUPERSCRIPT_TRANSLATION)
+    normalized = normalized.replace("−", "-").replace("×", "*").replace("·", "·")
+    normalized = re.sub(r"([A-Za-zΩµμ%])([23])\b", r"\1^\2", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
 NUMERIC_CONTEXT_STOPWORDS = {
     "about", "across", "after", "also", "an", "and", "apply", "are", "calculate",
     "determine", "evaluate", "example", "examples", "explain", "for", "from", "including",
@@ -335,20 +406,48 @@ NUMERIC_CONTEXT_STOPWORDS = {
 
 
 def _context_keywords(text: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", str(text or "").lower())
-        if token not in NUMERIC_CONTEXT_STOPWORDS and not token.isdigit()
-    }
+    keywords: set[str] = set()
+    for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", str(text or "").lower()):
+        if token in NUMERIC_CONTEXT_STOPWORDS or token.isdigit():
+            continue
+        keywords.add(token)
+        if token.endswith("ies") and len(token) > 4:
+            keywords.add(token[:-3] + "y")
+        elif token.endswith("es") and len(token) > 4:
+            keywords.add(token[:-2])
+        elif token.endswith("s") and len(token) > 3:
+            keywords.add(token[:-1])
+    return keywords
+
+
+def _context_overlap_count(left: set[str], right: set[str]) -> int:
+    if not left or not right:
+        return 0
+    matched_right: set[str] = set()
+    overlap = 0
+    for left_token in sorted(left):
+        for right_token in sorted(right):
+            if right_token in matched_right:
+                continue
+            shorter, longer = (left_token, right_token) if len(left_token) <= len(right_token) else (right_token, left_token)
+            if (
+                left_token == right_token
+                or (len(shorter) >= 4 and longer.startswith(shorter))
+                or (min(len(left_token), len(right_token)) >= 5 and left_token[:5] == right_token[:5])
+            ):
+                matched_right.add(right_token)
+                overlap += 1
+                break
+    return overlap
 
 
 def _validate_numeric_context_alignment(stem: str, explanation: str, objective_text: str, chunk_text: str) -> None:
     question_keywords = _context_keywords(f"{stem} {explanation}")
     objective_keywords = _context_keywords(objective_text)
     chunk_keywords = _context_keywords(chunk_text)
-    if objective_keywords and question_keywords & objective_keywords:
+    if objective_keywords and _context_overlap_count(question_keywords, objective_keywords) >= 1:
         return
-    if len(question_keywords & chunk_keywords) >= 2:
+    if _context_overlap_count(question_keywords, chunk_keywords) >= 2:
         return
     raise NumericQuestionValidationError(
         "Numeric question is not sufficiently aligned to the learning objective or block content."
@@ -356,7 +455,7 @@ def _validate_numeric_context_alignment(stem: str, explanation: str, objective_t
 
 
 def _normalize_unit_key(unit: str) -> str:
-    return re.sub(r"\s+", "", _normalize_text(unit).lower())
+    return re.sub(r"\s+", "", _normalize_unit_text(unit).lower())
 
 
 def normalize_physics_numeric_prose(text: str) -> str:
@@ -379,7 +478,44 @@ def normalize_physics_numeric_prose(text: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
+    cleaned = _normalize_signed_algebraic_terms(cleaned)
+    cleaned = _remove_redundant_quadratic_coefficient_clause(cleaned)
     return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _normalize_stem_value_unit_spacing(stem: str, replacements: dict[str, str], units: dict[str, str]) -> str:
+    normalized = str(stem or "")
+    for name, rendered_value in replacements.items():
+        unit = _normalize_text(units.get(name, ""))
+        if not rendered_value or not unit:
+            continue
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(rendered_value)}\s*{re.escape(unit)}(?=([^A-Za-z]|$))",
+            f"{rendered_value} {unit}",
+            normalized,
+        )
+    return normalized
+
+
+def _normalize_signed_algebraic_terms(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\+\s*-\s*(?=(?:\d|\())", "- ", cleaned)
+    cleaned = re.sub(r"-\s*-\s*(?=(?:\d|\())", "+ ", cleaned)
+    return cleaned
+
+
+def _remove_redundant_quadratic_coefficient_clause(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned or "x^2" not in cleaned:
+        return cleaned
+    if not re.search(r"\b[A-Za-z]\s*\(\s*x\s*\)\s*=", cleaned):
+        return cleaned
+    return re.sub(
+        r",?\s+(?:when|if)\s+a\s*=\s*[-+]?\d+(?:\.\d+)?,\s*b\s*=\s*[-+]?\d+(?:\.\d+)?,\s*(?:and\s+)?c\s*=\s*[-+]?\d+(?:\.\d+)?(?=[?.!]|$)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
 
 def _is_speed_of_light_variable(name: str, unit: str) -> bool:
@@ -830,6 +966,19 @@ def _format_value_tex(value: float, significant_figures: int) -> str:
     return _format_number_tex(value, significant_figures, display_style=_numeric_display_style(value))
 
 
+def _is_effectively_integer(value: float) -> bool:
+    finite = _ensure_finite_number(value, "Integer-style numeric value")
+    nearest_integer = round(finite)
+    if nearest_integer == 0:
+        return finite == 0.0
+    return math.isclose(finite, nearest_integer, rel_tol=1e-12, abs_tol=1e-12)
+
+
+def _final_numeric_step_tex(answer_symbol: str, answer_value: float, significant_figures: int, answer_unit: str) -> str:
+    relation = "=" if _is_effectively_integer(answer_value) else r"\approx"
+    return answer_symbol + f" {relation} " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+
+
 def _format_charge_multiple_tex(relative_charge: float) -> str:
     if math.isclose(relative_charge, 1.0):
         return _format_value_tex(ELEMENTARY_CHARGE, 3)
@@ -920,7 +1069,7 @@ def _coulomb_force_feedback_tex(stem: str, inputs: dict[str, dict], answer_value
         + _format_value_tex(distance_value, 3)
         + r")^2}"
     )
-    final = r"F \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex("F", answer_value, significant_figures, answer_unit)
     definitions = _symbol_definitions_text(
         answer_symbol="F",
         stem=stem,
@@ -979,7 +1128,7 @@ def _closest_approach_feedback_tex(stem: str, inputs: dict[str, dict], answer_va
         + _energy_tex_from_input(energy_value, energy_unit)
         + r"}"
     )
-    final = r"r \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex("r", answer_value, significant_figures, answer_unit)
     variable_symbols = {}
     if energy_name:
         variable_symbols[energy_name] = r"E_k"
@@ -1048,7 +1197,7 @@ def _speed_feedback_tex(
     answer_symbol = _answer_symbol_from_stem(stem, answer_unit, objective_text, chunk_text)
     symbolic = rf"{answer_symbol} = \frac{{{distance_symbol}}}{{{time_symbol}}}"
     substituted = rf"{answer_symbol} = \frac{{{_format_value_tex(distance_value, 3)}}}{{{_format_value_tex(time_value, 3)}}}"
-    final = answer_symbol + r" \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex(answer_symbol, answer_value, significant_figures, answer_unit)
     definitions = _symbol_definitions_text(
         answer_symbol=answer_symbol,
         stem=stem,
@@ -1112,7 +1261,7 @@ def _centripetal_acceleration_feedback_tex(
         + r"} = "
         + exact_answer_tex
     )
-    final = r"a \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex("a", answer_value, significant_figures, answer_unit)
     return rf"\[{symbolic}\]" + "\n\n" + rf"\[{substituted}\]" + "\n\n" + rf"\[{final}\]"
 
 
@@ -1131,7 +1280,7 @@ def _photon_energy_feedback_tex(stem: str, inputs: dict[str, dict], answer_value
         + r" \times "
         + _format_value_tex(frequency_value, 3)
     )
-    final = r"E \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex("E", answer_value, significant_figures, answer_unit)
     definitions = _symbol_definitions_text(
         answer_symbol="E",
         stem=stem,
@@ -1646,6 +1795,12 @@ def _objective_heuristic_symbol_overrides(
     objective_text: str = "",
     chunk_text: str = "",
 ) -> tuple[str, str, dict[str, str], list[tuple[str, str]], list[dict]]:
+    math_context = _is_math_feedback_context(
+        stem=stem,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        objective_symbol_heuristics=objective_symbol_heuristics,
+    )
     heuristics = normalize_objective_symbol_heuristics(objective_symbol_heuristics)
     if not heuristics:
         fallback_context = " ".join(part for part in (stem, objective_text, chunk_text) if part).strip()
@@ -1662,6 +1817,8 @@ def _objective_heuristic_symbol_overrides(
         terms = [str(term).strip().lower() for term in hint.get("match_terms", []) if str(term).strip()]
         symbol = symbol_plain_to_tex(str(hint.get("symbol", "") or ""))
         description = str(hint.get("description", "") or "").strip()
+        if _should_reject_symbol_description(description, math_context=math_context):
+            description = ""
         if not terms or not symbol:
             continue
         for name in inputs.keys():
@@ -1690,9 +1847,13 @@ def _objective_heuristic_symbol_overrides(
         if description:
             extra_definitions.append((symbol, description))
 
+    answer_description = str(heuristics.get("answer_description", "") or "").strip()
+    if _should_reject_symbol_description(answer_description, math_context=math_context):
+        answer_description = ""
+
     return (
         symbol_plain_to_tex(str(heuristics.get("answer_symbol", "") or "")),
-        str(heuristics.get("answer_description", "") or "").strip(),
+        answer_description,
         variable_symbols,
         extra_definitions,
         constant_aliases,
@@ -1747,7 +1908,7 @@ def _generic_feedback_tex(
             intro = first_sentence.rstrip(".") + ":"
     symbolic = rf"{answer_symbol} = {symbolic_expression}"
     substituted = rf"{answer_symbol} = {value_expression}"
-    final = answer_symbol + r" \approx " + _format_value_tex(answer_value, significant_figures) + _unit_tex(answer_unit)
+    final = _final_numeric_step_tex(answer_symbol, answer_value, significant_figures, answer_unit)
     definitions = _symbol_definitions_text(
         answer_symbol=answer_symbol,
         stem=stem,
@@ -1908,6 +2069,10 @@ NUMERIC_FEEDBACK_SYMBOL_CLAIM_PATTERN = re.compile(
     r"(?:is|means|represents)\s+(?P<meaning>[^.;:\n]+)",
     re.IGNORECASE,
 )
+NUMERIC_GENERIC_SYMBOL_TEMPLATE_RE = re.compile(
+    r"\bvariables?\s+representing\s+quantities?\s+such\s+as\b",
+    re.IGNORECASE,
+)
 
 
 def _canonical_plain_symbol(symbol: str) -> str:
@@ -1966,6 +2131,38 @@ def _meaning_keywords(description: str) -> set[str]:
     }
 
 
+def _is_math_feedback_context(
+    *,
+    stem: str,
+    objective_text: str = "",
+    chunk_text: str = "",
+    objective_symbol_heuristics: dict | None = None,
+) -> bool:
+    heuristics = normalize_objective_symbol_heuristics(objective_symbol_heuristics)
+    topic_family = _normalize_text(str(heuristics.get("topic_family", ""))).lower()
+    if topic_family in {"algebra", "calculus", "trigonometry", "vector", "probability", "mathematics"}:
+        return True
+    return is_math_generation_target(
+        objective_text=objective_text or stem,
+        chunk_text=" ".join(part for part in (stem, objective_text, chunk_text) if part).strip(),
+    )
+
+
+def _has_generic_symbol_template(text: str) -> bool:
+    return bool(NUMERIC_GENERIC_SYMBOL_TEMPLATE_RE.search(_normalize_text(text)))
+
+
+def _should_reject_symbol_description(description: str, *, math_context: bool) -> bool:
+    normalized = _normalize_text(description)
+    if not normalized:
+        return False
+    if _has_generic_symbol_template(normalized):
+        return True
+    if math_context and normalized.lower().startswith("variables representing quantities"):
+        return True
+    return False
+
+
 def _symbol_definition_expectations(
     *,
     answer_symbol: str,
@@ -2017,6 +2214,9 @@ def _extract_symbol_claims(text: str) -> list[tuple[str, str]]:
 def _validate_symbol_definitions(text: str, expected_definitions: dict[str, str]) -> list[str]:
     errors: list[str] = []
     for symbol, meaning in _extract_symbol_claims(text):
+        if _has_generic_symbol_template(meaning):
+            errors.append(f"{symbol} was defined using a generic template instead of this question's notation.")
+            continue
         canonical_symbol = _canonical_plain_symbol(symbol)
         actual_kind = _meaning_kind(meaning)
         if canonical_symbol not in expected_definitions:
@@ -2131,6 +2331,27 @@ def _extract_feedback_display_blocks(text: str) -> list[str]:
     return [block.strip() for block in re.findall(r"\\\[(.*?)\\\]", str(text or ""), flags=re.S) if block.strip()]
 
 
+def _numeric_feedback_plain_math_text(value: str) -> str:
+    text = _decode_literal_unicode_escapes(str(value or ""))
+    text = text.replace(r"\[", " ").replace(r"\]", " ").replace(r"\(", " ").replace(r"\)", " ")
+    text = re.sub(r"\\(?:mathrm|text)\{\s*([^{}]+?)\s*\}", r"\1", text)
+    text = re.sub(r"\\frac\{\s*([^{}]+?)\s*\}\{\s*([^{}]+?)\s*\}", r"\1/\2", text)
+    text = text.replace(r"\,", " ").replace(r"\;", " ").replace(r"\:", " ")
+    text = text.replace(r"\times", "×").replace(r"\cdot", "·")
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\\[A-Za-z]+", " ", text)
+    return _normalize_text(text)
+
+
+def _numeric_feedback_contains_option_text(worked_solution_text: str, correct_answer_text: str) -> bool:
+    expected = _normalize_text(correct_answer_text)
+    if not expected:
+        return True
+    candidates = [_normalize_text(worked_solution_text), _numeric_feedback_plain_math_text(worked_solution_text)]
+    candidates.extend(_numeric_feedback_plain_math_text(block) for block in _extract_feedback_display_blocks(worked_solution_text))
+    return any(expected in candidate for candidate in candidates if candidate)
+
+
 def _extract_feedback_definitions_text(text: str) -> str:
     match = re.search(r"(Here,\s.*?\.)", _normalize_text(text), flags=re.S)
     return match.group(1).strip() if match else ""
@@ -2164,6 +2385,12 @@ def _build_numeric_feedback_context(
     except SyntaxError:
         return {}
     variable_symbols = _infer_variable_symbols(inputs, stem, objective_text, chunk_text)
+    math_context = _is_math_feedback_context(
+        stem=stem,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        objective_symbol_heuristics=objective_symbol_heuristics,
+    )
     (
         heuristic_answer_symbol,
         heuristic_answer_description,
@@ -2185,7 +2412,7 @@ def _build_numeric_feedback_context(
         tree,
         {name: _value_replacement_tex(name, payload, significant_figures) for name, payload in inputs.items()},
     )
-    final_tex = answer_symbol + r" \approx " + _format_value_tex(float(answer_value), significant_figures) + _unit_tex(answer_unit)
+    final_tex = _final_numeric_step_tex(answer_symbol, float(answer_value), significant_figures, answer_unit)
     expectations = _symbol_definition_expectations(
         answer_symbol=answer_symbol,
         stem=stem,
@@ -2225,7 +2452,13 @@ def _build_numeric_feedback_context(
         if r"\approx" in explanation_blocks[-1]:
             final_tex = _sanitize_numeric_feedback_math_tex(explanation_blocks[-1])
         parsed_definitions = _extract_feedback_definitions_text(detailed_explanation)
-        if parsed_definitions and not normalize_objective_symbol_heuristics(objective_symbol_heuristics):
+        parsed_definition_errors = _validate_symbol_definitions(parsed_definitions, expectations) if parsed_definitions else []
+        if (
+            parsed_definitions
+            and not parsed_definition_errors
+            and not _should_reject_symbol_description(parsed_definitions, math_context=math_context)
+            and not normalize_objective_symbol_heuristics(objective_symbol_heuristics)
+        ):
             definitions_text = parsed_definitions
             definitions_source = "existing_working"
     key_idea = _default_numeric_key_idea(stem, explanation_text, definitions_text)
@@ -2253,6 +2486,7 @@ def _build_numeric_feedback_context(
         "definitions_text": definitions_text,
         "definitions_source": definitions_source,
         "expected_definitions": expectations,
+        "math_context": math_context,
         "formula_tex": formula_tex,
         "substitution_tex": substitution_tex,
         "final_tex": final_tex,
@@ -2419,6 +2653,8 @@ def _normalize_numeric_feedback_worked_solution(
     formula_tex: str,
     substitution_tex: str,
     final_tex: str,
+    expected_definitions: dict[str, str] | None = None,
+    math_context: bool = False,
 ) -> tuple[str, bool]:
     text = _decode_literal_unicode_escapes(str(value or ""))
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -2434,6 +2670,30 @@ def _normalize_numeric_feedback_worked_solution(
             prose_blocks=[key_idea],
             math_blocks=[formula_tex, substitution_tex, final_tex],
         )
+        has_custom_working = False
+        return text, has_custom_working
+
+    normalized_blocks = {
+        _sanitize_numeric_feedback_math_tex(block)
+        for block in _extract_feedback_display_blocks(text)
+        if _sanitize_numeric_feedback_math_tex(block)
+    }
+    required_blocks = {
+        _sanitize_numeric_feedback_math_tex(formula_tex),
+        _sanitize_numeric_feedback_math_tex(substitution_tex),
+        _sanitize_numeric_feedback_math_tex(final_tex),
+    }
+    definition_errors = _validate_symbol_definitions(text, expected_definitions or {})
+    if (
+        not required_blocks.issubset(normalized_blocks)
+        or (math_context and _has_generic_symbol_template(text))
+        or definition_errors
+    ):
+        text = _compose_numeric_worked_solution_text(
+            prose_blocks=[key_idea],
+            math_blocks=[formula_tex, substitution_tex, final_tex],
+        )
+        has_custom_working = False
     return text, has_custom_working
 
 
@@ -2442,6 +2702,11 @@ def _validate_numeric_feedback_payload(
     *,
     correct_answer_text: str,
     distractors: list[str],
+    trusted_formula_tex: str = "",
+    trusted_substitution_tex: str = "",
+    trusted_final_tex: str = "",
+    expected_definitions: dict[str, str] | None = None,
+    math_context: bool = False,
 ) -> dict:
     if not isinstance(payload, dict):
         raise NumericQuestionValidationError("Stored numeric feedback must be a JSON object.")
@@ -2453,12 +2718,20 @@ def _validate_numeric_feedback_payload(
     formula_tex = _normalize_numeric_feedback_math_block(payload.get("formula", ""), "formula")
     substitution_tex = _normalize_numeric_feedback_math_block(payload.get("substitution", ""), "substitution")
     final_tex = _normalize_numeric_feedback_math_block(payload.get("final_answer", ""), "final_answer")
+    if trusted_formula_tex:
+        formula_tex = _normalize_numeric_feedback_math_block(trusted_formula_tex, "formula")
+    if trusted_substitution_tex:
+        substitution_tex = _normalize_numeric_feedback_math_block(trusted_substitution_tex, "substitution")
+    if trusted_final_tex:
+        final_tex = _normalize_numeric_feedback_math_block(trusted_final_tex, "final_answer")
     worked_solution_text, has_custom_working = _normalize_numeric_feedback_worked_solution(
         payload.get("worked_solution", ""),
         key_idea=key_idea,
         formula_tex=formula_tex,
         substitution_tex=substitution_tex,
         final_tex=final_tex,
+        expected_definitions=expected_definitions,
+        math_context=math_context,
     )
 
     option_texts = [str(correct_answer_text or "").strip(), *[str(item or "").strip() for item in distractors]]
@@ -2509,6 +2782,11 @@ def _coerce_stored_numeric_feedback_payload(
     *,
     correct_answer_text: str,
     distractors: list[str],
+    trusted_formula_tex: str = "",
+    trusted_substitution_tex: str = "",
+    trusted_final_tex: str = "",
+    expected_definitions: dict[str, str] | None = None,
+    math_context: bool = False,
 ) -> dict:
     if not isinstance(raw_feedback, dict):
         raise NumericQuestionValidationError("Stored numeric feedback must be a JSON object.")
@@ -2525,6 +2803,11 @@ def _coerce_stored_numeric_feedback_payload(
         raw_feedback,
         correct_answer_text=correct_answer_text,
         distractors=distractors,
+        trusted_formula_tex=trusted_formula_tex,
+        trusted_substitution_tex=trusted_substitution_tex,
+        trusted_final_tex=trusted_final_tex,
+        expected_definitions=expected_definitions,
+        math_context=math_context,
     )
 
 
@@ -2532,6 +2815,11 @@ def _stored_numeric_feedback_option(
     numeric_metadata: dict | None,
     *,
     selected_answer_text: str,
+    trusted_formula_tex: str = "",
+    trusted_substitution_tex: str = "",
+    trusted_final_tex: str = "",
+    expected_definitions: dict[str, str] | None = None,
+    math_context: bool = False,
 ) -> tuple[dict, dict] | tuple[None, None]:
     if not isinstance(numeric_metadata, dict):
         return None, None
@@ -2552,6 +2840,11 @@ def _stored_numeric_feedback_option(
             raw_feedback,
             correct_answer_text=correct_answer_text,
             distractors=distractors,
+            trusted_formula_tex=trusted_formula_tex,
+            trusted_substitution_tex=trusted_substitution_tex,
+            trusted_final_tex=trusted_final_tex,
+            expected_definitions=expected_definitions,
+            math_context=math_context,
         )
     except NumericQuestionValidationError:
         return None, None
@@ -2573,7 +2866,11 @@ def _numeric_feedback_regeneration_hints(
     hints: list[str] = []
     definitions_text = _normalize_text(str(context.get("definitions_text", "")))
     definitions_source = _normalize_text(str(context.get("definitions_source", ""))).lower()
-    if definitions_text and definitions_source == "existing_working":
+    if (
+        definitions_text
+        and definitions_source == "existing_working"
+        and not _should_reject_symbol_description(definitions_text, math_context=bool(context.get("math_context")))
+    ):
         hints.append(definitions_text)
     return "\n".join(hints).strip()
 
@@ -2628,7 +2925,7 @@ Return a strict JSON object with keys `key_idea` and `worked_solution`.
 
 Rules:
 - Improve the current worked solution so it is clearer, more detailed, and more learner-friendly.
-- Choose the notation yourself using the most natural conventional symbols for this exact physics context.
+- Choose the notation yourself using the most natural conventional symbols for this exact question.
 - Introduce any chosen symbols clearly before using them.
 - Use appropriate subscripts where they help, for example A_0, N_0, t_{{1/2}}, q_1, q_2, or E_k.
 - Show the working in more detail than the current version, with multiple clear steps.
@@ -2639,7 +2936,8 @@ Rules:
 - Do not leave raw TeX such as \\frac or \\text outside \\[ ... \\].
 - If you replace π with a decimal approximation, use 3.14 rather than extra decimal places.
 - Keep units upright in maths.
-- Preserve the underlying physics, arithmetic, and final numerical conclusion.
+- If the question already uses symbols such as x, y, a, b, or c, keep those meanings and do not redefine them as placeholders from another topic.
+- Preserve the underlying calculation, arithmetic, and final numerical conclusion.
 - Do not begin with "Correct" or "Incorrect" because the app adds that.
 - Do not mention answer letters or option letters.
 - If the value should be matched to an option, end by naming the exact option text that should be chosen.
@@ -2678,7 +2976,7 @@ Current worked solution to improve:
 """.strip()
     try:
         response = client.responses.create(
-            model=getattr(settings, "OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL", "gpt-5.5"),
+            model=getattr(settings, "OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL", "gpt-4.1"),
             instructions=(
                 "Return one valid JSON object only. "
                 "Choose natural subject notation, use subscripts when helpful, and show detailed learner-facing working."
@@ -2732,6 +3030,7 @@ Rules:
 - Choose the conventional symbols that fit the question naturally.
 - `formula`, `substitution`, and `final_answer` must be LaTeX-ready maths only, without surrounding \\[ \\].
 - `worked_solution` must be a richer learner-facing explanation in plain text that can include short prose paragraphs and display-math blocks written as \\[ ... \\].
+- `worked_solution` must include the same formula, substitution, and final-answer steps as the returned `formula`, `substitution`, and `final_answer`.
 - In `worked_solution`, introduce sensible symbols before using them, and prefer multiple clear steps over one collapsed expression.
 - Put each substantial calculation step in its own display-math block.
 - Only wrap actual equations or calculations in \\[ ... \\]. Never wrap prose paragraphs, sentences, headings, or bullet points in display math.
@@ -2741,6 +3040,7 @@ Rules:
 - If the computed value should be matched to a nearby answer option, end `worked_solution` by naming the exact option text that should be chosen.
 - In `substitution`, show the numeric working clearly.
 - Do not mention option letters, answer letters, or "the correct answer is option...".
+- If the question already uses symbols such as x, y, a, b, or c, keep those meanings and do not redefine them as placeholders from another topic.
 - Base the working on the verified expression and givens below, but do not force the raw variable names into the final notation.
 
 Question:
@@ -2795,6 +3095,13 @@ def _build_stored_numeric_feedback(
     objective_text: str = "",
     chunk_text: str = "",
 ) -> dict:
+    context = _build_numeric_feedback_context(
+        stem=stem,
+        explanation_text=explanation_text,
+        numeric_metadata=numeric_metadata,
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+    )
     raw_payload = _openai_numeric_feedback_payload(
         stem=stem,
         explanation_text=explanation_text,
@@ -2806,6 +3113,11 @@ def _build_stored_numeric_feedback(
         raw_payload,
         correct_answer_text=correct_answer_text,
         distractors=distractors,
+        trusted_formula_tex=str(context.get("formula_tex", "")).strip(),
+        trusted_substitution_tex=str(context.get("substitution_tex", "")).strip(),
+        trusted_final_tex=str(context.get("final_tex", "")).strip(),
+        expected_definitions=context.get("expected_definitions"),
+        math_context=bool(context.get("math_context")),
     )
 
 
@@ -2845,6 +3157,11 @@ def regenerate_stored_numeric_feedback(
             raw_feedback if isinstance(raw_feedback, dict) else {},
             correct_answer_text=correct_answer_text,
             distractors=distractors,
+            trusted_formula_tex=str(context.get("formula_tex", "")).strip(),
+            trusted_substitution_tex=str(context.get("substitution_tex", "")).strip(),
+            trusted_final_tex=str(context.get("final_tex", "")).strip(),
+            expected_definitions=context.get("expected_definitions"),
+            math_context=bool(context.get("math_context")),
         )
     except NumericQuestionValidationError:
         stored_feedback = {
@@ -2896,6 +3213,8 @@ def regenerate_stored_numeric_feedback(
             formula_tex=stored_feedback["formula_tex"],
             substitution_tex=stored_feedback["substitution_tex"],
             final_tex=stored_feedback["final_tex"],
+            expected_definitions=context.get("expected_definitions"),
+            math_context=bool(context.get("math_context")),
         )
         errors: list[str] = []
         if not key_idea:
@@ -2905,12 +3224,14 @@ def regenerate_stored_numeric_feedback(
         display_blocks = _extract_feedback_display_blocks(worked_solution_text)
         if len(display_blocks) < 3:
             errors.append("Include at least three display-math blocks in worked_solution.")
-        if _normalize_text(correct_answer_text) and _normalize_text(correct_answer_text) not in _normalize_text(worked_solution_text):
+        if not _numeric_feedback_contains_option_text(worked_solution_text, correct_answer_text):
             errors.append(f'End by naming the exact option text "{correct_answer_text}".')
         if errors:
             retry_notes = errors
             last_error = " ".join(errors)
             continue
+        if _normalize_text(correct_answer_text) and _normalize_text(correct_answer_text) not in _normalize_text(worked_solution_text):
+            worked_solution_text = f"{worked_solution_text}\n\nExact option: {correct_answer_text}"
         return {
             **stored_feedback,
             "version": NUMERIC_FEEDBACK_VERSION,
@@ -2990,6 +3311,11 @@ def format_numeric_answer_feedback(
     stored_feedback, selected_option = _stored_numeric_feedback_option(
         numeric_metadata or {},
         selected_answer_text=selected_answer_text,
+        trusted_formula_tex=str(context.get("formula_tex", "")).strip(),
+        trusted_substitution_tex=str(context.get("substitution_tex", "")).strip(),
+        trusted_final_tex=str(context.get("final_tex", "")).strip(),
+        expected_definitions=context.get("expected_definitions"),
+        math_context=bool(context.get("math_context")),
     )
     if stored_feedback and selected_option:
         worked_solution_text = (
@@ -3026,7 +3352,7 @@ def format_numeric_answer_feedback(
 
 
 def _validate_unit_text(value, label: str) -> str:
-    unit = _normalize_text(value)
+    unit = _normalize_unit_text(value)
     if unit.lower() == "dimensionless":
         return ""
     if len(unit) > 40 or not re.fullmatch(r"[A-Za-z0-9%°µμΩ·./*^+()\- ]*", unit):
@@ -3035,7 +3361,7 @@ def _validate_unit_text(value, label: str) -> str:
 
 
 def _render_stem_template(template: str, values: dict[str, float], units: dict[str, str]) -> str:
-    template = str(template or "").strip()
+    template = _preserve_symbolic_assignment_labels(str(template or "").strip(), values)
     formatter = string.Formatter()
     try:
         fields = [field_name for _, field_name, _, _ in formatter.parse(template) if field_name is not None]
@@ -3054,7 +3380,9 @@ def _render_stem_template(template: str, values: dict[str, float], units: dict[s
         for name, value in values.items()
     }
     try:
-        stem = normalize_physics_numeric_prose(template.format_map(replacements))
+        stem = template.format_map(replacements)
+        stem = _normalize_stem_value_unit_spacing(stem, replacements, units)
+        stem = normalize_physics_numeric_prose(stem)
     except (KeyError, ValueError) as exc:
         raise NumericQuestionValidationError(f"Numeric stem template could not be rendered: {exc}.") from exc
     if not stem or _has_source_dependent_stem(stem):
@@ -3169,6 +3497,28 @@ def _replace_literal_once(text: str, literal: str, replacement: str) -> str | No
     return None
 
 
+def _preserve_symbolic_assignment_labels(template: str, values: dict[str, float]) -> str:
+    repaired = str(template or "")
+    for name, value in values.items():
+        rendered_value = _format_number_text(
+            value,
+            _infer_stem_value_significant_figures(value),
+            display_style=_numeric_display_style(value),
+        )
+        field_pattern = re.escape(f"{{{name}}}")
+        repaired = re.sub(
+            rf"(?<![0-9A-Za-z_]){field_pattern}\s*=\s*{field_pattern}(?![0-9A-Za-z_])",
+            f"{name} = {{{name}}}",
+            repaired,
+        )
+        repaired = re.sub(
+            rf"(?<![0-9A-Za-z_]){field_pattern}\s*=\s*{re.escape(rendered_value)}(?![0-9A-Za-z_])",
+            f"{name} = {{{name}}}",
+            repaired,
+        )
+    return repaired
+
+
 def _repair_numeric_candidate_stem_template(candidate: dict) -> tuple[dict | None, str]:
     template = _normalize_text(candidate.get("stem_template", ""))
     if not template:
@@ -3252,6 +3602,17 @@ def _display_resolution(value: float, significant_figures: int) -> float:
     return 10 ** (exponent - significant_figures + 1)
 
 
+def _numeric_answer_style(answer_text: str) -> str:
+    numeric_part = _normalize_text(answer_text).split(" ", 1)[0]
+    if "×" in answer_text or "e" in numeric_part.lower():
+        return "scientific"
+    if re.fullmatch(r"[-+]?\d+", numeric_part):
+        return "integer"
+    if re.fullmatch(r"[-+]?\d+\.\d+", numeric_part):
+        return "decimal"
+    return "other"
+
+
 def _build_local_distractors(
     answer_value: float,
     answer_unit: str,
@@ -3261,6 +3622,13 @@ def _build_local_distractors(
     *,
     display_style: str | None = None,
 ) -> tuple[list[str], list[float]]:
+    correct_answer = normalize_numeric_answer_text(
+        answer_value,
+        answer_unit,
+        significant_figures,
+        display_style=display_style,
+    )
+    answer_style = _numeric_answer_style(correct_answer)
     if answer_value == 0:
         scale = max((abs(value) for value in variables.values()), default=1.0) or 1.0
         increment = _display_resolution(scale, significant_figures)
@@ -3272,6 +3640,19 @@ def _build_local_distractors(
             17 * increment,
             -23 * increment,
         ]
+    elif answer_style == "integer":
+        increment = max(1, int(round(_display_resolution(answer_value, significant_figures))))
+        base_value = int(round(answer_value))
+        candidates = [
+            base_value + (1 * increment),
+            base_value - (1 * increment),
+            base_value + (2 * increment),
+            base_value - (2 * increment),
+            base_value + (5 * increment),
+            base_value - (5 * increment),
+            base_value + (10 * increment),
+            base_value - (10 * increment),
+        ]
     else:
         increment = _display_resolution(answer_value, significant_figures)
         candidates = [
@@ -3282,12 +3663,6 @@ def _build_local_distractors(
             answer_value + (17 * increment),
             answer_value - (23 * increment),
         ]
-    correct_answer = normalize_numeric_answer_text(
-        answer_value,
-        answer_unit,
-        significant_figures,
-        display_style=display_style,
-    )
     distractors: list[str] = []
     distractor_values: list[float] = []
     for candidate_value in candidates:
@@ -3421,7 +3796,7 @@ Rules:
 - Prefer students to infer the relationship from the scenario and givens instead of spelling out the exact arithmetic step inside the stem.
 - If recent examples are provided, choose a materially different numerical angle, target quantity, and formula focus rather than restating the same calculation with new numbers.
 - Put each given numerical quantity in variables and insert its value in stem_template as {{variable_name}}.
-- A placeholder is replaced by the numeric value only. Write its unit immediately after the placeholder in stem_template.
+- A placeholder is replaced by the numeric value only. Write its unit after the placeholder with a space, for example {{time}} s or {{g}} m/s^2.
 - Every variable placeholder must occur exactly once in stem_template. Do not put literal numerical givens elsewhere in the stem.
 - In physics stems, write the speed of light as c, not as the phrase "speed of light".
 - When c is supplied, always use 3 × 10^8 m/s.

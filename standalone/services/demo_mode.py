@@ -304,6 +304,16 @@ def send_demo_preview_chat_message(
     return payload
 
 
+def reset_demo_preview_state(access: CourseDemoAccess) -> dict:
+    with _demo_access_lock(access.pk):
+        with transaction.atomic():
+            locked_access = CourseDemoAccess.objects.select_for_update().select_related("course").get(pk=access.pk)
+            request = _demo_request(locked_access, shared_practice_state=_empty_course_state())
+            payload = serialize_preview_state(request, locked_access.course, include_projects=False)
+            _persist_demo_states(locked_access, request)
+    return payload
+
+
 def get_or_create_demo_validation_session(access: CourseDemoAccess, visitor_key: str) -> CourseDemoValidationSession:
     session, _created = CourseDemoValidationSession.objects.get_or_create(
         demo_access=access,

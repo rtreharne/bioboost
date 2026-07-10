@@ -26,6 +26,8 @@ if (previewRoot && previewDataNode) {
   const headerCoverageFill = previewRoot.querySelector("[data-preview-header-coverage-fill]");
   const previewSidebarHead = previewRoot.querySelector(".preview-sidebar-head");
   const previewChatHeader = previewRoot.querySelector(".preview-chat-header");
+  const conversationSwitcher = previewRoot.querySelector("[data-preview-conversation-switcher]");
+  const conversationSwitcherButtons = Array.from(previewRoot.querySelectorAll("[data-preview-conversation-mode]"));
   const scrollBottomButton = previewRoot.querySelector("[data-preview-scroll-bottom]");
   const sidebarSummary = previewRoot.querySelector("[data-preview-sidebar-summary]");
   const sidebarSummaryText = previewRoot.querySelector("[data-preview-sidebar-summary-text]");
@@ -40,6 +42,12 @@ if (previewRoot && previewDataNode) {
   const headerMenu = previewRoot.querySelector("[data-preview-header-menu]");
   const headerMenuTrigger = previewRoot.querySelector("[data-preview-header-menu-trigger]");
   const headerMenuPanel = previewRoot.querySelector("[data-preview-header-menu-panel]");
+  const descriptionResourceButton = previewRoot.querySelector('[data-preview-resource="description"]');
+  const objectivesResourceButton = previewRoot.querySelector('[data-preview-resource="objectives"]');
+  const collectionObjectivesResourceButton = previewRoot.querySelector('[data-preview-resource="collection_objectives"]');
+  const sidebarMenu = previewRoot.querySelector("[data-preview-sidebar-menu]");
+  const sidebarMenuTrigger = previewRoot.querySelector("[data-preview-sidebar-menu-trigger]");
+  const sidebarMenuPanel = previewRoot.querySelector("[data-preview-sidebar-menu-panel]");
   const waqAlignment = previewRoot.querySelector("[data-waq-alignment]");
   const waqAlignmentLabel = previewRoot.querySelector("[data-waq-alignment-label]");
   const waqAlignmentFill = previewRoot.querySelector("[data-waq-alignment-fill]");
@@ -48,6 +56,7 @@ if (previewRoot && previewDataNode) {
   const projectSwitcher = previewRoot.querySelector("[data-preview-project-switcher]");
   const projectPanel = previewRoot.querySelector("[data-preview-project-panel]");
   const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
+  const resetDemoButton = previewRoot.querySelector("[data-preview-reset-demo]");
   const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
   const mobileChatMedia = window.matchMedia("(max-width: 640px)");
   const messengerMobileMedia = window.matchMedia("(max-width: 980px)");
@@ -101,6 +110,7 @@ if (previewRoot && previewDataNode) {
   let messengerMobileChatOpen = !isMessengerPreview || !messengerMobileMedia.matches;
   let messengerHeaderHeightSyncFrame = 0;
   let transcriptScrollButtonSyncFrame = 0;
+  let conversationListMode = "all";
   const inlineMessagesByBlock = {};
   const loadingMessagesByBlock = {};
   const optimisticUserMessagesByBlock = {};
@@ -589,6 +599,15 @@ if (previewRoot && previewDataNode) {
     return isCollectionView() ? findCollection(currentCollectionId()) : null;
   }
 
+  function collectionBlocks(collection = currentCollection()) {
+    if (!collection || !Array.isArray(collection.block_ids)) {
+      return [];
+    }
+    return collection.block_ids
+      .map((blockId) => findBlock(blockId))
+      .filter(Boolean);
+  }
+
   function currentConversationEntry() {
     if (isStatsView()) {
       return null;
@@ -772,7 +791,7 @@ if (previewRoot && previewDataNode) {
         objectives.forEach((objective) => {
           const option = document.createElement("option");
           option.value = String(objective.id);
-          option.textContent = `${objective.code} ${objective.text}`;
+          option.textContent = `${displayObjectiveCode(objective.code)} ${objective.text}`;
           flagObjectiveSelect.appendChild(option);
         });
         flagObjectiveSelect.value = flagSheetState.learningObjectiveId
@@ -797,7 +816,7 @@ if (previewRoot && previewDataNode) {
       learningObjectiveId: Number(objective.id || 0),
     };
     if (objectiveSheetObjective) {
-      objectiveSheetObjective.textContent = `${objective.code} ${objective.text}`;
+      objectiveSheetObjective.textContent = `${displayObjectiveCode(objective.code)} ${objective.text}`;
     }
     const currentGuidance = String(objective.assistant_guidance || "").trim();
     if (objectiveSheetExistingWrap) {
@@ -1984,6 +2003,44 @@ if (previewRoot && previewDataNode) {
     return !!headerMenuPanel && !headerMenuPanel.hidden;
   }
 
+  function syncHeaderMenuResourceVisibility(mode = "none") {
+    const isCollectionMode = mode === "collection";
+    const isBlockMode = mode === "block";
+    if (descriptionResourceButton) {
+      descriptionResourceButton.hidden = !isBlockMode;
+    }
+    if (objectivesResourceButton) {
+      objectivesResourceButton.hidden = !isBlockMode;
+    }
+    if (collectionObjectivesResourceButton) {
+      collectionObjectivesResourceButton.hidden = !isCollectionMode;
+    }
+  }
+
+  function closeSidebarMenu() {
+    if (!sidebarMenu || !sidebarMenuTrigger || !sidebarMenuPanel) {
+      return;
+    }
+    sidebarMenu.dataset.open = "false";
+    sidebarMenuTrigger.setAttribute("aria-expanded", "false");
+    sidebarMenuPanel.setAttribute("hidden", "hidden");
+    sidebarMenuPanel.hidden = true;
+  }
+
+  function openSidebarMenu() {
+    if (!sidebarMenu || !sidebarMenuTrigger || !sidebarMenuPanel) {
+      return;
+    }
+    sidebarMenu.dataset.open = "true";
+    sidebarMenuTrigger.setAttribute("aria-expanded", "true");
+    sidebarMenuPanel.removeAttribute("hidden");
+    sidebarMenuPanel.hidden = false;
+  }
+
+  function isSidebarMenuOpen() {
+    return !!sidebarMenuPanel && !sidebarMenuPanel.hidden;
+  }
+
   function syncMessengerHeaderHeights() {
     messengerHeaderHeightSyncFrame = 0;
     if (!isMessengerPreview || !previewSidebarHead || !previewChatHeader) {
@@ -2506,6 +2563,24 @@ if (previewRoot && previewDataNode) {
     return null;
   }
 
+  function latestConversationAccessTimestamp(conversation) {
+    const messages = combinedTranscript(conversation);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!humanReadableMessage(message)) {
+        continue;
+      }
+      if (message?.is_block_welcome || message?.is_collection_welcome) {
+        continue;
+      }
+      const parsed = parseMessageDate(message?.created_at);
+      if (parsed) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
   function conversationAvatarText(title, fallback = "B") {
     return String(title || "")
       .split(/\s+/)
@@ -2515,15 +2590,27 @@ if (previewRoot && previewDataNode) {
       .join("") || fallback;
   }
 
+  function displayObjectiveCode(code) {
+    const normalized = String(code || "").trim();
+    if (!normalized.includes(".")) {
+      return normalized;
+    }
+    const parts = normalized.split(".").filter(Boolean);
+    return parts.length > 1 ? parts.slice(1).join(".") : normalized;
+  }
+
   function blockConversationRowData(block) {
     const lastMessage = latestConversationMessage(block);
     const lastTimestamp = latestConversationTimestamp(block);
+    const lastAccessTimestamp = latestConversationAccessTimestamp(block);
+    const createdAt = parseMessageDate(block?.created_at || "");
     return {
       id: String(block?.id || ""),
       threadKind: "block",
       block,
+      createdAt,
       lastMessage,
-      lastMessageAt: lastTimestamp,
+      lastMessageAt: lastAccessTimestamp,
       previewText: truncateConversationPreview(messagePreviewText(lastMessage) || "Tap Quiz to start this conversation."),
       previewTimestamp: formatConversationTimestamp(lastTimestamp ? lastTimestamp.toISOString() : (lastMessage?.created_at || "")),
       avatarUrl: String(block?.avatar_url || "").trim(),
@@ -2536,12 +2623,15 @@ if (previewRoot && previewDataNode) {
   function collectionConversationRowData(collection) {
     const lastMessage = latestConversationMessage(collection);
     const lastTimestamp = latestConversationTimestamp(collection);
+    const lastAccessTimestamp = latestConversationAccessTimestamp(collection);
+    const createdAt = parseMessageDate(collection?.created_at || "");
     return {
       id: collectionThreadKey(collection?.id),
       threadKind: "collection",
       collection,
+      createdAt,
       lastMessage,
-      lastMessageAt: lastTimestamp,
+      lastMessageAt: lastAccessTimestamp,
       previewText: truncateConversationPreview(messagePreviewText(lastMessage) || "Tap Quiz to start this conversation."),
       previewTimestamp: formatConversationTimestamp(lastTimestamp ? lastTimestamp.toISOString() : (lastMessage?.created_at || "")),
       avatarUrl: "",
@@ -2580,6 +2670,42 @@ if (previewRoot && previewDataNode) {
     };
   }
 
+  function collectionCount() {
+    return Array.isArray(previewState.collections) ? previewState.collections.length : 0;
+  }
+
+  function normalizeConversationListMode(mode) {
+    if (mode === "collections") {
+      return "collections";
+    }
+    if (mode === "blocks") {
+      return "blocks";
+    }
+    return "all";
+  }
+
+  function currentConversationListMode() {
+    return normalizeConversationListMode(conversationListMode);
+  }
+
+  function syncConversationSwitcher() {
+    if (!conversationSwitcher) {
+      return;
+    }
+    const hasCollections = collectionCount() > 0;
+    conversationSwitcher.hidden = !hasCollections;
+    if (!hasCollections) {
+      conversationListMode = "all";
+      return;
+    }
+    const activeMode = currentConversationListMode();
+    conversationSwitcherButtons.forEach((button) => {
+      const isActive = button.dataset.previewConversationMode === activeMode;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+
   function setAvatarContent(container, {
     avatarUrl = "",
     avatarText = "",
@@ -2608,19 +2734,29 @@ if (previewRoot && previewDataNode) {
   }
 
   function sortedConversationBlocks() {
-    const rows = [
-      ...(previewState.collections || []).map((collection) => collectionConversationRowData(collection)),
+    const activeMode = currentConversationListMode();
+    if (activeMode === "collections") {
+      return (previewState.collections || []).map((collection) => collectionConversationRowData(collection));
+    }
+    if (activeMode === "blocks") {
+      return (previewState.blocks || []).map((block) => blockConversationRowData(block));
+    }
+    return [
       ...(previewState.blocks || []).map((block) => blockConversationRowData(block)),
-    ];
-    return rows
-      .sort((left, right) => {
-        const rightTime = right.lastMessageAt ? right.lastMessageAt.getTime() : 0;
-        const leftTime = left.lastMessageAt ? left.lastMessageAt.getTime() : 0;
-        if (rightTime !== leftTime) {
-          return rightTime - leftTime;
-        }
-        return String(left.title || "").localeCompare(String(right.title || ""));
-      });
+      ...(previewState.collections || []).map((collection) => collectionConversationRowData(collection)),
+    ].sort((left, right) => {
+      const rightTime = right.lastMessageAt ? right.lastMessageAt.getTime() : 0;
+      const leftTime = left.lastMessageAt ? left.lastMessageAt.getTime() : 0;
+      if (rightTime !== leftTime) {
+        return rightTime - leftTime;
+      }
+      const leftCreatedAt = left.createdAt ? left.createdAt.getTime() : Number.POSITIVE_INFINITY;
+      const rightCreatedAt = right.createdAt ? right.createdAt.getTime() : Number.POSITIVE_INFINITY;
+      if (leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt - rightCreatedAt;
+      }
+      return 0;
+    });
   }
 
   function filteredConversationBlocks() {
@@ -3221,6 +3357,17 @@ if (previewRoot && previewDataNode) {
     if (!blockSwitcher) {
       return;
     }
+    syncConversationSwitcher();
+    if (isMessengerPreview) {
+      blockSwitcher.setAttribute(
+        "aria-label",
+        ({
+          all: "Course conversations",
+          collections: "Course collections",
+          blocks: "Course blocks",
+        })[currentConversationListMode()] || "Course conversations",
+      );
+    }
     const previousScrollTop = blockSwitcher.scrollTop;
     const previousActiveBlockId = blockSwitcher.dataset.activeBlockId || "";
     const activeChanged = previousActiveBlockId !== String(activeBlockId);
@@ -3231,7 +3378,11 @@ if (previewRoot && previewDataNode) {
         const emptyState = document.createElement("div");
         emptyState.className = "preview-messenger-empty-state";
         emptyState.dataset.previewConversationEmpty = "true";
-        emptyState.textContent = "No blocks match that search yet.";
+        emptyState.textContent = ({
+          all: "No blocks or collections match that search yet.",
+          collections: "No collections match that search yet.",
+          blocks: "No blocks match that search yet.",
+        })[currentConversationListMode()] || "No conversations match that search yet.";
         blockSwitcher.appendChild(emptyState);
       } else {
         blocks.forEach((entry) => {
@@ -3265,6 +3416,11 @@ if (previewRoot && previewDataNode) {
           row.querySelector(".preview-conversation-preview").textContent = previewText;
           row.addEventListener("click", () => {
             activeBlockId = rowId;
+            if (entry.threadKind === "collection") {
+              conversationListMode = "collections";
+            } else if (entry.threadKind === "block") {
+              conversationListMode = "blocks";
+            }
             if (messengerMobileMedia.matches) {
               setMessengerMobileChatOpen(true);
             }
@@ -3621,7 +3777,7 @@ if (previewRoot && previewDataNode) {
 
             const code = document.createElement("span");
             code.className = "preview-objective-code";
-            code.textContent = objective.code;
+            code.textContent = displayObjectiveCode(objective.code);
 
             const text = document.createElement("span");
             text.className = "preview-objective-text";
@@ -3638,7 +3794,7 @@ if (previewRoot && previewDataNode) {
               const trigger = document.createElement("button");
               trigger.type = "button";
               trigger.className = "preview-objective-menu-trigger";
-              trigger.setAttribute("aria-label", `Actions for ${objective.code}`);
+              trigger.setAttribute("aria-label", `Actions for ${displayObjectiveCode(objective.code)}`);
               trigger.setAttribute("aria-haspopup", "menu");
               trigger.setAttribute("aria-expanded", "false");
               trigger.dataset.previewObjectiveMenuTrigger = "true";
@@ -3684,6 +3840,61 @@ if (previewRoot && previewDataNode) {
         article.appendChild(list);
         return article;
       }
+      if (message.resource_key === "collection_objectives") {
+        const groups = Array.isArray(message.objective_groups) ? message.objective_groups : [];
+        if (!groups.length) {
+          const empty = document.createElement("p");
+          empty.textContent = "No learning objectives yet.";
+          article.appendChild(empty);
+          return article;
+        }
+
+        groups.forEach((group) => {
+          const section = document.createElement("section");
+          section.className = "preview-objective-group";
+
+          const heading = document.createElement("h3");
+          heading.className = "preview-objective-group-title";
+          heading.textContent = String(group.block_label || "Block");
+          section.appendChild(heading);
+
+          const list = document.createElement("ul");
+          list.className = "preview-objective-list";
+          const objectives = Array.isArray(group.objectives) ? group.objectives : [];
+
+          if (!objectives.length) {
+            const emptyItem = document.createElement("li");
+            emptyItem.className = "preview-objective-item";
+            emptyItem.textContent = "No learning objectives yet.";
+            list.appendChild(emptyItem);
+          } else {
+            objectives.forEach((objective) => {
+              const item = document.createElement("li");
+              item.className = `preview-objective-item${objective.covered ? " is-covered" : ""}`;
+
+              const tick = document.createElement("span");
+              tick.className = "preview-objective-status";
+              tick.setAttribute("aria-hidden", "true");
+              tick.textContent = objective.covered ? "✓" : "";
+
+              const code = document.createElement("span");
+              code.className = "preview-objective-code";
+              code.textContent = displayObjectiveCode(objective.code);
+
+              const text = document.createElement("span");
+              text.className = "preview-objective-text";
+              text.textContent = objective.text;
+
+              item.append(tick, code, text);
+              list.appendChild(item);
+            });
+          }
+
+          section.appendChild(list);
+          article.appendChild(section);
+        });
+        return article;
+      }
     }
 
     if (message.role === "assistant" && message.kind === "text" && message.inline_cta_label) {
@@ -3705,6 +3916,7 @@ if (previewRoot && previewDataNode) {
       }
     }
 
+    richText.renderMath(article);
     return article;
   }
 
@@ -4158,6 +4370,25 @@ if (previewRoot && previewDataNode) {
     };
   }
 
+  function collectionObjectivesMessagePayload(collection = currentCollection()) {
+    if (!collection) {
+      return null;
+    }
+    return {
+      block_label: collection.title,
+      kind: "resource",
+      resource_key: "collection_objectives",
+      resource_label: "All learning objectives",
+      role: "assistant",
+      text: "",
+      objective_groups: collectionBlocks(collection).map((block) => ({
+        block_id: block.id,
+        block_label: block.title,
+        objectives: Array.isArray(block.learning_objectives) ? block.learning_objectives : [],
+      })),
+    };
+  }
+
   function furtherStudyMessagePayload(conversation, sourceMessage) {
     const questions = Array.isArray(sourceMessage?.further_study_questions)
       ? sourceMessage.further_study_questions.filter(Boolean)
@@ -4300,6 +4531,18 @@ if (previewRoot && previewDataNode) {
   }
 
   function appendResourceMessage(resource) {
+    if (resource === "collection_objectives") {
+      const collection = currentCollection();
+      const payload = collectionObjectivesMessagePayload(collection);
+      if (!collection || !payload) {
+        return;
+      }
+      appendInlineMessage(payload, {
+        threadId: currentConversationKey(),
+        dedupeKey: `resource:collection:${collection.id}:objectives`,
+      });
+      return;
+    }
     const block = currentBlock();
     if (!block || !resource) {
       return;
@@ -4558,6 +4801,7 @@ if (previewRoot && previewDataNode) {
       if (headerMenu) {
         headerMenu.hidden = true;
       }
+      syncHeaderMenuResourceVisibility("none");
       if (headerCoverage && headerCoverageFill) {
         headerCoverage.hidden = true;
         headerCoverageFill.style.width = "0%";
@@ -4581,7 +4825,6 @@ if (previewRoot && previewDataNode) {
     }
 
     if (collection) {
-      closeHeaderMenu();
       closeFlagSheet();
       closeGuardrailSheet();
       const conversation = collectionConversationRowData(collection);
@@ -4601,8 +4844,9 @@ if (previewRoot && previewDataNode) {
           : "Tap Quiz to start this conversation.";
       }
       if (headerMenu) {
-        headerMenu.hidden = true;
+        headerMenu.hidden = false;
       }
+      syncHeaderMenuResourceVisibility("collection");
       if (headerCoverage && headerCoverageFill) {
         const rawCoverage = Number(collection?.metrics?.coverage);
         const hasCoverage = Number.isFinite(rawCoverage);
@@ -4656,6 +4900,7 @@ if (previewRoot && previewDataNode) {
     if (headerMenu) {
       headerMenu.hidden = false;
     }
+    syncHeaderMenuResourceVisibility("block");
     if (headerCoverage && headerCoverageFill) {
       const rawCoverage = Number(block?.metrics?.coverage);
       const hasCoverage = Number.isFinite(rawCoverage);
@@ -4702,7 +4947,7 @@ if (previewRoot && previewDataNode) {
         closeGuardrailSheet();
       } else {
         if (objectiveSheetObjective) {
-          objectiveSheetObjective.textContent = `${objective.code} ${objective.text}`;
+          objectiveSheetObjective.textContent = `${displayObjectiveCode(objective.code)} ${objective.text}`;
         }
         const currentGuidance = String(objective.assistant_guidance || "").trim();
         if (objectiveSheetExistingWrap) {
@@ -5051,6 +5296,39 @@ if (previewRoot && previewDataNode) {
     });
   });
 
+  conversationSwitcherButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextMode = normalizeConversationListMode(button.dataset.previewConversationMode || "blocks");
+      if (nextMode === currentConversationListMode()) {
+        return;
+      }
+      conversationListMode = nextMode;
+      renderBlockSwitcher();
+    });
+  });
+
+  resetDemoButton?.addEventListener("click", async () => {
+    closeHeaderMenu();
+    closeSidebarMenu();
+    if (!isDemoMode || requestInFlight) {
+      return;
+    }
+    const confirmed = window.confirm("Reset this demo for everyone using this demo link?");
+    if (!confirmed) {
+      return;
+    }
+    persistActiveBlockId("");
+    try {
+      const visitorStorageKey = demoValidationVisitorStorageKey();
+      if (visitorStorageKey) {
+        window.localStorage.removeItem(visitorStorageKey);
+      }
+    } catch (_error) {
+      // Ignore storage failures and continue with the shared reset.
+    }
+    await postPreviewAction("reset", {}, { focusComposer: true, scrollMode: "preserve" });
+  });
+
   calculatorTrigger?.addEventListener("click", () => {
     openCalculatorMessage();
   });
@@ -5066,8 +5344,20 @@ if (previewRoot && previewDataNode) {
       return;
     }
     closeQuizMenu();
+    closeSidebarMenu();
     closeObjectiveMenus();
     openHeaderMenu();
+  });
+
+  sidebarMenuTrigger?.addEventListener("click", () => {
+    if (isSidebarMenuOpen()) {
+      closeSidebarMenu();
+      return;
+    }
+    closeQuizMenu();
+    closeHeaderMenu();
+    closeObjectiveMenus();
+    openSidebarMenu();
   });
 
   chatBackButton?.addEventListener("click", () => {
@@ -5209,6 +5499,7 @@ if (previewRoot && previewDataNode) {
     if (event.key === "Escape") {
       closeObjectiveMenus();
       closeHeaderMenu();
+      closeSidebarMenu();
     }
   });
 
@@ -5230,6 +5521,9 @@ if (previewRoot && previewDataNode) {
     if (headerMenu && isHeaderMenuOpen() && !headerMenu.contains(event.target)) {
       closeHeaderMenu();
     }
+    if (sidebarMenu && isSidebarMenuOpen() && !sidebarMenu.contains(event.target)) {
+      closeSidebarMenu();
+    }
     if (!quizMenu || !isQuizMenuOpen()) {
       return;
     }
@@ -5242,6 +5536,7 @@ if (previewRoot && previewDataNode) {
     if (event.key === "Escape") {
       closeQuizMenu();
       closeHeaderMenu();
+      closeSidebarMenu();
       if (!isMessengerPreview && sidebarOpen) {
         setSidebarOpen(false);
       }
@@ -5262,6 +5557,11 @@ if (previewRoot && previewDataNode) {
     requestTranscriptScrollButtonSync();
   });
   restoreActiveBlockId();
+  if (isCollectionView() && collectionCount()) {
+    conversationListMode = "collections";
+  } else if (!isCollectionView()) {
+    conversationListMode = "all";
+  }
   if (isMessengerPreview) {
     setMessengerMobileChatOpen(!messengerMobileMedia.matches);
   }

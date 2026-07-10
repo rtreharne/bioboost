@@ -1978,6 +1978,7 @@ if (validationRoot && validationDataNode) {
     }
 
     appendFormattedMessageContent(article, message.text || "");
+    richText.renderMath(article);
     return article;
   }
 

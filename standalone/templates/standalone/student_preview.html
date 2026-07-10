@@ -62,14 +62,34 @@
           >
             <span class="preview-messenger-brand-wordmark">ForeverPhysics</span>
           </a>
-          <button
-            class="preview-messenger-menu-trigger"
-            type="button"
-            aria-label="Sidebar menu"
-            hidden
-          >
-            <span aria-hidden="true">&#8942;</span>
-          </button>
+          {% if is_demo_mode %}
+            <div class="preview-chat-header-menu" data-preview-sidebar-menu>
+              <button
+                class="preview-messenger-menu-trigger"
+                type="button"
+                aria-label="Sidebar menu"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                data-preview-sidebar-menu-trigger
+              >
+                <span aria-hidden="true">&#8942;</span>
+              </button>
+              <div class="preview-chat-header-menu-panel" role="menu" hidden data-preview-sidebar-menu-panel>
+                <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-reset-demo="true">
+                  Reset demo
+                </button>
+              </div>
+            </div>
+          {% else %}
+            <button
+              class="preview-messenger-menu-trigger"
+              type="button"
+              aria-label="Sidebar menu"
+              hidden
+            >
+              <span aria-hidden="true">&#8942;</span>
+            </button>
+          {% endif %}
         </div>
       {% else %}
         <div class="preview-sidebar-title-row">
@@ -98,6 +118,34 @@
         <section class="preview-course-metrics-panel" data-preview-course-metrics></section>
       {% endif %}
     </div>
+    {% if is_demo_mode or not is_student_practice %}
+      <div class="preview-conversation-switcher" hidden data-preview-conversation-switcher>
+        <button
+          type="button"
+          class="preview-conversation-switcher-button"
+          data-preview-conversation-mode="all"
+          aria-pressed="true"
+        >
+          All
+        </button>
+        <button
+          type="button"
+          class="preview-conversation-switcher-button"
+          data-preview-conversation-mode="blocks"
+          aria-pressed="false"
+        >
+          Blocks
+        </button>
+        <button
+          type="button"
+          class="preview-conversation-switcher-button"
+          data-preview-conversation-mode="collections"
+          aria-pressed="false"
+        >
+          Collections
+        </button>
+      </div>
+    {% endif %}
     <div class="preview-block-switcher" aria-label="Course blocks" data-preview-conversation-list></div>
   </aside>
   {% if not is_demo_mode and is_student_practice %}
@@ -163,6 +211,9 @@
           </button>
           <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="objectives">
             Learning objectives
+          </button>
+          <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="collection_objectives" hidden>
+            All Learning Objectives
           </button>
         </div>
       </div>

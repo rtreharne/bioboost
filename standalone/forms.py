@@ -54,6 +54,13 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
         if block_level
         else "Target percentage of newly generated questions that should be numeric single-answer items with locally validated calculations."
     )
+    fields["math_symbolic_ratio_percent"].label = "Maths symbolic MCQ ratio (%)"
+    fields["math_symbolic_ratio_percent"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Target percentage of newly generated maths questions that should use symbolic or algebraic single-answer MCQs. "
+        "Applies only to maths-targeted blocks and still stores questions as ordinary MCQs."
+    )
     fields["maq_ratio_percent"].label = "Multiple-answer question ratio (%)"
     fields["maq_ratio_percent"].help_text = (
         "Leave blank to inherit the course default."
@@ -88,6 +95,7 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
         "assistant_guidance",
         "distractor_count",
         "numeric_ratio_percent",
+        "math_symbolic_ratio_percent",
         "maq_ratio_percent",
         "waq_ratio_percent",
         "coding_question_ratio_percent",
@@ -549,6 +557,7 @@ class BlockConfigForm(forms.ModelForm):
             "assistant_guidance",
             "distractor_count",
             "numeric_ratio_percent",
+            "math_symbolic_ratio_percent",
             "maq_ratio_percent",
             "waq_ratio_percent",
             "coding_question_ratio_percent",

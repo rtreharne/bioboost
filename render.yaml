@@ -58,8 +58,12 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
-        value: gpt-4.1-mini
+        value: gpt-4.1
+      - key: OPENAI_QUESTION_MODEL
+        value: gpt-4.1
       - key: OPENAI_NUMERIC_MODEL
+        value: gpt-4.1
+      - key: OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL
         value: gpt-4.1
       - key: OPENAI_EMBEDDING_MODEL
         value: text-embedding-3-small

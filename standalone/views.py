@@ -116,6 +116,7 @@ from standalone.services.demo_mode import (
     get_or_create_demo_validation_session,
     new_demo_visitor_key,
     record_demo_access_hit,
+    reset_demo_preview_state,
     request_demo_preview_quiz,
     reveal_demo_validation_practice_next,
     rotate_demo_access_token,
@@ -134,6 +135,7 @@ from standalone.services.background_dispatch import (
 from standalone.services.block_avatars import queue_block_avatar_generation
 from standalone.services.metrics import enrollment_practice_metrics_snapshot, refresh_enrollment_metrics
 from standalone.services.local_jobs import enqueue_local_job, local_job_status
+from standalone.services.math_questions import math_options_equivalent
 from standalone.services.practice_scoring import weighted_practice_score
 from standalone.services.practice_validation import released_validation_pool_count
 from standalone.services.notifications import send_logged_email
@@ -2442,6 +2444,9 @@ def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: 
             return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
         payload = send_demo_preview_chat_message(access, block, question, collection=collection)
         return JsonResponse({"ok": True, "preview": payload})
+    if action == "reset":
+        payload = reset_demo_preview_state(access)
+        return JsonResponse({"ok": True, "preview": payload})
     raise Http404
 
 
@@ -4198,7 +4203,12 @@ def _legacy_practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
         )
         selected = request.POST.get("answer", "")
         options = [question.correct_answer, *question.distractors]
-        is_correct = selected == question.correct_answer
+        metadata = question.math_metadata if isinstance(getattr(question, "math_metadata", None), dict) else {}
+        is_correct = (
+            math_options_equivalent(selected, question.correct_answer, metadata)
+            if metadata
+            else selected == question.correct_answer
+        )
         PracticeAttemptQuestion.objects.get_or_create(
             attempt=attempt,
             question=question,

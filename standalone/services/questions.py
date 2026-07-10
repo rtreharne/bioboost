@@ -11,6 +11,16 @@ from openai import OpenAI, OpenAIError
 
 from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, QuestionBankItem
 from standalone.services.guidance import build_generation_guidance_prompt
+from standalone.services.math_questions import (
+    MATH_GENERATION_MODE_SYMBOLIC,
+    build_math_mcq_payload,
+    classify_math_objective,
+    curve_intersection_question_integrity_error,
+    is_math_generation_target,
+    math_question_quality_issue,
+    normalize_math_explanation_text,
+    validate_math_mcq_payload,
+)
 from standalone.services.numeric_questions import (
     NumericQuestionRequestError,
     NumericQuestionValidationError,
@@ -212,6 +222,13 @@ CODING_TRIVIAL_STEM_PATTERNS = (
     r"\bafter (?:the )?code (?:runs|executes), what is\b",
     r"\bafter running (?:the )?code, what is\b",
     r"\bmanually calculate\b",
+)
+
+BROKEN_OPTION_SET_EXPLANATION_RE = re.compile(
+    r"\b(?:none of the (?:options|answer choices)\s+(?:is|are)\s+correct|"
+    r"no (?:listed )?option\s+(?:is|appears|seems)\s+correct|"
+    r"none of the above)\b",
+    re.IGNORECASE,
 )
 
 CODING_INTERPRETIVE_TERMS = (
@@ -595,7 +612,7 @@ def _coding_signal_for_chunk(chunk: ContentChunk) -> dict[str, str]:
     )
 
 
-def normalize_explanation_text(text: str) -> str:
+def _normalize_plain_explanation_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", _decode_literal_unicode_escapes(text).strip())
     if not cleaned:
         return ""
@@ -625,6 +642,12 @@ def normalize_explanation_text(text: str) -> str:
     if cleaned:
         cleaned = cleaned[0].upper() + cleaned[1:]
     return cleaned
+
+
+def normalize_explanation_text(text: str, *, math_metadata: dict | None = None) -> str:
+    if isinstance(math_metadata, dict) and math_metadata:
+        return normalize_math_explanation_text(_normalize_plain_explanation_text(text))
+    return _normalize_plain_explanation_text(text)
 
 
 def _replace_numeric_formula_clause(match: re.Match[str]) -> str:
@@ -663,7 +686,7 @@ def _normalize_numeric_explanation_prose(text: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
-    return normalize_explanation_text(cleaned)
+    return _normalize_plain_explanation_text(cleaned)
 
 
 def normalize_numeric_explanation_text(text: str) -> str:
@@ -920,6 +943,22 @@ def single_answer_question_balance_error(question: QuestionBankItem) -> str:
 def question_quality_issue(question: QuestionBankItem) -> str:
     if getattr(question, "is_coding_question", False):
         return ""
+    math_issue = math_question_quality_issue(question)
+    if math_issue:
+        return math_issue
+    if getattr(question, "math_metadata", None):
+        return _objective_alignment_error(
+            stem=str(getattr(question, "stem", "") or ""),
+            correct_answers=[
+                answer
+                for answer in [
+                    str(getattr(question, "correct_answer", "") or ""),
+                    *[str(answer or "") for answer in getattr(question, "additional_correct_answers", []) or []],
+                ]
+                if answer.strip()
+            ],
+            objective=getattr(question, "learning_objective", None),
+        )
     return (
         single_answer_question_balance_error(question)
         or _objective_alignment_error(
@@ -971,16 +1010,21 @@ def _objective_alignment_error(
     stem: str,
     correct_answers: list[str],
     objective: LearningObjective | None,
+    explanation: str = "",
+    chunk_text: str = "",
 ) -> str:
     if objective is None:
         return ""
     objective_tokens = _keyword_set(objective.text)
     if not objective_tokens:
         return ""
-    question_tokens = _keyword_set(" ".join([stem, *correct_answers]))
+    question_tokens = _keyword_set(" ".join([stem, explanation, *correct_answers]))
     overlap = _keywords_overlap_count(objective_tokens, question_tokens)
     required_overlap = 2 if len(objective_tokens) >= 8 else 1
     if overlap < required_overlap:
+        chunk_overlap = _keywords_overlap_count(_keyword_set(chunk_text), question_tokens)
+        if chunk_overlap >= required_overlap:
+            return ""
         return "Generated question does not stay aligned with the target learning objective."
     return ""
 
@@ -1803,6 +1847,23 @@ def _generate_question_pair_for_question_type(
     coding_generation_due = (force_coding or _coding_question_generation_due(block)) and bool(coding_signals)
 
     for objective in ordered_objectives:
+        objective_math_mode = _objective_math_generation_mode(objective)
+        if question_type == QuestionBankItem.QuestionType.NUM and objective_math_mode == MATH_GENERATION_MODE_SYMBOLIC:
+            last_generation_error = "objective not numeric-eligible"
+            _trace_generation(
+                "math_objective_classified",
+                block=block.title,
+                block_id=block.pk,
+                objective=objective.text,
+                mode=objective_math_mode,
+            )
+            _trace_generation(
+                "math_numeric_short_circuit",
+                block=block.title,
+                block_id=block.pk,
+                objective=objective.text,
+            )
+            continue
         avoid_question_angles = (
             []
             if relax_similarity_checks
@@ -1984,6 +2045,34 @@ def _payload_for_generation_attempt(
         )
         return payload, QuestionBankItem.QuestionType.NUM, ""
 
+    if (
+        question_type == QuestionBankItem.QuestionType.MCQ
+        and is_math_generation_target(
+            objective_text=(objective.text if objective else ""),
+            chunk_text=chunk.text,
+            block_title=chunk.block.title if chunk.block_id and chunk.block else "",
+            source_filename=getattr(getattr(chunk, "asset", None), "original_filename", ""),
+        )
+    ):
+        payload = build_math_mcq_payload(
+            chunk,
+            objective,
+            distractor_count,
+            teacher_guidance=build_generation_guidance_prompt(chunk.course, block=chunk.block, objective=objective),
+            avoid_question_angles=avoid_question_angles,
+            question_variant_index=question_variant_index,
+        )
+        validate_math_mcq_payload(
+            payload,
+            distractor_count=distractor_count,
+            objective_text=(objective.text if objective else ""),
+            chunk_text=chunk.text,
+        )
+        if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
+            raise ValueError("Question stem depends on source/meta phrasing.")
+        _normalize_generated_payload(payload, question_type, distractor_count)
+        return payload, question_type, ""
+
     if coding_signal:
         payload = _fallback_coding_question_payload(
             chunk,
@@ -2090,6 +2179,80 @@ def _normalize_question_stem(stem: str) -> str:
     return cleaned.rstrip("?.") + "?"
 
 
+def _question_candidate_schema(question_type: str, distractor_count: int) -> dict:
+    is_maq = question_type == QuestionBankItem.QuestionType.MAQ
+    is_waq = question_type == QuestionBankItem.QuestionType.WAQ
+    properties = {
+        "question_type": {"type": "string", "enum": [question_type]},
+        "stem": {"type": "string", "minLength": 1},
+        "correct_answers": {
+            "type": "array",
+            "minItems": 1 if not is_maq else 2,
+            "maxItems": 1 if not is_maq else 6,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "further_study_questions": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "explanation": {"type": "string", "minLength": 1},
+        "difficulty": {"type": "string", "minLength": 1},
+    }
+    required = [
+        "question_type",
+        "stem",
+        "correct_answers",
+        "further_study_questions",
+        "explanation",
+        "difficulty",
+    ]
+    if is_waq:
+        properties["written_answer_keywords"] = {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 6,
+            "items": {"type": "string", "minLength": 1},
+        }
+        required.append("written_answer_keywords")
+    else:
+        properties["distractors"] = {
+            "type": "array",
+            "minItems": distractor_count,
+            "maxItems": distractor_count,
+            "items": {"type": "string", "minLength": 1},
+        }
+        required.append("distractors")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _coding_question_candidate_schema(question_type: str, distractor_count: int, language: str) -> dict:
+    schema = _question_candidate_schema(question_type, distractor_count)
+    schema["properties"].update(
+        {
+            "is_coding_question": {"type": "boolean", "enum": [True]},
+            "coding_language": {"type": "string", "enum": [language]},
+            "coding_question_kind": {"type": "string", "enum": ["comprehension", "debug"]},
+            "code_snippet": {"type": "string", "minLength": 1},
+        }
+    )
+    schema["required"].extend(
+        [
+            "is_coding_question",
+            "coding_language",
+            "coding_question_kind",
+            "code_snippet",
+        ]
+    )
+    return schema
+
+
 def _openai_question_payload(
     chunk: ContentChunk,
     objective: LearningObjective | None,
@@ -2147,11 +2310,19 @@ Source text:
 {teacher_guidance}
 """.strip()
     response = client.responses.create(
-        model=settings.OPENAI_MODEL,
+        model=settings.OPENAI_QUESTION_MODEL,
         input=[
             {"role": "system", "content": [{"type": "input_text", "text": "Return only valid JSON."}]},
             {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "question_candidate",
+                "strict": True,
+                "schema": _question_candidate_schema(question_type, distractor_count),
+            }
+        },
     )
     raw_output = (getattr(response, "output_text", "") or "").strip()
     return _parse_question_payload(raw_output)
@@ -2225,11 +2396,19 @@ Source text:
 {teacher_guidance}
 """.strip()
     response = client.responses.create(
-        model=settings.OPENAI_MODEL,
+        model=settings.OPENAI_QUESTION_MODEL,
         input=[
             {"role": "system", "content": [{"type": "input_text", "text": "Return only valid JSON."}]},
             {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "coding_question_candidate",
+                "strict": True,
+                "schema": _coding_question_candidate_schema(question_type, distractor_count, language),
+            }
+        },
     )
     raw_output = (getattr(response, "output_text", "") or "").strip()
     return _parse_question_payload(raw_output)
@@ -2416,14 +2595,16 @@ def _numeric_question_repeats_recent_angle(
 
     for question in recent_questions:
         existing_formula = _numeric_formula_focus_from_metadata(question.numeric_metadata)
-        if new_formula and existing_formula and new_formula == existing_formula:
-            return True
+        existing_unit = question.correct_answer.split()[-1].lower() if question.correct_answer.strip() else ""
         existing_tokens = _keyword_set(question.stem)
         union_size = len(new_tokens | existing_tokens)
         if union_size == 0:
             continue
         token_similarity = len(new_tokens & existing_tokens) / union_size
-        existing_unit = question.correct_answer.split()[-1].lower() if question.correct_answer.strip() else ""
+        if new_formula and existing_formula and new_formula == existing_formula:
+            if new_unit and new_unit == existing_unit and token_similarity >= 0.45:
+                return True
+            continue
         if token_similarity >= 0.5 and new_unit and new_unit == existing_unit:
             return True
     return False
@@ -2484,10 +2665,87 @@ def _objective_supports_local_numeric_mcq(objective: LearningObjective | None, c
     return supports_local_numeric_mcq(objective.text, chunk_text)
 
 
+def _objective_math_generation_mode(objective: LearningObjective | None, chunk_text: str = "") -> str:
+    if objective is None:
+        return classify_math_objective("", chunk_text)
+    return classify_math_objective(objective.text, chunk_text)
+
+
+def _context_prefers_math_symbolic_mcq(
+    block: CourseBlock,
+    objective: LearningObjective | None = None,
+    chunk: ContentChunk | None = None,
+) -> bool:
+    objective_text = objective.text if objective is not None else ""
+    chunk_text = chunk.text if chunk is not None else ""
+    source_filename = getattr(getattr(chunk, "asset", None), "original_filename", "") if chunk is not None else ""
+    if not is_math_generation_target(
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        block_title=block.title,
+        source_filename=source_filename,
+    ):
+        return False
+    if _objective_math_generation_mode(objective, chunk_text) != MATH_GENERATION_MODE_SYMBOLIC:
+        return False
+    return int(block.question_math_symbolic_ratio_percent or 0) > 0
+
+
+def _context_is_symbolic_math(
+    block: CourseBlock,
+    objective: LearningObjective | None = None,
+    chunk: ContentChunk | None = None,
+) -> bool:
+    objective_text = objective.text if objective is not None else ""
+    chunk_text = chunk.text if chunk is not None else ""
+    source_filename = getattr(getattr(chunk, "asset", None), "original_filename", "") if chunk is not None else ""
+    if not is_math_generation_target(
+        objective_text=objective_text,
+        chunk_text=chunk_text,
+        block_title=block.title,
+        source_filename=source_filename,
+    ):
+        return False
+    return _objective_math_generation_mode(objective, chunk_text) == MATH_GENERATION_MODE_SYMBOLIC
+
+
+def _block_has_math_symbolic_generation_path(
+    block: CourseBlock,
+    candidate_chunks: list[ContentChunk],
+    objectives_by_block: dict[int, list[LearningObjective]],
+) -> bool:
+    if int(block.question_math_symbolic_ratio_percent or 0) <= 0:
+        return False
+    objectives = list(objectives_by_block.get(block.pk, []))
+    for objective in objectives:
+        for chunk in candidate_chunks:
+            if chunk.block_id != block.pk:
+                continue
+            if _context_prefers_math_symbolic_mcq(block, objective, chunk):
+                return True
+    return False
+
+
+def _block_has_symbolic_math_generation_path(
+    block: CourseBlock,
+    candidate_chunks: list[ContentChunk],
+    objectives_by_block: dict[int, list[LearningObjective]],
+) -> bool:
+    objectives = list(objectives_by_block.get(block.pk, []))
+    for objective in objectives:
+        for chunk in candidate_chunks:
+            if chunk.block_id != block.pk:
+                continue
+            if _context_is_symbolic_math(block, objective, chunk):
+                return True
+    return False
+
+
 def _ratio_gap_ranked_question_types(
     block: CourseBlock,
     *,
     include_numeric: bool = True,
+    include_math_symbolic: bool = False,
 ) -> list[str]:
     practice_questions = block.question_bank_items.filter(
         bank_type=QuestionBankItem.BankType.PRACTICE,
@@ -2496,6 +2754,13 @@ def _ratio_gap_ranked_question_types(
     practice_total = practice_questions.count()
     candidates = []
     candidate_types = []
+    if include_math_symbolic and int(block.question_math_symbolic_ratio_percent or 0) > 0:
+        current_total = sum(1 for question in practice_questions.only("math_metadata") if getattr(question, "math_metadata", {}))
+        current_ratio = (current_total * 100 / practice_total) if practice_total else 0.0
+        target_ratio = float(block.question_math_symbolic_ratio_percent or 0)
+        gap = target_ratio - current_ratio
+        if gap > 0:
+            candidates.append((gap, target_ratio, -1, QuestionBankItem.QuestionType.MCQ))
     if include_numeric:
         candidate_types.append((QuestionBankItem.QuestionType.NUM, block.question_numeric_ratio_percent))
     candidate_types.extend(
@@ -2513,7 +2778,11 @@ def _ratio_gap_ranked_question_types(
         if gap > 0:
             candidates.append((gap, target_ratio, QUESTION_TYPE_GENERATION_PRIORITY[candidate_type], candidate_type))
     candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    return [item[3] for item in candidates]
+    ordered: list[str] = []
+    for _gap, _target, _priority, candidate_type in candidates:
+        if candidate_type not in ordered:
+            ordered.append(candidate_type)
+    return ordered
 
 
 def _ordered_generation_question_types(
@@ -2521,17 +2790,18 @@ def _ordered_generation_question_types(
     *,
     explicit_question_type: str | None = None,
     allow_type_fallback: bool = False,
+    include_math_symbolic: bool = False,
 ) -> list[str]:
     if explicit_question_type and not allow_type_fallback:
         return [explicit_question_type]
     if explicit_question_type is None and not allow_type_fallback:
-        ranked = _ratio_gap_ranked_question_types(block)
+        ranked = _ratio_gap_ranked_question_types(block, include_math_symbolic=include_math_symbolic)
         return [ranked[0] if ranked else QuestionBankItem.QuestionType.MCQ]
 
     ordered: list[str] = []
     if explicit_question_type:
         ordered.append(explicit_question_type)
-    for question_type in _ratio_gap_ranked_question_types(block):
+    for question_type in _ratio_gap_ranked_question_types(block, include_math_symbolic=include_math_symbolic):
         if question_type not in ordered:
             ordered.append(question_type)
     if QuestionBankItem.QuestionType.MCQ not in ordered:
@@ -2539,8 +2809,8 @@ def _ordered_generation_question_types(
     return ordered
 
 
-def _preferred_generated_question_type(block: CourseBlock) -> str:
-    return _ordered_generation_question_types(block)[0]
+def _preferred_generated_question_type(block: CourseBlock, *, include_math_symbolic: bool = False) -> str:
+    return _ordered_generation_question_types(block, include_math_symbolic=include_math_symbolic)[0]
 
 
 def _preferred_standard_generated_question_type(block: CourseBlock) -> str:
@@ -2647,6 +2917,7 @@ def _normalize_generated_payload(
     explanation = _decode_literal_unicode_escapes(str(payload.get("explanation", "")).strip())
     difficulty = _decode_literal_unicode_escapes(str(payload.get("difficulty", "core")).strip()) or "core"
     numeric_metadata = payload.get("numeric_metadata") if isinstance(payload.get("numeric_metadata"), dict) else {}
+    math_metadata = payload.get("math_metadata") if isinstance(payload.get("math_metadata"), dict) else {}
     is_coding_question = bool(payload.get("is_coding_question"))
     coding_language = _normalize_coding_language(str(payload.get("coding_language", "")))
     coding_question_kind = str(payload.get("coding_question_kind", "")).strip().lower()
@@ -2670,8 +2941,43 @@ def _normalize_generated_payload(
         if len(distractors) != distractor_count:
             raise ValueError("NUM payload must contain the configured number of distractors.")
         is_coding_question = False
+        math_metadata = {}
     else:
         numeric_metadata = {}
+
+    if normalized_type in {
+        QuestionBankItem.QuestionType.MCQ,
+        QuestionBankItem.QuestionType.MAQ,
+        QuestionBankItem.QuestionType.NUM,
+    } and BROKEN_OPTION_SET_EXPLANATION_RE.search(explanation):
+        raise ValueError("Question explanation says the answer options are broken.")
+
+    if normalized_type == QuestionBankItem.QuestionType.MCQ and math_metadata:
+        normalized_math = validate_math_mcq_payload(
+            {
+                "stem": stem,
+                "correct_answers": correct_answers,
+                "distractors": distractors,
+                "math_metadata": math_metadata,
+            },
+            distractor_count=distractor_count,
+            explanation_text=explanation,
+        )
+        stem = normalized_math["stem"]
+        correct_answers = [normalized_math["correct_answer"]]
+        distractors = normalized_math["distractors"]
+        math_metadata = normalized_math["math_metadata"]
+        is_coding_question = False
+    else:
+        math_metadata = {}
+        if normalized_type == QuestionBankItem.QuestionType.MCQ:
+            curve_intersection_error = curve_intersection_question_integrity_error(
+                stem=stem,
+                correct_answer=correct_answers[0] if correct_answers else "",
+                distractors=distractors,
+            )
+            if curve_intersection_error:
+                raise ValueError(curve_intersection_error)
 
     further_study_questions = further_study_questions or fallback_further_study_questions(
         stem=stem,
@@ -2712,7 +3018,7 @@ def _normalize_generated_payload(
         coding_question_kind = ""
         code_snippet = ""
 
-    if normalized_type == QuestionBankItem.QuestionType.MCQ:
+    if normalized_type == QuestionBankItem.QuestionType.MCQ and not math_metadata:
         option_balance_error = (
             _single_answer_option_balance_error(
                 correct_answers[0] if correct_answers else "",
@@ -2736,6 +3042,7 @@ def _normalize_generated_payload(
         "explanation": explanation,
         "difficulty": difficulty,
         "numeric_metadata": numeric_metadata,
+        "math_metadata": math_metadata,
         "is_coding_question": is_coding_question,
         "coding_language": coding_language,
         "coding_question_kind": coding_question_kind,
@@ -2776,6 +3083,8 @@ def _create_question_pair(
             stem=normalized_payload["stem"],
             correct_answers=normalized_payload["correct_answers"],
             objective=objective,
+            explanation=normalized_payload["explanation"],
+            chunk_text=chunk.text,
         )
     if objective_alignment_error:
         raise ValueError(objective_alignment_error)
@@ -2841,12 +3150,16 @@ def _create_question_pair(
             explanation=(
                 normalized_payload["explanation"]
                 if normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM
-                else normalize_explanation_text(normalized_payload["explanation"])
+                else normalize_explanation_text(
+                    normalized_payload["explanation"],
+                    math_metadata=normalized_payload["math_metadata"],
+                )
             ),
             difficulty=normalized_payload["difficulty"],
             question_hash=item_hash,
             is_numerical=normalized_payload["question_type"] == QuestionBankItem.QuestionType.NUM,
             numeric_metadata=normalized_payload["numeric_metadata"],
+            math_metadata=normalized_payload["math_metadata"],
             is_coding_question=normalized_payload["is_coding_question"],
             coding_language=normalized_payload["coding_language"],
             coding_question_kind=normalized_payload["coding_question_kind"],
@@ -2871,6 +3184,7 @@ def _create_question_pair(
             question_hash=hashlib.sha256(f"{item_hash}:validation".encode("utf-8")).hexdigest(),
             is_numerical=practice.is_numerical,
             numeric_metadata=practice.numeric_metadata,
+            math_metadata=practice.math_metadata,
             is_coding_question=practice.is_coding_question,
             coding_language=practice.coding_language,
             coding_question_kind=practice.coding_question_kind,
@@ -2949,11 +3263,18 @@ def generate_question_pair_for_block(
         QuestionBankItem.QuestionType.WAQ,
     } else None
     should_allow_type_fallback = allow_type_fallback and explicit_question_type is None
+    include_math_symbolic = _block_has_math_symbolic_generation_path(block, candidate_chunks, objectives_by_block)
+    has_symbolic_math_path = _block_has_symbolic_math_generation_path(block, candidate_chunks, objectives_by_block)
     ordered_question_types = _ordered_generation_question_types(
         block,
         explicit_question_type=explicit_question_type,
         allow_type_fallback=should_allow_type_fallback,
+        include_math_symbolic=include_math_symbolic,
     )
+    if QuestionBankItem.QuestionType.NUM in ordered_question_types and has_symbolic_math_path and QuestionBankItem.QuestionType.MCQ not in ordered_question_types:
+        ordered_question_types.append(QuestionBankItem.QuestionType.MCQ)
+    if explicit_question_type == QuestionBankItem.QuestionType.NUM and has_symbolic_math_path:
+        ordered_question_types = [QuestionBankItem.QuestionType.NUM, QuestionBankItem.QuestionType.MCQ]
     if explicit_question_type is None and coding_signals and (force_coding or _coding_question_generation_due(block)):
         ordered_question_types = _ensure_standard_coding_fallback_types(ordered_question_types)
     if (
@@ -2977,6 +3298,14 @@ def generate_question_pair_for_block(
         strict_preferred_objectives=strict_preferred_objectives,
         allow_relaxed_objective_scope_fallback=allow_relaxed_objective_scope_fallback,
     )
+    if include_math_symbolic:
+        _trace_generation(
+            "math_internal_bucket_chosen",
+            block=block.title,
+            block_id=block.pk,
+            internal_bucket="math_symbolic_mcq",
+            ordered_types=ordered_question_types,
+        )
 
     strict_objectives = _ordered_generation_objectives(
         block,
@@ -3076,7 +3405,6 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
     for chunk in chunks:
         chunk_index_by_block[chunk.block_id] += 1
         distractor_count = chunk.block.question_distractor_count
-        question_type = _preferred_generated_question_type(chunk.block)
         objective = _select_objective_for_chunk(
             chunk,
             objectives_by_block.get(chunk.block_id, []),
@@ -3084,12 +3412,17 @@ def generate_question_banks(course: Course, *, approve: bool = False) -> int:
             chunk_index_by_block[chunk.block_id] - 1,
             total_chunks_by_block[chunk.block_id],
         )
+        include_math_symbolic = _context_prefers_math_symbolic_mcq(chunk.block, objective, chunk)
+        question_type = _preferred_generated_question_type(chunk.block, include_math_symbolic=include_math_symbolic)
         if (
             question_type == QuestionBankItem.QuestionType.NUM
             and objective is not None
             and not _objective_supports_local_numeric_mcq(objective, chunk.text)
         ):
-            question_type = _preferred_standard_generated_question_type(chunk.block)
+            if _objective_math_generation_mode(objective, chunk.text) == MATH_GENERATION_MODE_SYMBOLIC:
+                question_type = QuestionBankItem.QuestionType.MCQ
+            else:
+                question_type = _preferred_standard_generated_question_type(chunk.block)
         coding_signal = _coding_signal_for_chunk(chunk) if (_coding_question_generation_due(chunk.block) and question_type != QuestionBankItem.QuestionType.NUM) else {"language": "", "snippet": ""}
         preferred_coding_language = preferred_coding_language_for_block(chunk.block, [chunk], {chunk.pk: coding_signal} if coding_signal["language"] else {})
         if preferred_coding_language and coding_signal["language"] and coding_signal["language"] != preferred_coding_language:

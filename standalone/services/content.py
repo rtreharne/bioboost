@@ -15,6 +15,7 @@ from docx import Document
 from pptx import Presentation
 
 from standalone.models import ContentAsset, ContentChunk, LearningObjective
+from standalone.services.math_questions import extract_math_subtopic_objectives
 from standalone.services.symbol_heuristics import derive_symbol_heuristics_for_objectives
 
 
@@ -242,6 +243,10 @@ def _objective_budget_for_text(text: str, minimum: int = 6, maximum: int = 12) -
 
 
 def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
+    math_objectives = extract_math_subtopic_objectives(text, max_items=max_items)
+    if math_objectives:
+        return math_objectives[:max_items]
+
     candidates = []
     for line in text.splitlines():
         stripped = sanitize_learning_objective(line)
@@ -263,6 +268,10 @@ def derive_learning_objectives(text: str, max_items: int = 8) -> list[str]:
 
 
 def derive_learning_objectives_with_coverage(text: str, max_items: int = 8) -> list[str]:
+    math_objectives = extract_math_subtopic_objectives(text, max_items=max_items)
+    if math_objectives:
+        return math_objectives[:max_items]
+
     sections = chunk_text(text, target_size=1200)
     if len(sections) <= 1:
         return derive_learning_objectives(text, max_items=max_items)
@@ -419,8 +428,9 @@ Candidate learning objectives:
 
 
 def summarize_block_content(text: str, max_items: int = 6) -> tuple[str, list[str]]:
+    math_objectives = extract_math_subtopic_objectives(text, max_items=max_items)
     fallback_summary = _fallback_summary(text)
-    fallback_objectives = derive_learning_objectives_with_coverage(text, max_items=max_items)
+    fallback_objectives = math_objectives or derive_learning_objectives_with_coverage(text, max_items=max_items)
 
     summary = fallback_summary
     objectives = fallback_objectives
@@ -449,7 +459,8 @@ def summarize_block_content(text: str, max_items: int = 6) -> tuple[str, list[st
                 )
 
             summary = sanitize_summary(str(payload.get("summary", ""))) or fallback_summary
-            objectives = _sanitize_objective_candidates(payload.get("learning_objectives", []), max_items) or fallback_objectives
+            generated_objectives = _sanitize_objective_candidates(payload.get("learning_objectives", []), max_items)
+            objectives = math_objectives or generated_objectives or fallback_objectives
         except Exception:  # noqa: BLE001
             summary = fallback_summary
             objectives = fallback_objectives

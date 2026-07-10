@@ -66,8 +66,14 @@ from standalone.tasks import (
 from standalone.services.content import chunk_text, summarize_block_content
 from standalone.services.block_avatars import generate_and_store_block_avatar
 from standalone.services.guidance import build_generation_guidance_prompt
+from standalone.services.math_questions import (
+    build_math_mcq_payload,
+    extract_math_subtopic_objectives,
+    is_math_generation_target,
+    validate_math_mcq_payload,
+)
 from standalone.services.pdf_import import analyze_pdf_chapters, _select_outline_items, _toc_boundaries_from_ocr
-from standalone.services.preview import CODING_QUESTION_REQUEST, PREVIEW_SESSION_KEY, _course_stats
+from standalone.services.preview import CODING_QUESTION_REQUEST, PREVIEW_SESSION_KEY, _course_stats, _grade_question_response
 from standalone.services.course_imports import course_import_work_is_active, run_course_import_worker_once
 from standalone.services.question_builder import (
     course_question_generation_budget,
@@ -79,17 +85,21 @@ from standalone.services.numeric_questions import (
     _build_local_distractors,
     _coerce_stored_numeric_feedback_payload,
     _evaluate_expression,
+    _final_numeric_step_tex,
+    _numeric_answer_style,
+    _validate_numeric_candidate,
+    _validate_unit_text,
     _expression_to_tex,
     _normalize_text as normalize_numeric_text,
     _render_stem_template,
     _validate_symbol_definitions,
-    _validate_numeric_candidate,
     build_numeric_question_payload,
     format_numeric_answer_feedback,
     format_numeric_feedback_explanation,
     objective_has_numeric_intent,
     regenerate_stored_numeric_feedback,
     normalize_numeric_answer_text,
+    supports_local_numeric_mcq,
 )
 from standalone.services.projects import ensure_project_assignment
 from standalone.sqlite import configure_sqlite_connection
@@ -105,7 +115,10 @@ from standalone.services.questions import (
     QuestionGenerationUnavailableError,
     _create_question_pair,
     _is_source_dependent_question_stem,
+    _numeric_question_repeats_recent_angle,
     _normalize_generated_payload,
+    _objective_alignment_error,
+    _ratio_gap_ranked_question_types,
     _single_answer_option_balance_error,
     _single_answer_length_signal_error,
     coding_signal_for_text,
@@ -116,6 +129,7 @@ from standalone.services.questions import (
     normalize_numeric_explanation_text,
     question_quality_issue,
 )
+from standalone.services.validation_pdf import _format_print_text
 
 
 User = get_user_model()
@@ -206,12 +220,33 @@ class StandaloneFlowTests(TestCase):
             ],
         }
 
+    def sample_geometry_numeric_candidate_payload(self):
+        return {
+            "question_type": "num",
+            "stem_template": "A rectangular box has a length of {length} cm, a width of {width} cm, and a height of {height} cm. What is the total surface area of the box in square centimetres?",
+            "variables": [
+                {"name": "length", "value": 8.2, "unit": "cm"},
+                {"name": "width", "value": 5.6, "unit": "cm"},
+                {"name": "height", "value": 3.4, "unit": "cm"},
+            ],
+            "calculation_expression": "2 * (length * width + length * height + width * height)",
+            "answer_unit": "cm²",
+            "significant_figures": 3,
+            "explanation": "The total surface area is found by adding the areas of the three distinct face pairs and doubling the result.",
+            "difficulty": "core",
+            "further_study_questions": [
+                "How would the volume of the box be calculated?",
+                "Which faces contribute to the total surface area?",
+                "How can you check the units in an area calculation?",
+            ],
+        }
+
     def sample_numeric_feedback_payload(self):
         return {
             "key_idea": "Speed comes from dividing the distance travelled by the elapsed time.",
             "formula": r"v = \frac{d}{t}",
             "substitution": r"v = \frac{20}{4} = 5",
-            "final_answer": r"v \approx 5\,\mathrm{m/s}",
+            "final_answer": r"v = 5\,\mathrm{m/s}",
             "worked_solution": (
                 "Using the speed formula:\n\n"
                 "Here, v is the average speed, d is the distance, and t is the elapsed time.\n\n"
@@ -219,7 +254,7 @@ class StandaloneFlowTests(TestCase):
                 "\n\n"
                 r"\[v = \frac{20}{4} = 5\]"
                 "\n\n"
-                r"\[v \approx 5\,\mathrm{m/s}\]"
+                r"\[v = 5\,\mathrm{m/s}\]"
             ),
             "options": [
                 {
@@ -503,10 +538,65 @@ class StandaloneFlowTests(TestCase):
         self.assertIn("δ", explanation)
         self.assertNotIn(r"\u03B4", explanation)
 
+    def test_normalize_explanation_text_wraps_raw_math_clauses_for_math_questions(self):
+        explanation = normalize_explanation_text(
+            (
+                r"The discriminant \Delta of the quadratic equation \(ax^2 + bx + c = 0\) is given by \( \Delta = b^2 - 4ac \). "
+                r"Exactly one real root occurs when the discriminant is zero. For the given equation, \(a = 2\), \(b = -4\), "
+                r"and \(c = k\), so Delta = (-4)^2 - 4 times 2\times k = 16 - 8k. Setting \Delta = 0 gives \(8k = 16\), so \(k = 2\)."
+            ),
+            math_metadata={
+                "answer_family": "expression",
+                "equivalence_mode": "literal",
+            },
+        )
+
+        self.assertIn(r"so \(\Delta = (-4)^2 - 4 \times 2 \times k = 16 - 8k\).", explanation)
+        self.assertNotIn(r"Delta = (-4)^2 - 4 times 2\times k = 16 - 8k", explanation)
+
     def test_numeric_normalize_text_decodes_literal_unicode_escapes(self):
         normalized = normalize_numeric_text(r"A_resultant = A * sqrt(2 + 2 cos \u03B4)")
 
         self.assertEqual(normalized, "A_resultant = A * sqrt(2 + 2 cos δ)")
+
+    def test_render_stem_template_preserves_symbolic_labels_in_assignments(self):
+        stem = _render_stem_template(
+            (
+                "A company models its weekly profit, in pounds, by the quadratic function "
+                "P(x) = {a}x^2 + {b}x + {c}, where x is the number of units produced. "
+                "For what value of x does the company break even if {a} = -2, {b} = 40, and {c} = -128?"
+            ),
+            {"a": -2.0, "b": 40.0, "c": -128.0},
+            {"a": "", "b": "", "c": ""},
+        )
+
+        self.assertIn("if a = -2, b = 40, and c = -128?", stem)
+        self.assertNotIn("if -2 = -2", stem)
+
+    def test_render_stem_template_removes_redundant_quadratic_coefficient_clause(self):
+        stem = _render_stem_template(
+            (
+                "The quadratic function f(x) = {a}x^2 + {b}x + {c} has a graph that opens upwards. "
+                "What is the value of the discriminant of this quadratic, which determines the nature of its roots, "
+                "when a = {a}, b = {b}, and c = {c}?"
+            ),
+            {"a": 2.0, "b": -5.0, "c": 3.0},
+            {"a": "", "b": "", "c": ""},
+        )
+
+        self.assertIn("f(x) = 2x^2 - 5x + 3", stem)
+        self.assertNotIn("when a = 2, b = -5, and c = 3", stem)
+        self.assertTrue(stem.endswith("roots?"))
+
+    def test_render_stem_template_normalizes_plus_negative_constant_terms(self):
+        stem = _render_stem_template(
+            "Solve the quadratic equation {a}x^2 + {b}x + {c} = 0. Give the value of the larger root.",
+            {"a": 2.0, "b": -5.6, "c": -3.2},
+            {"a": "", "b": "", "c": ""},
+        )
+
+        self.assertIn("2x^2 - 5.6x - 3.2 = 0", stem)
+        self.assertNotIn("+ -3.2", stem)
 
     def test_format_numeric_feedback_explanation_uses_coulomb_law_layout(self):
         formatted = format_numeric_feedback_explanation(
@@ -823,7 +913,7 @@ class StandaloneFlowTests(TestCase):
 
         self.assertIn(r"\[s = \frac{u + v}{2} \times t\]", feedback)
         self.assertIn(r"\[s = \frac{8 + 20}{2} \times 4\]", feedback)
-        self.assertIn(r"\[s \approx 56\,\mathrm{m}\]", feedback)
+        self.assertIn(r"\[s = 56\,\mathrm{m}\]", feedback)
 
     @override_settings(OPENAI_API_KEY="")
     def test_format_numeric_answer_feedback_uses_stored_feedback_for_correct_option(self):
@@ -837,7 +927,7 @@ class StandaloneFlowTests(TestCase):
             "\n\n"
             r"\[v = 20/4 = 5\]"
             "\n\n"
-            r"\[v \approx 5\,\mathrm{m/s}\]"
+            r"\[v = 5\,\mathrm{m/s}\]"
         )
         feedback = format_numeric_answer_feedback(
             stem="An object travels 20 m in 4 s. Calculate its speed?",
@@ -890,6 +980,118 @@ class StandaloneFlowTests(TestCase):
         self.assertTrue(feedback.startswith("Correct."))
         self.assertIn("Using the speed formula:", feedback)
         self.assertIn(r"\[v = \frac{d}{t}\]", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_ignores_generic_symbol_override_for_math(self):
+        feedback = format_numeric_answer_feedback(
+            stem=(
+                "A rectangular garden has a length of 8 m and a width of 5 m. "
+                "Both dimensions increase by the same amount x so that the new area is 130 m^2. "
+                "What is the value of x?"
+            ),
+            explanation_text="Set up the quadratic equation for the new area and solve for x.",
+            numeric_metadata={
+                "inputs": {},
+                "validation": {"answer_expression": "5"},
+                "output_snapshot": {
+                    "answer_value": 5.0,
+                    "answer_unit": "m",
+                    "correct_answer": "5 m",
+                    "distractors": ["4 m", "6 m", "7 m"],
+                },
+            },
+            selected_answer_text="5 m",
+            is_correct=True,
+            objective_text="Form and solve quadratic equations from area models.",
+            chunk_text="Expand the area expression, form a quadratic equation, and solve for x.",
+            objective_symbol_heuristics={
+                "answer_symbol": "x",
+                "answer_description": "Variables representing quantities such as horizontal distance (x), vertical height (y), or time (t).",
+                "topic_family": "algebra",
+            },
+        )
+
+        self.assertIn("Here, x is the required quantity.", feedback)
+        self.assertNotIn("horizontal distance", feedback)
+        self.assertNotIn("vertical height", feedback)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_format_numeric_answer_feedback_falls_back_when_stored_math_feedback_has_subject_bleed(self):
+        stored_feedback = {
+            "key_idea": "Set up the quadratic model and solve for the positive value of x.",
+            "formula": "x = 5",
+            "substitution": "x = 5",
+            "final_answer": r"x \approx 5\,\mathrm{m}",
+            "worked_solution": (
+                "Using the area model:\n\n"
+                "Here, x is Variables representing quantities such as horizontal distance (x), vertical height (y), or time (t).\n\n"
+                r"\[x = 5\]"
+                "\n\n"
+                r"\[x = 5\]"
+                "\n\n"
+                r"\[x \approx 5\,\mathrm{m}\]"
+            ),
+            "options": [
+                {"answer_text": "5 m", "is_correct": True, "note": "This is the positive solution that fits the context."},
+                {"answer_text": "4 m", "is_correct": False, "note": "This does not satisfy the area equation."},
+                {"answer_text": "6 m", "is_correct": False, "note": "This makes the new area too large."},
+                {"answer_text": "7 m", "is_correct": False, "note": "This makes the new area much too large."},
+            ],
+        }
+        feedback = format_numeric_answer_feedback(
+            stem=(
+                "A rectangular garden has a length of 8 m and a width of 5 m. "
+                "Both dimensions increase by the same amount x so that the new area is 130 m^2. "
+                "What is the value of x?"
+            ),
+            explanation_text="Set up the quadratic equation for the new area and solve for x.",
+            numeric_metadata={
+                "inputs": {},
+                "validation": {"answer_expression": "5"},
+                "output_snapshot": {
+                    "answer_value": 5.0,
+                    "answer_unit": "m",
+                    "correct_answer": "5 m",
+                    "distractors": ["4 m", "6 m", "7 m"],
+                },
+                "feedback_v2": stored_feedback,
+            },
+            selected_answer_text="5 m",
+            is_correct=True,
+            objective_text="Form and solve quadratic equations from area models.",
+            chunk_text="Expand the area expression, form a quadratic equation, and solve for x.",
+        )
+
+        self.assertIn("Here, x is the required quantity.", feedback)
+        self.assertIn(r"\[x = 5\]", feedback)
+        self.assertNotIn("horizontal distance", feedback)
+        self.assertNotIn("Using the area model:", feedback)
+
+    def test_coerce_stored_numeric_feedback_falls_back_when_working_drifts_from_trusted_steps(self):
+        validated_feedback = _coerce_stored_numeric_feedback_payload(
+            {
+                **self.sample_numeric_feedback_payload(),
+                "worked_solution": (
+                    "This value is close but slightly overestimates a.\n\n"
+                    r"\[a = \frac{2}{200}\]"
+                    "\n\n"
+                    r"\[a \approx 0.3\]"
+                    "\n\n"
+                    "Choose the answer option 0.3."
+                ),
+            },
+            correct_answer_text="5 m/s",
+            distractors=["5.2 m/s", "4.7 m/s", "5.7 m/s"],
+            trusted_formula_tex=r"v = \frac{d}{t}",
+            trusted_substitution_tex=r"v = \frac{20}{4} = 5",
+            trusted_final_tex=r"v = 5\,\mathrm{m/s}",
+        )
+
+        self.assertFalse(validated_feedback["has_custom_working"])
+        self.assertIn(r"\[v = \frac{d}{t}\]", validated_feedback["worked_solution_text"])
+        self.assertIn(r"\[v = \frac{20}{4} = 5\]", validated_feedback["worked_solution_text"])
+        self.assertIn(r"\[v = 5\,\mathrm{m/s}\]", validated_feedback["worked_solution_text"])
+        self.assertNotIn(r"\[a = \frac{2}{200}\]", validated_feedback["worked_solution_text"])
 
     @override_settings(OPENAI_API_KEY="")
     def test_coerce_stored_numeric_feedback_wraps_standalone_latex_equation_lines(self):
@@ -1124,8 +1326,8 @@ class StandaloneFlowTests(TestCase):
         )
         self.assertIn(r"\[E \approx 3.5 \times 10^{-19}\,\mathrm{J}\]", wrapped_feedback["worked_solution_text"])
 
-    @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-5.5")
-    def test_regenerate_stored_numeric_feedback_uses_gpt_5_5(self):
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-4.1")
+    def test_regenerate_stored_numeric_feedback_uses_gpt_4_1(self):
         validated_feedback = _coerce_stored_numeric_feedback_payload(
             self.sample_numeric_feedback_payload(),
             correct_answer_text="5 m/s",
@@ -1146,7 +1348,7 @@ class StandaloneFlowTests(TestCase):
                             "\n\n"
                             r"\[v = \frac{20}{4} = 5\]"
                             "\n\n"
-                            r"\[v \approx 5\,\mathrm{m/s}\]"
+                            r"\[v = 5\,\mathrm{m/s}\]"
                             "\n\n"
                             "So the exact option to choose is 5 m/s."
                         ),
@@ -1171,17 +1373,19 @@ class StandaloneFlowTests(TestCase):
                 },
             )
 
-        self.assertEqual(captured_kwargs[0]["model"], "gpt-5.5")
+        self.assertEqual(captured_kwargs[0]["model"], "gpt-4.1")
         prompt = captured_kwargs[0]["input"][0]["content"][0]["text"]
         self.assertIn("Existing notation already shown in the question or current solution, if any:", prompt)
         self.assertIn("Choose the most natural conventional notation yourself.", prompt)
         self.assertIn("use 3.14 rather than extra decimal places", prompt)
+        self.assertNotIn("physics context", prompt)
+        self.assertNotIn("underlying physics", prompt)
         self.assertNotIn("Prefer s for the displacement.", prompt)
         self.assertIn("Current worked solution to improve:", prompt)
         self.assertEqual(updated_feedback["version"], "option-v2")
         self.assertEqual(updated_feedback["key_idea"], "Speed follows directly from distance divided by elapsed time.")
         self.assertTrue(updated_feedback["has_custom_working"])
-        self.assertIn("Let v be the speed", updated_feedback["worked_solution_text"])
+        self.assertIn("Speed follows directly", updated_feedback["worked_solution_text"])
         self.assertIn("5 m/s", updated_feedback["worked_solution_text"])
 
     @override_settings(OPENAI_API_KEY="")
@@ -1299,6 +1503,98 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(objective.symbol_heuristics["answer_description"], "the photon energy")
         self.assertEqual(objective.symbol_heuristics["variable_hints"][0]["symbol"], "f")
         self.assertEqual(objective.symbol_heuristics["constant_hints"][0]["symbol"], "h")
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_ingest_content_asset_uses_math_subtopics_and_math_symbol_heuristics(self):
+        from standalone.services.content import ingest_content_asset
+
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Differentiation", summary="Differentiation", order=1)
+        BlockConfig.objects.create(block=block)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "edexcel-pure.txt",
+                (
+                    "12.1 Gradients of curves\n"
+                    "12.2 Finding the derivative\n"
+                    "12.3 Differentiating x^n\n"
+                    "12.4 Differentiating quadratics\n"
+                ).encode("utf-8"),
+                content_type="text/plain",
+            ),
+            original_filename="New Edexcel Pure Year 1.txt",
+            extension=".txt",
+            include_in_generation=True,
+        )
+
+        ingest_content_asset(asset)
+
+        objectives = list(asset.learning_objectives.order_by("position"))
+        self.assertEqual(
+            [objective.text for objective in objectives[:4]],
+            [
+                "Gradients of curves",
+                "Finding the derivative",
+                "Differentiating x^n",
+                "Differentiating quadratics",
+            ],
+        )
+        self.assertEqual(objectives[0].symbol_heuristics["preferred_notation"], "edexcel_pure_y1")
+        self.assertEqual(objectives[0].symbol_heuristics["topic_family"], "calculus")
+        self.assertIn("x", objectives[0].symbol_heuristics["preferred_variables"])
+
+    def test_validate_unit_text_normalizes_unicode_squared_units(self):
+        self.assertEqual(_validate_unit_text("cm²", "Unit for 'area'"), "cm^2")
+        self.assertEqual(_validate_unit_text("cm³", "Unit for 'volume'"), "cm^3")
+
+    def test_validate_numeric_candidate_accepts_geometry_alignment_and_unicode_area_unit(self):
+        validated, _validation = _validate_numeric_candidate(
+            self.sample_geometry_numeric_candidate_payload(),
+            distractor_count=3,
+            objective_text="Apply algebraic manipulation to solve geometric problems involving areas and volumes",
+            chunk_text="Use algebraic expressions to model areas, surface areas, and volumes of rectangular solids.",
+        )
+
+        self.assertIn("surface area", validated["stem"].lower())
+        self.assertEqual(validated["answer_unit"], "cm^2")
+        self.assertTrue(validated["correct_answer"].endswith("cm^2"))
+
+    def test_numeric_answer_style_detects_integer_answers(self):
+        self.assertEqual(_numeric_answer_style("-5"), "integer")
+        self.assertEqual(_numeric_answer_style("186 cm^2"), "integer")
+        self.assertEqual(_numeric_answer_style("-4.98"), "decimal")
+
+    def test_build_local_distractors_match_integer_answer_style(self):
+        distractors, _values = _build_local_distractors(
+            -5.0,
+            "",
+            significant_figures=3,
+            distractor_count=3,
+            variables={"a": 1.0, "b": 7.0, "c": 10.0},
+            display_style="decimal",
+        )
+
+        self.assertEqual(distractors, ["-4", "-6", "-3"])
+
+    def test_final_numeric_step_tex_uses_approx_for_scientific_answers(self):
+        self.assertEqual(
+            _final_numeric_step_tex("E", 5.6321596275e-19, 2, "J"),
+            r"E \approx 5.6 \times 10^{-19}\,\mathrm{J}",
+        )
+
+    def test_render_stem_template_inserts_space_between_value_and_unit(self):
+        stem = _render_stem_template(
+            "A ball is thrown upwards. After {time}s, how high is it? (Use g = {g}m/s^2.)",
+            {"time": 2.5, "g": 9.8},
+            {"time": "s", "g": "m/s^2"},
+        )
+
+        self.assertIn("2.5 s", stem)
+        self.assertIn("9.8 m/s^2", stem)
+        self.assertNotIn("2.5s", stem)
+        self.assertNotIn("9.8m/s^2", stem)
 
     def test_numeric_feedback_uses_stored_learning_objective_symbol_heuristics(self):
         feedback = format_numeric_answer_feedback(
@@ -1419,7 +1715,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(feedback_v2["key_idea"], "Speed comes from dividing the distance travelled by the elapsed time.")
         self.assertEqual(feedback_v2["formula_tex"], r"v = \frac{d}{t}")
         self.assertEqual(feedback_v2["substitution_tex"], r"v = \frac{20}{4} = 5")
-        self.assertEqual(feedback_v2["final_tex"], r"v \approx 5\,\mathrm{m/s}")
+        self.assertEqual(feedback_v2["final_tex"], r"v = 5\,\mathrm{m/s}")
         self.assertIn("Using the speed formula:", feedback_v2["worked_solution_text"])
         self.assertEqual(len(feedback_v2["options"]), 4)
         self.assertEqual(feedback_v2["options"][0]["answer_text"], "5 m/s")
@@ -1787,6 +2083,36 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(chapters[0].end_page, 1)
         self.assertTrue(chapters[0].extracted_text)
 
+    def test_extract_math_subtopic_objectives_prefers_numbered_subsections(self):
+        objectives = extract_math_subtopic_objectives(
+            "\n".join(
+                [
+                    "12 Differentiation 255",
+                    "12.1 Gradients of curves 256",
+                    "12.2 Finding the derivative 259",
+                    "12.3 Differentiating x^n 262",
+                    "Mixed exercise 12 282",
+                ]
+            ),
+            max_items=4,
+        )
+
+        self.assertEqual(
+            objectives,
+            [
+                "Gradients of curves",
+                "Finding the derivative",
+                "Differentiating x^n",
+            ],
+        )
+
+    def test_print_formatting_handles_common_math_latex_tokens(self):
+        formatted = _format_print_text(r"\(P(A \cap B)\), \(x \le 3\), \((-\infty, 2]\)")
+
+        self.assertIn("P(A ∩ B)", formatted)
+        self.assertIn("x ≤ 3", formatted)
+        self.assertIn("(-∞, 2]", formatted)
+
     @override_settings(OPENAI_API_KEY="")
     def test_pdf_import_falls_back_to_single_chapter_without_headings(self):
         upload = self.build_pdf_upload([["Foundations of cell biology", "No chapter heading is present."]])
@@ -2060,6 +2386,465 @@ class StandaloneFlowTests(TestCase):
                 distractor_count=3,
             )
 
+    def test_normalize_generated_payload_accepts_math_mcq_metadata(self):
+        payload = _normalize_generated_payload(
+            {
+                "question_type": "mcq",
+                "stem": r"Solve \(\,x^2 - 5x + 6 = 0\,\). Which answer is correct?",
+                "correct_answers": [r"x = 2 \text{ or } x = 3"],
+                "distractors": [
+                    r"x = -2 \text{ or } x = -3",
+                    r"x = 1 \text{ or } x = 6",
+                    r"x = 2",
+                ],
+                "further_study_questions": [
+                    "How does factorising help solve quadratics?",
+                    "When would completing the square be better?",
+                    "How can you check quadratic roots?",
+                ],
+                "explanation": "Factorise the quadratic and solve each linear factor.",
+                "difficulty": "core",
+                "math_metadata": {
+                    "answer_family": "equation_solution",
+                    "canonical_tex": r"x = 2 \text{ or } x = 3",
+                    "canonical_plain": "x = 2 or x = 3",
+                    "equivalence_mode": "literal",
+                    "equivalence_variables": ["x"],
+                    "notation_profile": "edexcel_pure_y1",
+                    "distractor_tags": ["sign_error", "factor_pair_error", "missing_root"],
+                    "source_subtopic": "Solving quadratic equations",
+                },
+            },
+            QuestionBankItem.QuestionType.MCQ,
+            distractor_count=3,
+        )
+
+        self.assertEqual(payload["math_metadata"]["answer_family"], "equation_solution")
+        self.assertEqual(payload["math_metadata"]["notation_profile"], "edexcel_pure_y1")
+        self.assertFalse(payload["is_coding_question"])
+        self.assertEqual(len(payload["distractors"]), 3)
+
+    def test_normalize_generated_payload_accepts_prose_wrapped_math_coordinate_option(self):
+        payload = _normalize_generated_payload(
+            {
+                "question_type": "mcq",
+                "stem": r"Which option gives the turning point of \(\,y = (x-2)^2 - 1\,\)?",
+                "correct_answers": [r"The turning point is \((2,-1)\)."],
+                "distractors": [
+                    r"The turning point is \((2,1)\).",
+                    r"The turning point is \((-2,-1)\).",
+                    r"The turning point is \((1,-2)\).",
+                ],
+                "further_study_questions": [
+                    "How does completing the square reveal the turning point?",
+                    "How can you read the axis of symmetry from the same form?",
+                    "What does the sign of the squared term tell you about the graph?",
+                ],
+                "explanation": "In completed-square form, the turning point is read directly from the translation.",
+                "difficulty": "core",
+                "math_metadata": {
+                    "answer_family": "coordinate",
+                    "canonical_tex": r"(2,-1)",
+                    "canonical_plain": "(2,-1)",
+                    "equivalence_mode": "ordered_pair",
+                    "equivalence_variables": ["x", "y"],
+                    "notation_profile": "edexcel_pure_y1",
+                    "distractor_tags": ["reflected_y", "sign_shift_x", "coordinate_swap"],
+                    "source_subtopic": "Sketching quadratic graphs",
+                },
+            },
+            QuestionBankItem.QuestionType.MCQ,
+            distractor_count=3,
+        )
+
+        self.assertIn("turning point", payload["correct_answers"][0])
+        self.assertEqual(payload["math_metadata"]["canonical_tex"], r"\((2,-1)\)")
+
+    def test_normalize_generated_payload_rejects_equivalent_math_distractor(self):
+        with self.assertRaisesMessage(ValueError, "equivalent to the correct answer"):
+            _normalize_generated_payload(
+                {
+                    "question_type": "mcq",
+                    "stem": r"Which expression is equivalent to \((x+1)^2\)?",
+                    "correct_answers": [r"x^2 + 2x + 1"],
+                    "distractors": [
+                        r"(x+1)(x+1)",
+                        r"x^2 + x + 1",
+                        r"x^2 + 1",
+                    ],
+                    "further_study_questions": [
+                        "How do you expand a binomial square?",
+                        "What common sign mistake appears here?",
+                        "How can you check equivalence quickly?",
+                    ],
+                    "explanation": "Expand the square carefully.",
+                    "difficulty": "core",
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"x^2 + 2x + 1",
+                        "canonical_plain": "x^2 + 2x + 1",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["equivalent_duplicate", "missed_term", "missing_linear_term"],
+                        "source_subtopic": "The binomial expansion",
+                    },
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_validate_math_mcq_payload_repairs_mismatched_canonical_answer(self):
+        payload = validate_math_mcq_payload(
+            {
+                "stem": r"Which option gives the simplified form of \(\sqrt{8}\)?",
+                "correct_answers": [r"\(2\sqrt{2}\)"],
+                "distractors": [r"\(\sqrt{2}\)", r"\(4\sqrt{2}\)", r"\(2\sqrt{3}\)"],
+                "math_metadata": {
+                    "answer_family": "expression",
+                    "canonical_tex": r"\(\sqrt{2}\)",
+                    "canonical_plain": "sqrt(2)",
+                    "equivalence_mode": "sympy",
+                    "equivalence_variables": ["x"],
+                    "notation_profile": "edexcel_pure_y1",
+                    "distractor_tags": ["missed_factor", "over_multiplier", "wrong_radicand"],
+                    "source_subtopic": "Simplifying surds",
+                },
+            },
+            distractor_count=3,
+            objective_text="Simplify surds and apply rationalisation techniques to denominators",
+            chunk_text="Simplify exact surd expressions.",
+        )
+
+        self.assertEqual(payload["math_metadata"]["canonical_tex"], r"\(2\sqrt{2}\)")
+        self.assertEqual(payload["math_metadata"]["canonical_plain"], r"2\sqrt2")
+
+    def test_validate_math_mcq_payload_wraps_raw_latex_in_stem_prose(self):
+        payload = validate_math_mcq_payload(
+            {
+                "stem": r"Simplify the expression \frac{3}{\sqrt{5}} - \frac{2}{\sqrt{20}}.",
+                "correct_answers": [r"\(\frac{7}{\sqrt{5}}\)"],
+                "distractors": [r"\(\frac{6}{5}\)", r"\(\frac{6}{\sqrt{5}}\)", r"\(\frac{1}{\sqrt{5}}\)"],
+                "math_metadata": {
+                    "answer_family": "expression",
+                    "canonical_tex": r"\(\frac{7}{\sqrt{5}}\)",
+                    "canonical_plain": "7/sqrt(5)",
+                    "equivalence_mode": "sympy",
+                    "equivalence_variables": ["x"],
+                    "notation_profile": "edexcel_pure_y1",
+                    "distractor_tags": ["rationalised_wrongly", "missed_subtraction", "dropped_numerator"],
+                    "source_subtopic": "Simplifying surds",
+                },
+            },
+            distractor_count=3,
+            objective_text="Simplify surds and apply rationalisation techniques to denominators",
+            chunk_text="Work with exact surd expressions and simplify them carefully.",
+        )
+
+        self.assertEqual(
+            payload["stem"],
+            r"Simplify the expression \(\frac{3}{\sqrt{5}} - \frac{2}{\sqrt{20}}\).",
+        )
+
+    def test_normalize_explanation_text_wraps_raw_latex_fragments_for_math_feedback(self):
+        explanation = normalize_explanation_text(
+            r"First, note that \frac{2}{\sqrt{3}} + \frac{3}{\sqrt{12}} = \frac{7\sqrt{3}}{6}. Therefore, \frac{7\sqrt{3}}{6} is the simplified answer.",
+            math_metadata={"answer_family": "expression", "equivalence_mode": "sympy"},
+        )
+
+        self.assertIn(r"\(\frac{2}{\sqrt{3}} + \frac{3}{\sqrt{12}} = \frac{7\sqrt{3}}{6}\).", explanation)
+        self.assertIn(r"Therefore, \(\frac{7\sqrt{3}}{6}\) is the simplified answer.", explanation)
+
+    def test_validate_math_mcq_payload_rejects_explanation_concluding_with_distractor(self):
+        with self.assertRaisesMessage(ValueError, "concludes with a distractor"):
+            validate_math_mcq_payload(
+                {
+                    "stem": r"Simplify the expression \(\frac{2}{\sqrt{3}} + \frac{3}{\sqrt{12}}\).",
+                    "correct_answers": [r"\(\frac{7}{3}\)"],
+                    "distractors": [r"\(\frac{7\sqrt{3}}{6}\)", r"\(\frac{5}{3}\)", r"\(\frac{7\sqrt{3}}{3}\)"],
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"\(\frac{7}{3}\)",
+                        "canonical_plain": "(7)/(3)",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["rationalisation_error", "simplification_error", "denominator_misinterpretation"],
+                        "source_subtopic": "Simplifying surds",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Simplify surds and apply rationalisation techniques to denominators",
+                chunk_text="Work with exact surd expressions and simplify them carefully.",
+                explanation_text=(
+                    r"First, simplify \(\sqrt{12} = 2\sqrt{3}\). Therefore, \(\frac{7\sqrt{3}}{6}\) is the simplified answer."
+                ),
+            )
+
+    def test_validate_math_mcq_payload_rejects_explanation_concluding_with_non_option_answer(self):
+        with self.assertRaisesMessage(ValueError, "does not match any answer option"):
+            validate_math_mcq_payload(
+                {
+                    "stem": r"Simplify the expression \(\frac{3}{\sqrt{5}} - \frac{2}{\sqrt{20}}\).",
+                    "correct_answers": [r"\(\frac{6}{5}\)"],
+                    "distractors": [r"\(\frac{1}{\sqrt{5}}\)", r"\(\frac{7}{\sqrt{5}}\)", r"\(\frac{6}{\sqrt{5}}\)"],
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"\(\frac{6}{5}\)",
+                        "canonical_plain": "(6)/(5)",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["dropped_term", "sign_error", "missed_rationalisation"],
+                        "source_subtopic": "Simplifying surds",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Simplify surds and apply rationalisation techniques to denominators",
+                chunk_text="Work with exact surd expressions and simplify them carefully.",
+                explanation_text=(
+                    r"First simplify the denominator. Therefore, \(\frac{2\sqrt{5}}{5}\) is the fully rationalised answer."
+                ),
+            )
+
+    def test_validate_math_mcq_payload_rejects_option_disclaimer_explanation(self):
+        with self.assertRaisesMessage(ValueError, "admits the answer options are broken"):
+            validate_math_mcq_payload(
+                {
+                    "stem": r"Simplify the expression \(\frac{3}{\sqrt{5}} - \frac{2}{\sqrt{20}}\).",
+                    "correct_answers": [r"\(\frac{6}{5}\)"],
+                    "distractors": [r"\(\frac{1}{\sqrt{5}}\)", r"\(\frac{7}{\sqrt{5}}\)", r"\(\frac{6}{\sqrt{5}}\)"],
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"\(\frac{6}{5}\)",
+                        "canonical_plain": "(6)/(5)",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["dropped_term", "sign_error", "missed_rationalisation"],
+                        "source_subtopic": "Simplifying surds",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Simplify surds and apply rationalisation techniques to denominators",
+                chunk_text="Work with exact surd expressions and simplify them carefully.",
+                explanation_text=(
+                    r"The correct fully rationalised form is \(\frac{2\sqrt{5}}{5}\). Given the options, the best simplified rational form matching the intended error correction is \(\frac{6}{5}\) as an intentional distractor."
+                ),
+            )
+
+    def test_validate_math_mcq_payload_rejects_plural_intersection_stem_with_scalar_options(self):
+        with self.assertRaisesMessage(ValueError, "actual curve intersection solution set"):
+            validate_math_mcq_payload(
+                {
+                    "stem": r"Given the two curves \(y = x^2 - 3x + 2\) and \(y = 2x - 1\), find the x-coordinates of their points of intersection?",
+                    "correct_answers": ["1"],
+                    "distractors": ["2", "-1", "3"],
+                    "math_metadata": {
+                        "answer_family": "equation_solution",
+                        "canonical_tex": "1",
+                        "canonical_plain": "1",
+                        "equivalence_mode": "literal",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["wrong_sign", "neglect_constant", "wrong_root_approximation1"],
+                        "source_subtopic": "Use intersections of multiple curves to set up and solve simultaneous equations",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Use intersections of multiple curves to set up and solve simultaneous equations",
+                chunk_text="Set two curve equations equal and solve the resulting quadratic to find the x-coordinates of the points of intersection.",
+            )
+
+    def test_validate_math_mcq_payload_rejects_curve_intersection_coordinate_options_with_no_correct_set(self):
+        with self.assertRaisesMessage(ValueError, "actual curve intersection solution set"):
+            validate_math_mcq_payload(
+                {
+                    "stem": r"Find the coordinates of the points of intersection between the curve \(y = x^3 - 3x^2 - 4x\) and the line \(y = 6x\).",
+                    "correct_answers": ["(3, 18), (-1, -6), (0, 0)"],
+                    "distractors": [
+                        "(4, 24), (1, 6), (0, 0)",
+                        "(4, 24), (-2, -12), (0, 0)",
+                        "(4, 24), (-1, -6), (0, 0)",
+                    ],
+                    "math_metadata": {
+                        "answer_family": "coordinate",
+                        "canonical_tex": "(3, 18), (-1, -6), (0, 0)",
+                        "canonical_plain": "(3,18),(-1,-6),(0,0)",
+                        "equivalence_mode": "literal",
+                        "equivalence_variables": ["x", "y"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["wrong_root", "missed_root", "mixed_solution_set"],
+                        "source_subtopic": "Use intersections of multiple curves to set up and solve simultaneous equations",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Use intersections of multiple curves to set up and solve simultaneous equations",
+                chunk_text="Set two curve equations equal and solve for the coordinates of the points of intersection.",
+                explanation_text="Set the equations equal and solve the resulting cubic.",
+            )
+
+    def test_build_math_mcq_payload_uses_local_curve_intersection_solution_set(self):
+        payload = build_math_mcq_payload(
+            SimpleNamespace(
+                pk=2218,
+                text="Use intersections of multiple curves to set up and solve simultaneous equations.",
+            ),
+            SimpleNamespace(text="Use intersections of multiple curves to set up and solve simultaneous equations"),
+            3,
+        )
+
+        validated = validate_math_mcq_payload(
+            payload,
+            distractor_count=3,
+            objective_text="Use intersections of multiple curves to set up and solve simultaneous equations",
+            chunk_text="Set two curves equal and solve the resulting quadratic.",
+            explanation_text=payload["explanation"],
+        )
+
+        self.assertIn(r"\text{ or }", validated["correct_answer"])
+        self.assertIn("x-coordinates", validated["stem"])
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_build_math_mcq_payload_uses_local_surd_without_openai(self):
+        with patch("standalone.services.math_questions.OpenAI") as mock_client:
+            payload = build_math_mcq_payload(
+                SimpleNamespace(pk=0, text="Simplify exact surd expressions."),
+                SimpleNamespace(text="Simplify surds and apply rationalisation techniques to denominators"),
+                3,
+            )
+
+        self.assertIn(payload["correct_answers"][0], {r"\(3\sqrt{2}\)", r"\(4\sqrt{3}\)"})
+        self.assertEqual(payload["math_metadata"]["answer_family"], "expression")
+        mock_client.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_build_math_mcq_payload_uses_local_derivative_without_openai(self):
+        with patch("standalone.services.math_questions.OpenAI") as mock_client:
+            payload = build_math_mcq_payload(
+                SimpleNamespace(pk=0, text="Differentiate polynomial expressions using the power rule."),
+                SimpleNamespace(text="Differentiate simple powers of x and find gradient functions."),
+                3,
+            )
+
+        validated = validate_math_mcq_payload(
+            payload,
+            distractor_count=3,
+            objective_text="Differentiate polynomial expressions using the power rule.",
+            chunk_text="Differentiate simple powers of x and find gradient functions.",
+            explanation_text=payload["explanation"],
+        )
+
+        self.assertEqual(validated["math_metadata"]["answer_family"], "derivative")
+        self.assertIn("x", validated["correct_answer"])
+        mock_client.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_build_math_mcq_payload_uses_future_topic_fallback_without_openai(self):
+        with patch("standalone.services.math_questions.OpenAI") as mock_client:
+            payload = build_math_mcq_payload(
+                SimpleNamespace(pk=0, text="Explore modular arithmetic notation and methods."),
+                SimpleNamespace(text="Use modular arithmetic to reason about congruence classes"),
+                3,
+            )
+
+        validated = validate_math_mcq_payload(
+            payload,
+            distractor_count=3,
+            objective_text="Use modular arithmetic to reason about congruence classes",
+            chunk_text="Explore modular arithmetic notation and methods.",
+            explanation_text=payload["explanation"],
+        )
+
+        self.assertEqual(validated["math_metadata"]["answer_family"], "conceptual")
+        self.assertIn("modular arithmetic", validated["stem"].lower())
+        mock_client.assert_not_called()
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_build_math_mcq_payload_uses_local_templates_across_math_families_without_openai(self):
+        cases = [
+            ("Solve quadratic equations by factorising", "Factorise quadratics to find roots.", "equation_solution"),
+            ("Solve linear inequalities", "Use inverse operations and reverse the sign when dividing by a negative.", "inequality"),
+            ("Integrate polynomial expressions", "Find antiderivatives using the reverse power rule.", "antiderivative"),
+            ("Find turning points of quadratic graphs", "Use completed square form to identify the vertex.", "coordinate"),
+            ("Use probability notation for union and conditional probability", "Interpret union, intersection, complement, and conditional notation.", "probability_notation"),
+            ("Use vector addition and subtraction", "Add and subtract column vectors component by component.", "vector"),
+            ("Use trigonometric identities", "Recall identities involving sine, cosine, and tangent.", "trig_identity"),
+            ("Expand and simplify algebraic expressions", "Expand brackets and collect like terms.", "expression"),
+        ]
+
+        with patch("standalone.services.math_questions.OpenAI") as mock_client:
+            for index, (objective_text, chunk_text, expected_family) in enumerate(cases):
+                with self.subTest(expected_family=expected_family):
+                    payload = build_math_mcq_payload(
+                        SimpleNamespace(pk=index, text=chunk_text),
+                        SimpleNamespace(text=objective_text),
+                        3,
+                    )
+                    validated = validate_math_mcq_payload(
+                        payload,
+                        distractor_count=3,
+                        objective_text=objective_text,
+                        chunk_text=chunk_text,
+                        explanation_text=payload["explanation"],
+                    )
+                    self.assertEqual(validated["math_metadata"]["answer_family"], expected_family)
+
+        mock_client.assert_not_called()
+
+    def test_is_math_generation_target_recognizes_curve_line_intersection_context(self):
+        self.assertTrue(
+            is_math_generation_target(
+                objective_text="Find the coordinates of points of intersection between a curve and a line",
+                chunk_text="Practice solving curve-line intersections by setting the equations equal.",
+            )
+        )
+
+    def test_grade_question_response_accepts_math_equivalence_for_selected_answer(self):
+        question = QuestionBankItem(
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer=r"\(\frac{7\sqrt{3}}{6}\)",
+            math_metadata={
+                "answer_family": "expression",
+                "canonical_tex": r"\(\frac{7\sqrt{3}}{6}\)",
+                "canonical_plain": "(7*sqrt(3))/(6)",
+                "equivalence_mode": "sympy",
+                "equivalence_variables": ["x"],
+                "notation_profile": "edexcel_pure_y1",
+                "distractor_tags": ["rationalisation_error", "simplification_error", "denominator_misinterpretation"],
+                "source_subtopic": "Simplifying surds",
+            },
+        )
+
+        is_correct, missing_answers, extra_answers = _grade_question_response(question, [r"\frac{7\sqrt{3}}{6}"])
+
+        self.assertTrue(is_correct)
+        self.assertEqual(missing_answers, [])
+        self.assertEqual(extra_answers, [])
+
+    def test_validate_math_mcq_payload_rejects_numeric_geometry_substitution_for_algebraic_objective(self):
+        with self.assertRaisesMessage(ValueError, "algebraic geometry objectives"):
+            validate_math_mcq_payload(
+                {
+                    "stem": "A triangle has a base of 7.2 cm and a height of 5.4 cm. What is the area of the triangle?",
+                    "correct_answers": [r"\(19\)"],
+                    "distractors": [r"\(18\)", r"\(20\)", r"\(21\)"],
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"\(19\)",
+                        "canonical_plain": "19",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["doubling_error", "rounding_error", "formula_error"],
+                        "source_subtopic": "Areas and volumes",
+                    },
+                },
+                distractor_count=3,
+                objective_text="Apply algebraic manipulation to solve geometric problems involving areas and volumes",
+                chunk_text="Use algebraic expressions to model areas and volumes in geometric contexts.",
+            )
+
     def test_pdf_import_outline_selection_prefers_chapter_depth_below_part_headings(self):
         items = _select_outline_items(
             [
@@ -2234,6 +3019,7 @@ class StandaloneFlowTests(TestCase):
                 "engagement_weight": 30,
                 "distractor_count": 3,
                 "numeric_ratio_percent": 25,
+                "math_symbolic_ratio_percent": 45,
                 "maq_ratio_percent": 35,
                 "waq_ratio_percent": 15,
                 "coding_question_ratio_percent": 50,
@@ -2246,6 +3032,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         course.config.refresh_from_db()
         self.assertEqual(course.config.numeric_ratio_percent, 25)
+        self.assertEqual(course.config.math_symbolic_ratio_percent, 45)
         self.assertEqual(course.config.maq_ratio_percent, 35)
         self.assertEqual(course.config.waq_ratio_percent, 15)
         self.assertEqual(course.config.coding_question_ratio_percent, 50)
@@ -2303,6 +3090,7 @@ class StandaloneFlowTests(TestCase):
         course.config.assistant_guidance = "Use concise code explanations."
         course.config.distractor_count = 4
         course.config.numeric_ratio_percent = 25
+        course.config.math_symbolic_ratio_percent = 30
         course.config.maq_ratio_percent = 35
         course.config.waq_ratio_percent = 15
         course.config.coding_question_ratio_percent = 45
@@ -2312,6 +3100,7 @@ class StandaloneFlowTests(TestCase):
                 "assistant_guidance",
                 "distractor_count",
                 "numeric_ratio_percent",
+                "math_symbolic_ratio_percent",
                 "maq_ratio_percent",
                 "waq_ratio_percent",
                 "coding_question_ratio_percent",
@@ -2330,6 +3119,7 @@ class StandaloneFlowTests(TestCase):
                 "assistant_guidance": "",
                 "distractor_count": "",
                 "numeric_ratio_percent": "",
+                "math_symbolic_ratio_percent": "",
                 "maq_ratio_percent": "",
                 "waq_ratio_percent": "",
                 "coding_question_ratio_percent": "",
@@ -2345,9 +3135,11 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(config.assistant_guidance, "")
         self.assertIsNone(config.distractor_count)
         self.assertIsNone(config.numeric_ratio_percent)
+        self.assertIsNone(config.math_symbolic_ratio_percent)
         self.assertEqual(block.question_assistant_guidance, "Use concise code explanations.")
         self.assertEqual(block.question_distractor_count, 4)
         self.assertEqual(block.question_numeric_ratio_percent, 25)
+        self.assertEqual(block.question_math_symbolic_ratio_percent, 30)
         self.assertEqual(block.question_maq_ratio_percent, 35)
         self.assertEqual(block.question_waq_ratio_percent, 15)
         self.assertEqual(block.question_coding_question_ratio_percent, 45)
@@ -2939,6 +3731,33 @@ class StandaloneFlowTests(TestCase):
         self.assertIn("Cells contain organelles", asset.extracted_text)
         course.refresh_from_db()
         self.assertTrue(course.summary)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_course_import_block_creation_applies_edexcel_math_guidance(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("maths.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="New Edexcel Pure Year 1.pdf",
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        chapter = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="12 Differentiation",
+            order=1,
+            start_page=255,
+            end_page=282,
+            extracted_text="12.1 Gradients of curves\n12.2 Finding the derivative\n12.3 Differentiating x^n",
+            preview_text="12.1 Gradients of curves",
+        )
+
+        run_course_import_block_creation(course_import.pk, [chapter.pk])
+
+        chapter.refresh_from_db()
+        config = chapter.created_block.config
+        self.assertIn("Edexcel Pure Year 1 / AS notation", config.assistant_guidance)
 
     def test_temp_media_root_supports_asset_and_course_import_path_processing(self):
         course = self.create_course()
@@ -5034,6 +5853,101 @@ class StandaloneFlowTests(TestCase):
         self.assertTrue(error)
         self.assertRegex(error.lower(), r"objective phrase|templated distractors|same opening word")
 
+    def test_question_quality_issue_rejects_math_mcq_missing_constant_of_integration(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Integration")
+        question = QuestionBankItem(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem=r"Which is an antiderivative of \(\,2x\,\)?",
+            correct_answer=r"\(x^2\)",
+            distractors=[r"\(2x^2\)", r"\(x\)", r"\(x^2 + 1\)"],
+            explanation="Integrate the power carefully.",
+            question_hash="math-quality-test",
+            math_metadata={
+                "answer_family": "antiderivative",
+                "canonical_tex": r"\(x^2\)",
+                "canonical_plain": "x^2",
+                "equivalence_mode": "sympy",
+                "equivalence_variables": ["x"],
+                "notation_profile": "edexcel_pure_y1",
+                "distractor_tags": ["multiplier_error", "derivative_confusion", "constant_example"],
+                "source_subtopic": "Indefinite integrals",
+            },
+        )
+
+        self.assertIn("+ C", question_quality_issue(question))
+
+    def test_question_quality_issue_rejects_math_mcq_with_explanation_backing_distractor(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Surds")
+        objective.text = "Simplify surds and apply rationalisation techniques to denominators"
+        question = QuestionBankItem(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem=r"Simplify the expression \(\frac{2}{\sqrt{3}} + \frac{3}{\sqrt{12}}\)?",
+            correct_answer=r"\(\frac{7}{3}\)",
+            distractors=[r"\(\frac{7\sqrt{3}}{6}\)", r"\(\frac{5}{3}\)", r"\(\frac{7\sqrt{3}}{3}\)"],
+            explanation=(
+                r"First, simplify \(\sqrt{12} = 2\sqrt{3}\), then combine the terms. "
+                r"Therefore, \(\frac{7\sqrt{3}}{6}\) is the simplified answer."
+            ),
+            question_hash="math-quality-distractor-test",
+            math_metadata={
+                "answer_family": "expression",
+                "canonical_tex": r"\(\frac{7}{3}\)",
+                "canonical_plain": "(7)/(3)",
+                "equivalence_mode": "sympy",
+                "equivalence_variables": ["x"],
+                "notation_profile": "edexcel_pure_y1",
+                "distractor_tags": ["rationalisation_error", "simplification_error", "denominator_misinterpretation"],
+                "source_subtopic": "Simplifying surds",
+            },
+        )
+
+        self.assertIn("concludes with a distractor", question_quality_issue(question))
+
+    def test_question_quality_issue_rejects_plural_intersection_stem_with_scalar_answers(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course, title="Simultaneous equations")
+        objective.text = "Use intersections of multiple curves to set up and solve simultaneous equations"
+        question = QuestionBankItem(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            stem=r"Given the two curves \(y = x^2 - 3x + 2\) and \(y = 2x - 1\), find the x-coordinates of their points of intersection?",
+            correct_answer="1",
+            distractors=["2", "-1", "3"],
+            explanation="Set the equations equal and solve the resulting quadratic.",
+            question_hash="math-quality-intersection-cardinality-test",
+            math_metadata={
+                "answer_family": "equation_solution",
+                "canonical_tex": "1",
+                "canonical_plain": "1",
+                "equivalence_mode": "literal",
+                "equivalence_variables": ["x"],
+                "notation_profile": "edexcel_pure_y1",
+                "distractor_tags": ["wrong_sign", "neglect_constant", "wrong_root_approximation1"],
+                "source_subtopic": "Use intersections of multiple curves to set up and solve simultaneous equations",
+            },
+        )
+
+        self.assertIn("actual curve intersection solution set", question_quality_issue(question))
+
     def test_option_balance_rejects_shared_distractor_opening_phrase(self):
         with self.assertRaisesMessage(
             ValueError,
@@ -5055,6 +5969,54 @@ class StandaloneFlowTests(TestCase):
                         "What limits gas exchange efficiency?",
                     ],
                     "explanation": "Diffusion moves gases down concentration gradients.",
+                    "difficulty": "core",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_normalize_generated_payload_rejects_curve_intersection_mcq_without_math_metadata(self):
+        with self.assertRaisesMessage(ValueError, "actual curve intersection solution set"):
+            _normalize_generated_payload(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Find the coordinates of the points of intersection between the curve \\(y = x^3 - 3x^2 - 4x\\) and the line \\(y = 6x\\).",
+                    "correct_answers": ["(3, 18), (-1, -6), (0, 0)"],
+                    "distractors": [
+                        "(4, 24), (1, 6), (0, 0)",
+                        "(4, 24), (-2, -12), (0, 0)",
+                        "(4, 24), (-1, -6), (0, 0)",
+                    ],
+                    "further_study_questions": [
+                        "How do you set the two equations equal?",
+                        "Why does the cubic have three real roots here?",
+                        "How do you recover the y-coordinates once x is known?",
+                    ],
+                    "explanation": "Set the equations equal, solve for x, then substitute back to get the coordinates.",
+                    "difficulty": "core",
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_normalize_generated_payload_rejects_explanation_that_invalidates_options(self):
+        with self.assertRaisesMessage(ValueError, "answer options are broken"):
+            _normalize_generated_payload(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Why is osmosis important in plant cells?",
+                    "correct_answers": ["It helps maintain turgor pressure in the cell."],
+                    "distractors": [
+                        "It causes photosynthesis to occur inside the cell wall.",
+                        "It creates ATP directly in the vacuole.",
+                        "It prevents all water movement across membranes.",
+                    ],
+                    "further_study_questions": [
+                        "How does osmosis differ from diffusion?",
+                        "What happens when plant cells lose turgor?",
+                        "Why does water potential matter here?",
+                    ],
+                    "explanation": "None of the options is correct.",
                     "difficulty": "core",
                 },
                 QuestionBankItem.QuestionType.MCQ,
@@ -5459,9 +6421,13 @@ print(result)
             output_text = json.dumps(
                 {
                     "question_type": QuestionBankItem.QuestionType.MCQ,
-                    "stem": "Which statement best explains how the R function logic and call site work together?",
-                    "correct_answers": ["The function filters values before taking the mean, and the printed result depends on that return value."],
-                    "distractors": ["The code loads an external file.", "The result is unrelated to the function body.", "The function is never used."],
+                    "stem": "Which statement best explains how this R function structure determines the program's printed behavior?",
+                    "correct_answers": ["The function filters positive values before returning the mean that the final print call displays."],
+                    "distractors": [
+                        "The function rewrites the original vector in place before the final print call displays that updated data.",
+                        "The function counts the positive values before the final print call displays that total as the result.",
+                        "The function sorts the vector alphabetically before the final print call displays the reordered values.",
+                    ],
                     "further_study_questions": [
                         "How would you adapt the function for missing values?",
                         "Why does the call site matter here?",
@@ -5551,6 +6517,141 @@ print(result)""",
         self.assertIn("Use Roman numerals directly", prompt)
         self.assertIn("Do not switch all examples back into Arabic numerals", prompt)
         self.assertIn("Example flagged question: Which Arabic numeral matches XIV?", prompt)
+
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_QUESTION_MODEL="gpt-4.1")
+    def test_standard_question_openai_request_uses_question_model_and_schema(self):
+        course = self.create_course()
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course)
+        captured_kwargs = []
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Why does selective transport matter for a cell membrane?",
+                    "correct_answers": ["It controls what enters and leaves the cell."],
+                    "distractors": [
+                        "It stores most of the cell's genetic code.",
+                        "It builds many of the cell's ribosomes.",
+                        "It repairs damaged DNA in the nucleus.",
+                    ],
+                    "further_study_questions": [
+                        "How does active transport differ from diffusion?",
+                        "What substances need selective transport most often?",
+                        "Why would a membrane fail without transport proteins?",
+                    ],
+                    "explanation": "Selective transport allows the membrane to control what enters and leaves the cell.",
+                    "difficulty": "core",
+                }
+            )
+
+        def fake_create(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return DummyResponse()
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            practice, _validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.MCQ)
+
+        self.assertIsNotNone(practice)
+        self.assertEqual(len(captured_kwargs), 1)
+        self.assertEqual(captured_kwargs[0]["model"], "gpt-4.1")
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["type"], "json_schema")
+        self.assertTrue(captured_kwargs[0]["text"]["format"]["strict"])
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["name"], "question_candidate")
+        self.assertEqual(
+            captured_kwargs[0]["text"]["format"]["schema"]["required"],
+            [
+                "question_type",
+                "stem",
+                "correct_answers",
+                "further_study_questions",
+                "explanation",
+                "difficulty",
+                "distractors",
+            ],
+        )
+
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_QUESTION_MODEL="gpt-4.1")
+    def test_coding_question_openai_request_uses_question_model_and_schema(self):
+        course = self.create_course()
+        course.config.coding_question_ratio_percent = 100
+        course.config.save(update_fields=["coding_question_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_coding_content_block(
+            course,
+            extension=".r",
+            text="""```r
+summarise_values <- function(values) {
+  cleaned <- values[values > 0]
+  mean(cleaned)
+}
+
+numbers <- c(4, -2, 8, 10)
+result <- summarise_values(numbers)
+print(result)
+```""",
+        )
+        captured_kwargs = []
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MCQ,
+                    "stem": "Which statement best explains how this function structure determines the program's output?",
+                    "correct_answers": ["The function filters positive values, computes a mean, and then returns the result that gets printed."],
+                    "distractors": [
+                        "The code loads a remote dataset, computes a mean, and then returns that downloaded result for printing.",
+                        "The function counts positive values, computes no mean, and then returns that count for printing.",
+                        "The function sorts the numeric vector, computes no mean, and then returns the reordered values for printing.",
+                    ],
+                    "further_study_questions": [
+                        "How would missing values change this example?",
+                        "Why does the call site matter here?",
+                        "What mistake should I avoid when tracing return values?",
+                    ],
+                    "explanation": "The function computes a value and the later lines depend on that return value.",
+                    "difficulty": "core",
+                    "is_coding_question": True,
+                    "coding_language": "r",
+                    "coding_question_kind": "comprehension",
+                    "code_snippet": """summarise_values <- function(values) {\n  cleaned <- values[values > 0]\n  mean(cleaned)\n}\n\nnumbers <- c(4, -2, 8, 10)\nresult <- summarise_values(numbers)\nprint(result)""",
+                }
+            )
+
+        def fake_create(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return DummyResponse()
+
+        with patch("standalone.services.questions.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            practice, _validation = generate_question_pair_for_block(
+                block,
+                question_type=QuestionBankItem.QuestionType.MCQ,
+                force_coding=True,
+            )
+
+        self.assertIsNotNone(practice)
+        self.assertEqual(len(captured_kwargs), 1)
+        self.assertEqual(captured_kwargs[0]["model"], "gpt-4.1")
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["name"], "coding_question_candidate")
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["type"], "json_schema")
+        self.assertTrue(captured_kwargs[0]["text"]["format"]["strict"])
+        self.assertEqual(
+            captured_kwargs[0]["text"]["format"]["schema"]["required"],
+            [
+                "question_type",
+                "stem",
+                "correct_answers",
+                "further_study_questions",
+                "explanation",
+                "difficulty",
+                "distractors",
+                "is_coding_question",
+                "coding_language",
+                "coding_question_kind",
+                "code_snippet",
+            ],
+        )
 
     def test_preview_filters_out_mismatched_coding_language_questions(self):
         course = self.create_course()
@@ -5839,6 +6940,97 @@ print(result)""",
                 "Determine distances to stars using stellar parallax"
             )
         )
+
+    def test_symbolic_math_objective_does_not_trigger_numeric_intent(self):
+        objective_text = "Solve equations involving powers and surds, expressing answers in simplified surd form"
+        chunk_text = "Solve equations with surds and simplify expressions to exact surd form."
+
+        self.assertFalse(objective_has_numeric_intent(objective_text))
+        self.assertFalse(supports_local_numeric_mcq(objective_text, chunk_text))
+
+    def test_contextual_numeric_math_objective_still_supports_numeric_mcq(self):
+        objective_text = "Calculate the volume of a cuboid from its dimensions"
+        chunk_text = "A cuboid has length, width, and height measured in centimetres."
+
+        self.assertTrue(objective_has_numeric_intent(objective_text))
+        self.assertTrue(supports_local_numeric_mcq(objective_text, chunk_text))
+
+    def test_physics_numeric_objective_is_unchanged_by_math_routing(self):
+        objective_text = "Calculate the resultant force acting on an object"
+        chunk_text = "A 3 kg mass accelerates at 2 m/s^2."
+
+        self.assertTrue(objective_has_numeric_intent(objective_text))
+        self.assertTrue(supports_local_numeric_mcq(objective_text, chunk_text))
+
+    def test_math_symbolic_ratio_can_prioritise_mcq_ahead_of_numeric(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.math_symbolic_ratio_percent = 100
+        course.config.save(update_fields=["numeric_ratio_percent", "math_symbolic_ratio_percent", "updated_at"])
+        block, _asset, _objective, _chunk = self.create_preview_content_block(course, title="Pure maths")
+
+        ranked = _ratio_gap_ranked_question_types(block, include_math_symbolic=True)
+
+        self.assertEqual(ranked[0], QuestionBankItem.QuestionType.MCQ)
+
+    def test_generate_question_pair_falls_back_from_numeric_to_math_mcq_for_symbolic_objective(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.math_symbolic_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "math_symbolic_ratio_percent", "updated_at"])
+        block, asset, objective, chunk = self.create_preview_content_block(course, title="Surds", order=1)
+        block.title = "Chapter 3 - Surds"
+        block.save(update_fields=["title", "updated_at"])
+        objective.text = "Solve equations involving powers and surds, expressing answers in simplified surd form"
+        objective.save(update_fields=["text", "updated_at"])
+        chunk.text = "Solve equations with surds and simplify exact algebraic expressions."
+        chunk.save(update_fields=["text", "updated_at"])
+        asset.original_filename = "New Edexcel Pure Year 1.pdf"
+        asset.extracted_text = chunk.text
+        asset.save(update_fields=["original_filename", "extracted_text", "updated_at"])
+
+        def fake_payload_for_generation_attempt(chunk_arg, objective_arg, distractor_count_arg, question_type_arg, **_kwargs):
+            self.assertEqual(question_type_arg, QuestionBankItem.QuestionType.MCQ)
+            return (
+                {
+                    "question_type": "mcq",
+                    "stem": r"Which option gives the simplified form of \(\sqrt{18}\)?",
+                    "correct_answers": [r"\(3\sqrt{2}\)"],
+                    "distractors": [
+                        r"\(2\sqrt{2}\)",
+                        r"\(3\sqrt{3}\)",
+                        r"\(9\sqrt{2}\)",
+                    ],
+                    "further_study_questions": [
+                        "How can you identify square factors inside a surd?",
+                        r"Why is \(\sqrt{ab}\) useful when simplifying surds?",
+                        "How can you check whether a surd is fully simplified?",
+                    ],
+                    "explanation": "Factor out the largest square number from inside the surd.",
+                    "difficulty": "core",
+                    "math_metadata": {
+                        "answer_family": "expression",
+                        "canonical_tex": r"\(3\sqrt{2}\)",
+                        "canonical_plain": "3 sqrt(2)",
+                        "equivalence_mode": "sympy",
+                        "equivalence_variables": ["x"],
+                        "notation_profile": "edexcel_pure_y1",
+                        "distractor_tags": ["unsimplified_surd", "square_factor_error", "multiplier_error"],
+                        "source_subtopic": objective_arg.text,
+                    },
+                },
+                QuestionBankItem.QuestionType.MCQ,
+                "",
+            )
+
+        with patch("standalone.services.questions._attempt_numeric_generation_for_chunk", side_effect=AssertionError("numeric path should be skipped")):
+            with patch("standalone.services.questions._payload_for_generation_attempt", side_effect=fake_payload_for_generation_attempt):
+                practice, validation = generate_question_pair_for_block(block, question_type=QuestionBankItem.QuestionType.NUM)
+
+        self.assertIsNotNone(practice)
+        self.assertIsNotNone(validation)
+        self.assertEqual(practice.question_type, QuestionBankItem.QuestionType.MCQ)
+        self.assertTrue(practice.math_metadata)
 
     def test_generate_question_pair_falls_back_from_numeric_for_conceptual_strict_objective(self):
         course = self.create_course()
@@ -6584,6 +7776,61 @@ print(result)""",
         self.assertIn("acceleration", practice.stem.lower())
         self.assertEqual(mock_client.return_value.responses.create.call_count, 4)
 
+    def test_numeric_recent_angle_allows_same_formula_with_different_context(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        objective.text = "Apply quadratic models to solve real-world problems including projectile motion, revenue optimization, and contextual scenarios"
+        objective.save(update_fields=["text"])
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="A rectangular garden is fenced on three sides. What is the maximum possible area?",
+            question_type=QuestionBankItem.QuestionType.NUM,
+            correct_answer="400 m^2",
+            distractors=["390 m^2", "410 m^2", "420 m^2"],
+            explanation="Use a quadratic area model.",
+            question_hash="quadratic-garden-angle",
+            is_numerical=True,
+            numeric_metadata={
+                "output_snapshot": {
+                    "formula_tex": r"-x^2 + 20x",
+                }
+            },
+        )
+
+        repeats = _numeric_question_repeats_recent_angle(
+            block=block,
+            objective=objective,
+            stem="A ball is thrown vertically upward from the ground. How long does it take to return to the ground?",
+            correct_answer="4.1 s",
+            numeric_metadata={
+                "output_snapshot": {
+                    "formula_tex": r"-x^2 + 20x",
+                }
+            },
+        )
+
+        self.assertFalse(repeats)
+
+    def test_objective_alignment_accepts_numeric_question_supported_by_chunk_context(self):
+        objective = LearningObjective(
+            text="Apply quadratic models to solve real-world problems including projectile motion, revenue optimization, and contextual scenarios"
+        )
+
+        error = _objective_alignment_error(
+            stem="A ball is thrown vertically upward from the ground with an initial velocity of 20 m/s. How long does it take to return to the ground?",
+            correct_answers=["4.1 s"],
+            explanation="Solve the height model when the ball returns to ground level.",
+            objective=objective,
+            chunk_text="Projectile motion can be modelled with a quadratic height equation. Set the height equal to zero to find when the object returns to the ground.",
+        )
+
+        self.assertEqual(error, "")
+
     @override_settings(OPENAI_API_KEY="test-key")
     def test_generate_question_pair_does_not_accept_exact_duplicate_when_numeric_fallback_enabled(self):
         course = self.create_course()
@@ -7189,7 +8436,7 @@ print(result)""",
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["preview_state"]["collections"], [])
 
-    @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-5.5")
+    @override_settings(OPENAI_API_KEY="test-key", OPENAI_NUMERIC_FEEDBACK_REGEN_MODEL="gpt-4.1")
     def test_student_practice_can_regenerate_numeric_feedback_and_persist_override(self):
         course = self.create_course()
         enrollment = Enrollment.objects.create(course=course, student=self.student)
@@ -7276,7 +8523,7 @@ print(result)""",
                             "\n\n"
                             r"\[v = \frac{20}{4} = 5\]"
                             "\n\n"
-                            r"\[v \approx 5\,\mathrm{m/s}\]"
+                            r"\[v = 5\,\mathrm{m/s}\]"
                             "\n\n"
                             "So the exact option to choose is 5 m/s."
                         ),
@@ -15037,6 +16284,44 @@ print(result)""",
         access.refresh_from_db()
 
         self.assertEqual(access.updated_at, initial_updated_at)
+
+    def test_public_demo_practice_reset_clears_shared_state(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Resettable demo question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="demo-reset-question",
+        )
+
+        self.client.post(reverse("standalone:demo_practice_action", args=[access.token, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:demo_practice_action", args=[access.token, block.pk, "answer"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        reset_response = self.client.post(
+            reverse("standalone:demo_practice_action", args=[access.token, block.pk, "reset"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(reset_response.status_code, 200)
+        access.refresh_from_db()
+        self.assertEqual(access.shared_practice_state.get("answers", {}), {})
+        block_payload = next(item for item in reset_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        self.assertFalse(any(message["kind"] == "question" for message in block_payload["transcript"]))
 
     def test_public_demo_practice_page_view_increments_access_count(self):
         course = self.create_course()

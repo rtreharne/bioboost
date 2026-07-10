@@ -128,6 +128,7 @@ class CourseConfig(TimeStampedModel):
     )
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
     numeric_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    math_symbolic_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
     waq_ratio_percent = models.PositiveSmallIntegerField(default=10, validators=[MinValueValidator(0), MaxValueValidator(100)])
     coding_question_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -357,6 +358,10 @@ class CourseBlock(TimeStampedModel):
         return self._resolved_numeric_override("numeric_ratio_percent", "numeric_ratio_percent")
 
     @property
+    def question_math_symbolic_ratio_percent(self) -> int:
+        return self._resolved_numeric_override("math_symbolic_ratio_percent", "math_symbolic_ratio_percent")
+
+    @property
     def question_maq_ratio_percent(self) -> int:
         return self._resolved_numeric_override("maq_ratio_percent", "maq_ratio_percent")
 
@@ -419,6 +424,11 @@ class BlockConfig(TimeStampedModel):
         validators=[MinValueValidator(1), MaxValueValidator(5)],
     )
     numeric_ratio_percent = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    math_symbolic_ratio_percent = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
@@ -663,6 +673,7 @@ class QuestionBankItem(TimeStampedModel):
     question_hash = models.CharField(max_length=64, db_index=True)
     is_numerical = models.BooleanField(default=False)
     numeric_metadata = models.JSONField(default=dict, blank=True)
+    math_metadata = models.JSONField(default=dict, blank=True)
     is_coding_question = models.BooleanField(default=False)
     coding_language = models.CharField(max_length=50, blank=True)
     coding_question_kind = models.CharField(max_length=30, choices=CodingQuestionKind.choices, blank=True)
@@ -687,6 +698,8 @@ class QuestionBankItem(TimeStampedModel):
         self.is_numerical = self.question_type == self.QuestionType.NUM
         if not self.is_numerical and self.numeric_metadata:
             self.numeric_metadata = {}
+        if (self.question_type != self.QuestionType.MCQ or self.is_numerical) and self.math_metadata:
+            self.math_metadata = {}
         super().save(*args, **kwargs)
 
     def correct_answers(self) -> list[str]:

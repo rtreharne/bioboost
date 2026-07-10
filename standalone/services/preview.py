@@ -22,6 +22,7 @@ from standalone.models import (
     QuestionBankItem,
 )
 from standalone.services.guidance import build_chat_guidance_prompt, merge_assistant_guidance, sanitize_assistant_guidance
+from standalone.services.math_questions import math_options_equivalent
 from standalone.services.practice_scoring import (
     combine_block_practice_metrics,
     engagement_release_date,
@@ -1798,7 +1799,7 @@ def _draft_written_answer_alignment(question: QuestionBankItem, block: CourseBlo
 
 
 def _fallback_written_answer_feedback(question: QuestionBankItem, alignment: dict) -> str:
-    explanation = normalize_explanation_text(question.explanation)
+    explanation = normalize_explanation_text(question.explanation, math_metadata=question.math_metadata)
     if alignment["alignment_ratio"] >= WAQ_ALIGNMENT_THRESHOLD:
         if explanation:
             return f"Correct. {explanation}"
@@ -1824,7 +1825,7 @@ def _grade_written_answer_response(question: QuestionBankItem, block: CourseBloc
             }
             is_correct = bool(judged["aligned"]) or judged_score >= WAQ_ALIGNMENT_THRESHOLD
             if is_correct:
-                explanation = normalize_explanation_text(question.explanation)
+                explanation = normalize_explanation_text(question.explanation, math_metadata=question.math_metadata)
                 feedback = f"Correct. {explanation}" if explanation else "Correct."
             else:
                 reason = judged["feedback"] or "Try to be more specific."
@@ -1840,6 +1841,19 @@ def _grade_written_answer_response(question: QuestionBankItem, block: CourseBloc
 def _grade_question_response(question: QuestionBankItem, selected_answers) -> tuple[bool, list[str], list[str]]:
     submitted_answers = _normalize_submitted_answers(selected_answers)
     correct_answers = question.correct_answers()
+    metadata = question.math_metadata if isinstance(getattr(question, "math_metadata", None), dict) else {}
+    if metadata:
+        missing_answers = [
+            answer
+            for answer in correct_answers
+            if not any(math_options_equivalent(answer, submitted, metadata) for submitted in submitted_answers)
+        ]
+        extra_answers = [
+            submitted
+            for submitted in submitted_answers
+            if not any(math_options_equivalent(submitted, answer, metadata) for answer in correct_answers)
+        ]
+        return not missing_answers and not extra_answers, missing_answers, extra_answers
     missing_answers = [answer for answer in correct_answers if answer not in submitted_answers]
     extra_answers = [answer for answer in submitted_answers if answer not in correct_answers]
     return not missing_answers and not extra_answers, missing_answers, extra_answers
@@ -1866,7 +1880,7 @@ def _feedback_text(question: QuestionBankItem, selected_answers, is_correct: boo
             chunk_text=getattr(question.source_chunk, "text", ""),
             objective_symbol_heuristics=getattr(question.learning_objective, "symbol_heuristics", {}),
         )
-    explanation = normalize_explanation_text(question.explanation)
+    explanation = normalize_explanation_text(question.explanation, math_metadata=question.math_metadata)
     if question.is_multiple_answer():
         if is_correct:
             return "Correct."
@@ -3411,6 +3425,7 @@ def serialize_preview_state(
             {
                 "id": block.pk,
                 "title": block.title,
+                "created_at": block.created_at.isoformat(),
                 "summary": block.summary or "No summary yet.",
                 "avatar_url": (block.avatar_file.url if block.avatar_file else ""),
                 "learning_objectives": [
@@ -3449,6 +3464,7 @@ def serialize_preview_state(
             {
                 "id": collection.pk,
                 "title": collection.title,
+                "created_at": collection.created_at.isoformat(),
                 "block_ids": [block.pk for block in collection_blocks],
                 "anchor_block_id": collection_blocks[0].pk,
                 "available_manual_question_types": sorted(

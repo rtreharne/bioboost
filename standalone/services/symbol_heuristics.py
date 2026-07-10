@@ -6,6 +6,8 @@ from typing import Any
 from django.conf import settings
 from openai import OpenAI
 
+from standalone.services.math_questions import math_symbol_heuristics
+
 
 _MAX_HINTS = 8
 _GREEK_PLAIN_TO_TEX = {
@@ -184,6 +186,15 @@ def normalize_objective_symbol_heuristics(payload: dict | None) -> dict:
     answer_symbol = answer_symbol_match.group(0) if answer_symbol_match else ""
     answer_description = str(payload.get("answer_description", "") or "").strip()
     source = str(payload.get("source", "") or "").strip()
+    topic_family = str(payload.get("topic_family", "") or "").strip()
+    preferred_notation = str(payload.get("preferred_notation", "") or "").strip()
+    angle_mode = str(payload.get("angle_mode", "") or "").strip()
+    requires_constant_of_integration = bool(payload.get("requires_constant_of_integration"))
+    preferred_variables = [
+        str(variable).strip()
+        for variable in payload.get("preferred_variables", [])
+        if str(variable).strip()
+    ][:4]
 
     variable_hints = []
     for item in payload.get("variable_hints", []) if isinstance(payload.get("variable_hints"), list) else []:
@@ -230,6 +241,11 @@ def normalize_objective_symbol_heuristics(payload: dict | None) -> dict:
         "answer_description": answer_description,
         "variable_hints": variable_hints[:_MAX_HINTS],
         "constant_hints": constant_hints[:_MAX_HINTS],
+        "topic_family": topic_family,
+        "preferred_variables": preferred_variables,
+        "preferred_notation": preferred_notation,
+        "angle_mode": angle_mode,
+        "requires_constant_of_integration": requires_constant_of_integration,
         "source": source,
     }
 
@@ -240,6 +256,7 @@ def _heuristic_keywords_score(pattern: dict, context: str) -> int:
 
 def _deterministic_symbol_heuristics(objective_text: str, context_text: str) -> dict:
     context = " ".join(part for part in (objective_text, context_text) if part).lower()
+    math_heuristics = math_symbol_heuristics(objective_text, context_text)
     best_pattern = None
     best_score = 0
     for pattern in _PHYSICS_HEURISTIC_PATTERNS:
@@ -248,8 +265,9 @@ def _deterministic_symbol_heuristics(objective_text: str, context_text: str) -> 
             best_pattern = pattern
             best_score = score
     if best_pattern is None or best_score < 2:
-        return {}
+        return normalize_objective_symbol_heuristics(math_heuristics)
     heuristics = dict(best_pattern["heuristics"])
+    heuristics.update({key: value for key, value in math_heuristics.items() if value not in ("", [], {}, None, False)})
     heuristics["source"] = "deterministic"
     return normalize_objective_symbol_heuristics(heuristics)
 
@@ -301,6 +319,15 @@ _OPENAI_HEURISTICS_SCHEMA = {
                             "required": ["symbol", "description", "approx_value"],
                         },
                     },
+                    "topic_family": {"type": "string"},
+                    "preferred_notation": {"type": "string"},
+                    "angle_mode": {"type": "string"},
+                    "requires_constant_of_integration": {"type": "boolean"},
+                    "preferred_variables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 4,
+                    },
                 },
                 "required": [
                     "objective_text",
@@ -308,6 +335,11 @@ _OPENAI_HEURISTICS_SCHEMA = {
                     "answer_description",
                     "variable_hints",
                     "constant_hints",
+                    "topic_family",
+                    "preferred_notation",
+                    "angle_mode",
+                    "requires_constant_of_integration",
+                    "preferred_variables",
                 ],
             },
         }
@@ -362,6 +394,11 @@ Teaching material context:
                 "answer_description": item.get("answer_description", ""),
                 "variable_hints": item.get("variable_hints", []),
                 "constant_hints": item.get("constant_hints", []),
+                "topic_family": item.get("topic_family", ""),
+                "preferred_variables": item.get("preferred_variables", []),
+                "preferred_notation": item.get("preferred_notation", ""),
+                "angle_mode": item.get("angle_mode", ""),
+                "requires_constant_of_integration": item.get("requires_constant_of_integration", False),
                 "source": "openai",
             }
         )

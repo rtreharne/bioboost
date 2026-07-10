@@ -35,6 +35,8 @@ SCIENTIFIC_NOTATION_RE = re.compile(r"(?<![\w.])([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s
 CARET_EXPONENT_RE = re.compile(r"\^([+-]?\d+)")
 LATEX_FRACTION_RE = re.compile(r"(?:\\?frac|rac)\{([^{}]+)\}\{([^{}]+)\}")
 LATEX_INLINE_RE = re.compile(r"\$([^$]+)\$")
+LATEX_PAREN_INLINE_RE = re.compile(r"\\\((.*?)\\\)")
+LATEX_BRACKET_INLINE_RE = re.compile(r"\\\[(.*?)\\\]")
 SUBSCRIPT_RE = re.compile(r"_([A-Za-z0-9+-])")
 SUBSCRIPT_MAP = {
     "0": "₀",
@@ -104,10 +106,21 @@ def _format_latexish_text(text: str) -> str:
             break
         formatted = updated
     formatted = LATEX_INLINE_RE.sub(r"\1", formatted)
+    formatted = LATEX_PAREN_INLINE_RE.sub(r"\1", formatted)
+    formatted = LATEX_BRACKET_INLINE_RE.sub(r"\1", formatted)
     replacements = {
         r"\times": "×",
         r"\cdot": "·",
         r"\propto": "∝",
+        r"\cup": "∪",
+        r"\cap": "∩",
+        r"\leq": "≤",
+        r"\le": "≤",
+        r"\geq": "≥",
+        r"\ge": "≥",
+        r"\neq": "≠",
+        r"\ne": "≠",
+        r"\infty": "∞",
         r"\left": "",
         r"\right": "",
         r"\,": " ",

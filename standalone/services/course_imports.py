@@ -17,6 +17,8 @@ from django.utils.text import slugify
 
 from standalone.models import BlockConfig, ContentAsset, CourseImport, CourseImportChapter, CourseBlock
 from standalone.services.content import refresh_course_summary_from_blocks
+from standalone.services.guidance import merge_assistant_guidance
+from standalone.services.math_questions import edexcel_pure_math_guidance, looks_like_edexcel_pure_math_source
 from standalone.services.pdf_import import analyze_pdf_chapters, extract_pdf_page_range
 
 
@@ -390,7 +392,18 @@ def _create_or_reuse_import_block(course_import: CourseImport, chapter: CourseIm
         regeneration_progress=5,
         regeneration_error="",
     )
-    BlockConfig.objects.get_or_create(block=block)
+    config, _ = BlockConfig.objects.get_or_create(block=block)
+    if looks_like_edexcel_pure_math_source(
+        course_import.original_filename,
+        chapter.title,
+        chapter.preview_text,
+        chapter.extracted_text,
+    ):
+        desired_guidance = edexcel_pure_math_guidance()
+        merged_guidance = merge_assistant_guidance(config.assistant_guidance, desired_guidance)
+        if merged_guidance != config.assistant_guidance:
+            config.assistant_guidance = merged_guidance
+            config.save(update_fields=["assistant_guidance", "updated_at"])
     chapter.created_block = block
     chapter.save(update_fields=["created_block", "updated_at"])
     return block

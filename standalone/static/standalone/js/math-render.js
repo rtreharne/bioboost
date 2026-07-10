@@ -65,6 +65,11 @@
     exp: "\\exp",
     abs: "\\operatorname{abs}",
   };
+  const inlineMathUnitTokenSource = String.raw`(?:kg|mg|g|km|cm|mm|m|ms|s|h|kHz|MHz|GHz|Hz|kN|N|kJ|J|kW|W|mV|V|mA|A|ohm|MPa|kPa|Pa|mol|GeV|MeV|keV|eV|°C|K|%)`;
+  const inlineMathUnitExpressionPattern = new RegExp(
+    String.raw`(^|[^A-Za-z0-9_\\])(?<number>[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s*(?:[eE]\s*[-+]?\d+|\\times\s*10\^\{?[-+]?\d+\}?))?)(?<separator>\s*)(?<unit>${inlineMathUnitTokenSource}(?:\^[+\-−]?\d+)?(?:\s*(?:\/|\\cdot)\s*${inlineMathUnitTokenSource}(?:\^[+\-−]?\d+)?)*)`,
+    "g",
+  );
   const excelFormulaBoundaryWords = new Set([
     "after",
     "as",
@@ -94,6 +99,15 @@
     "while",
     "why",
     "with",
+  ]);
+  const inlineEquationBoundaryWords = new Set([
+    ...excelFormulaBoundaryWords,
+    "and",
+    "at",
+    "between",
+    "but",
+    "of",
+    "or",
   ]);
 
   function hasKatexRenderer() {
@@ -326,6 +340,44 @@
     );
   }
 
+  function normalizeMathUnitBody(unitText) {
+    let normalized = decodeLiteralUnicodeEscapes(String(unitText || "")).replace(/\\ /g, " ");
+    normalized = normalized.replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return "";
+    }
+    normalized = normalized.replace(/\s*[·*]\s*/g, "\\cdot");
+    normalized = normalized.replace(/(?<=[A-Za-zΩµμ])\.(?=[A-Za-zΩµμ])/g, "\\cdot");
+    normalized = normalized.replace(/\s*\\cdot\s*/g, "\\cdot");
+    normalized = normalized.replace(/°\s*([A-Za-zΩµμ%])/g, "{}^{\\circ}$1");
+    normalized = normalized.replace(/°/g, "{}^{\\circ}");
+    normalized = normalized.replace(/\{\}\^\{\\circ\}\s+([A-Za-zΩµμ%])/g, "{}^{\\circ}$1");
+    return normalized.replace(/ /g, "\\ ");
+  }
+
+  function wrapNumericUnitsInMath(text) {
+    return String(text || "").replace(
+      inlineMathUnitExpressionPattern,
+      (match, prefix, _legacyNumber, _legacySeparator, _legacyUnit, ...rest) => {
+        const maybeGroups = rest[rest.length - 1];
+        const number = maybeGroups && maybeGroups.number ? maybeGroups.number : _legacyNumber;
+        const separator = maybeGroups && Object.prototype.hasOwnProperty.call(maybeGroups, "separator")
+          ? maybeGroups.separator
+          : _legacySeparator;
+        const unit = maybeGroups && maybeGroups.unit ? maybeGroups.unit : _legacyUnit;
+        if (!number || !unit) {
+          return match;
+        }
+        const compactUnit = String(unit || "").replace(/\s+/g, "");
+        const compoundUnit = /[\/%^°]|\\cdot|\^|[A-Za-z]{2,}/.test(compactUnit);
+        if (!separator && !compoundUnit) {
+          return match;
+        }
+        return `${prefix}${number}\\,\\mathrm{${normalizeMathUnitBody(unit)}}`;
+      },
+    );
+  }
+
   function normalizeEquationExpression(expression) {
     const source = String(expression || "");
     const equalsIndex = source.indexOf("=");
@@ -350,19 +402,65 @@
     return `${left} = ${right}`.trim();
   }
 
+  function findInlineEquationBoundaryIndex(expression) {
+    const source = String(expression || "");
+    const equalsIndex = source.indexOf("=");
+    if (equalsIndex < 0) {
+      return -1;
+    }
+
+    let parenDepth = 0;
+    for (let index = equalsIndex + 1; index < source.length; index += 1) {
+      const character = source[index];
+      if (character === "(") {
+        parenDepth += 1;
+        continue;
+      }
+      if (character === ")" && parenDepth > 0) {
+        parenDepth -= 1;
+        continue;
+      }
+      if (parenDepth !== 0 || !/\s/.test(character)) {
+        continue;
+      }
+
+      const boundaryMatch = /^(\s+)([A-Za-z][A-Za-z-]*)\b/.exec(source.slice(index));
+      if (!boundaryMatch) {
+        continue;
+      }
+
+      if (!inlineEquationBoundaryWords.has(boundaryMatch[2].toLowerCase())) {
+        continue;
+      }
+
+      return index;
+    }
+
+    return -1;
+  }
+
   function splitEquationExpression(expression) {
     const source = String(expression || "");
     const proseTailPattern = /,\s*(?=(?:calculate|determine|estimate|find|compute|work out|show|state|identify|explain|what|which|how|when|where|why)\b)/i;
     const match = proseTailPattern.exec(source);
-    if (!match || match.index < 0) {
+    if (match && match.index >= 0) {
       return {
-        equationText: source,
-        trailingText: "",
+        equationText: source.slice(0, match.index).trimEnd(),
+        trailingText: source.slice(match.index),
       };
     }
+
+    const boundaryIndex = findInlineEquationBoundaryIndex(source);
+    if (boundaryIndex >= 0) {
+      return {
+        equationText: source.slice(0, boundaryIndex).trimEnd(),
+        trailingText: source.slice(boundaryIndex),
+      };
+    }
+
     return {
-      equationText: source.slice(0, match.index).trimEnd(),
-      trailingText: source.slice(match.index),
+      equationText: source,
+      trailingText: "",
     };
   }
 
@@ -396,6 +494,7 @@
 
     normalized = replaceBarePiInMath(normalized);
     normalized = normalizeScientificNotationMath(normalized);
+    normalized = wrapNumericUnitsInMath(normalized);
     return normalized;
   }
 
@@ -630,6 +729,7 @@
       .replace(/\s*\/\s*/g, " / ")
       .replace(/\s+/g, " ")
       .trim();
+    normalized = wrapNumericUnitsInMath(normalized);
     return normalized;
   }
 
@@ -744,6 +844,9 @@
         if (splitExpression.trailingText) {
           appendTextWithScientificNotation(target, normalizeEquationTrailingText(splitExpression.trailingText));
         }
+      } else if (splitExpression.trailingText) {
+        appendTextWithScientificNotation(target, splitExpression.equationText);
+        appendTextWithScientificNotation(target, normalizeEquationTrailingText(splitExpression.trailingText));
       } else {
         appendTextWithScientificNotation(target, rawExpression);
       }
