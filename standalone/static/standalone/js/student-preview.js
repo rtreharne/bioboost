@@ -1188,6 +1188,23 @@ if (previewRoot && previewDataNode) {
     return `${formatCalculatorValue(mantissa)} × 10${calculatorSuperscriptText(exponent)}`;
   }
 
+  function shouldUseCalculatorStandardForm(value) {
+    if (!Number.isFinite(value)) {
+      return false;
+    }
+    const rounded = Math.abs(roundCalculatorValue(value));
+    if (rounded === 0) {
+      return false;
+    }
+    return rounded <= 1e-4 || rounded >= 1e4;
+  }
+
+  function formatCalculatorResult(value) {
+    return shouldUseCalculatorStandardForm(value)
+      ? formatCalculatorStandardForm(value)
+      : formatCalculatorValue(value);
+  }
+
   function calculatorNeedsImplicitMultiply(tokens, nextType) {
     if (!tokens.length) {
       return false;
@@ -1489,16 +1506,40 @@ if (previewRoot && previewDataNode) {
       return value;
     }
 
-    function parseTerm() {
+    function nextTokensMatchScientificNotation() {
+      const multiplyToken = currentToken();
+      const tenToken = parsedTokens[index + 1] || null;
+      const powerToken = parsedTokens[index + 2] || null;
+      return (
+        multiplyToken?.type === "symbol"
+        && multiplyToken.value === "*"
+        && tenToken?.type === "number"
+        && tenToken.value === "10"
+        && powerToken?.type === "symbol"
+        && powerToken.value === "^"
+      );
+    }
+
+    function parseScientificFactor() {
       let value = parsePower();
+      while (nextTokensMatchScientificNotation()) {
+        index += 2;
+        expectSymbol("^");
+        value *= 10 ** parsePower();
+      }
+      return value;
+    }
+
+    function parseTerm() {
+      let value = parseScientificFactor();
       while (true) {
         if (consumeSymbol("*")) {
-          value *= parsePower();
+          value *= parseScientificFactor();
           continue;
         }
         if (consumeSymbol("/")) {
-          const divisor = parsePower();
-          if (Math.abs(divisor) < 1e-12) {
+          const divisor = parseScientificFactor();
+          if (divisor === 0) {
             throw new Error("Cannot divide by zero");
           }
           value /= divisor;
@@ -1637,10 +1678,10 @@ if (previewRoot && previewDataNode) {
     try {
       const answer = evaluateCalculatorExpression(state.tokens, calculatorThreadAnswer(threadId));
       state.lastComputedValue = answer;
-      state.resultText = formatCalculatorStandardForm(answer);
+      state.resultText = formatCalculatorResult(answer);
       state.error = "";
       state.justEvaluated = true;
-      state.standardFormActive = true;
+      state.standardFormActive = shouldUseCalculatorStandardForm(answer);
       state.tokens = [calculatorPlainString(answer)];
       setCalculatorThreadAnswer(threadId, answer);
     } catch (error) {

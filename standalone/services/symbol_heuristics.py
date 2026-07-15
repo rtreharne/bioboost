@@ -22,7 +22,22 @@ _SUBSCRIPT_PLAIN_TO_TEX = {
     "N₀": r"N_0",
     "t₁/₂": r"t_{1/2}",
 }
-_SYMBOL_TOKEN_PATTERN = re.compile(r"(?:[A-Za-z]|[λρδθφ])(?:[₀₁₂]|₁/₂)?")
+_SYMBOL_TOKEN_PATTERN = re.compile(
+    r"(?:[A-Za-z]|[λρδθφ])(?:_(?:\d+|\{1/2\}|k)|[₀₁₂₃₄₅₆₇₈₉ₖ]|₁/₂)?"
+)
+_UNICODE_SUBSCRIPT_TO_ASCII = str.maketrans({
+    "₀": "0",
+    "₁": "1",
+    "₂": "2",
+    "₃": "3",
+    "₄": "4",
+    "₅": "5",
+    "₆": "6",
+    "₇": "7",
+    "₈": "8",
+    "₉": "9",
+    "ₖ": "k",
+})
 _PHYSICS_HEURISTIC_PATTERNS = (
     {
         "id": "photon_energy",
@@ -170,10 +185,21 @@ def symbol_plain_to_tex(symbol: str) -> str:
     cleaned = str(symbol or "").strip()
     if not cleaned:
         return ""
+    if re.fullmatch(r"(?:[A-Za-z]|[λρδθφ])_(?:\d+|\{1/2\}|k)", cleaned):
+        base, suffix = cleaned.split("_", 1)
+        base = _GREEK_PLAIN_TO_TEX.get(base, base)
+        return f"{base}_{suffix}"
     if cleaned in _GREEK_PLAIN_TO_TEX:
         return _GREEK_PLAIN_TO_TEX[cleaned]
     if cleaned in _SUBSCRIPT_PLAIN_TO_TEX:
         return _SUBSCRIPT_PLAIN_TO_TEX[cleaned]
+    unicode_subscript_match = re.fullmatch(r"([A-Za-z]|[λρδθφ])([₀₁₂₃₄₅₆₇₈₉ₖ]+|₁/₂)", cleaned)
+    if unicode_subscript_match:
+        base, suffix = unicode_subscript_match.groups()
+        base = _GREEK_PLAIN_TO_TEX.get(base, base)
+        if suffix == "₁/₂":
+            return f"{base}_{{1/2}}"
+        return f"{base}_{suffix.translate(_UNICODE_SUBSCRIPT_TO_ASCII)}"
     return cleaned
 
 
@@ -183,7 +209,7 @@ def normalize_objective_symbol_heuristics(payload: dict | None) -> dict:
 
     answer_symbol_raw = str(payload.get("answer_symbol", "") or "").strip()
     answer_symbol_match = _SYMBOL_TOKEN_PATTERN.search(answer_symbol_raw)
-    answer_symbol = answer_symbol_match.group(0) if answer_symbol_match else ""
+    answer_symbol = symbol_plain_to_tex(answer_symbol_match.group(0) if answer_symbol_match else answer_symbol_raw)
     answer_description = str(payload.get("answer_description", "") or "").strip()
     source = str(payload.get("source", "") or "").strip()
     topic_family = str(payload.get("topic_family", "") or "").strip()

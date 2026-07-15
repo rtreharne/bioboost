@@ -19,6 +19,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         once = bool(options.get("once"))
+        if not bool(getattr(settings, "QUESTION_BANK_BUILDER_LOOP_ENABLED", False)):
+            self.stdout.write("question-bank-builder loop is disabled by configuration")
+            return
         poll_seconds = max(5, int(settings.QUESTION_BANK_BUILDER_POLL_SECONDS or 60))
 
         while True:

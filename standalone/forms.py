@@ -189,7 +189,7 @@ class CourseTitleInlineForm(forms.ModelForm):
 class CourseImportUploadForm(forms.ModelForm):
     class Meta:
         model = CourseImport
-        fields = ["source_file"]
+        fields = ["source_file", "use_structured_maths_generation"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -211,6 +211,11 @@ class CourseImportUploadForm(forms.ModelForm):
                 "data-max-file-size-label": f"{max_size_mb} MB" if max_size_mb > 0 else "",
             }
         )
+        self.fields["use_structured_maths_generation"].label = "Use structured maths generation for this upload"
+        self.fields["use_structured_maths_generation"].help_text = (
+            "Opt in only for maths PDFs. Maths objectives from this import will use validated deterministic generators "
+            "and unsupported objectives will be blocked instead of falling back to the legacy maths path."
+        )
 
     def clean_source_file(self):
         uploaded_file = self.cleaned_data["source_file"]
@@ -229,6 +234,7 @@ class CourseImportUploadForm(forms.ModelForm):
         course_import.course = course
         course_import.uploaded_by = uploaded_by
         course_import.original_filename = self.cleaned_data["source_file"].name
+        course_import.use_structured_maths_generation = bool(self.cleaned_data.get("use_structured_maths_generation"))
         if commit:
             course_import.save()
         return course_import

@@ -322,6 +322,8 @@ def math_symbol_heuristics(objective_text: str, context_text: str = "") -> dict[
 
 def _looks_like_curve_intersection_context(text: str) -> bool:
     lowered = str(text or "").lower()
+    if _looks_like_axis_intercept_transformation_context(lowered):
+        return False
     return "intersection" in lowered and any(
         term in lowered
         for term in (
@@ -336,6 +338,14 @@ def _looks_like_curve_intersection_context(text: str) -> bool:
             "points of intersection",
         )
     )
+
+
+def _looks_like_axis_intercept_transformation_context(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_axis_signal = any(term in lowered for term in ("axis", "axes", "x-intercept", "y-intercept", "intercept"))
+    has_graph_signal = any(term in lowered for term in ("graph", "curve", "function"))
+    has_transform_signal = any(term in lowered for term in ("transform", "translation", "translated", "shift", "reflection", "stretch"))
+    return has_axis_signal and has_graph_signal and has_transform_signal
 
 
 def _parse_json_object(raw_output: str) -> dict[str, Any]:
@@ -806,6 +816,49 @@ def _local_turning_point_mcq_payload(
     return _local_template_payload(template, source_subtopic=source_subtopic, distractor_count=distractor_count)
 
 
+def _local_axis_intercepts_transformation_mcq_payload(
+    objective_text: str,
+    chunk_text: str,
+    source_subtopic: str,
+    distractor_count: int,
+    variant_index: int,
+) -> dict[str, Any] | None:
+    combined = _combined_topic_text(objective_text, chunk_text)
+    if not _looks_like_axis_intercept_transformation_context(combined):
+        return None
+    templates = [
+        {
+            "stem": r"The graph \(y=(x-2)^2-1\) is a translation of \(y=x^2\). Which option gives all the points where the graph meets the coordinate axes?",
+            "correct": r"\((1,0), (3,0), (0,3)\)",
+            "distractors": [
+                (r"\((-1,0), (3,0), (0,3)\)", "horizontal_translation_sign_error"),
+                (r"\((1,0), (3,0), (0,-1)\)", "used_vertical_shift_as_y_intercept"),
+                (r"\((2,0), (0,3)\)", "confused_vertex_with_intercept"),
+                (r"\((0,1), (0,3), (3,0)\)", "swapped_axis_coordinates"),
+            ],
+            "explanation": r"For x-axis intercepts set \(y=0\): \((x-2)^2-1=0\), so \(x=1\) or \(x=3\). For the y-axis intercept set \(x=0\), giving \(y=3\). Therefore, the intercept points are \((1,0), (3,0), (0,3)\).",
+        },
+        {
+            "stem": r"The graph \(y=(x+1)^2-4\) is a translation of \(y=x^2\). Which option gives all the points where the graph meets the coordinate axes?",
+            "correct": r"\((-3,0), (1,0), (0,-3)\)",
+            "distractors": [
+                (r"\((3,0), (-1,0), (0,-3)\)", "horizontal_translation_sign_error"),
+                (r"\((-3,0), (1,0), (0,-4)\)", "used_vertical_shift_as_y_intercept"),
+                (r"\((-1,0), (0,-3)\)", "confused_vertex_with_intercept"),
+                (r"\((0,-3), (-3,0), (1,0)\)", "swapped_axis_labels"),
+            ],
+            "explanation": r"For x-axis intercepts set \(y=0\): \((x+1)^2-4=0\), so \(x=-3\) or \(x=1\). For the y-axis intercept set \(x=0\), giving \(y=-3\). Therefore, the intercept points are \((-3,0), (1,0), (0,-3)\).",
+        },
+    ]
+    template = _select_template(templates, seed_parts=(objective_text, chunk_text, "axis_intercepts_transformation"), variant_index=variant_index)
+    template = {**template, "answer_family": "coordinate", "equivalence_mode": "literal", "equivalence_variables": ["x", "y"], "further_study_questions": [
+        "How do you find x-axis intercepts from a graph equation?",
+        "How do you find the y-axis intercept after a transformation?",
+        "How can a sketch check whether the intercepts make sense?",
+    ]}
+    return _local_template_payload(template, source_subtopic=source_subtopic, distractor_count=distractor_count)
+
+
 def _local_probability_mcq_payload(
     objective_text: str,
     chunk_text: str,
@@ -1035,6 +1088,7 @@ def _local_math_mcq_payload(
 ) -> dict[str, Any] | None:
     chunk_text = getattr(chunk, "text", "") or ""
     generators = [
+        lambda: _local_axis_intercepts_transformation_mcq_payload(objective_text, chunk_text, source_subtopic, distractor_count, variant_index),
         lambda: _local_curve_intersection_mcq_payload(chunk, objective_text, source_subtopic, distractor_count),
         lambda: _local_turning_point_mcq_payload(objective_text, chunk_text, source_subtopic, distractor_count, variant_index),
         lambda: _local_surd_mcq_payload(objective_text, chunk_text, source_subtopic, distractor_count, variant_index),
@@ -2127,6 +2181,9 @@ def validate_math_mcq_payload(
         "distractor_tags": distractor_tags,
         "source_subtopic": _normalize_whitespace(str(metadata.get("source_subtopic", "")).strip()),
     }
+    for key in ("generator_id", "generator_seed", "validation_report", "structured_generation"):
+        if key in metadata:
+            metadata_normalized[key] = metadata.get(key)
 
     if math_options_equivalent(correct_answer, metadata_normalized["canonical_tex"], metadata_normalized) is False:
         metadata_normalized["canonical_tex"] = correct_answer

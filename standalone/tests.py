@@ -42,6 +42,7 @@ from standalone.models import (
     EnrollmentQuestionState,
     LearningObjective,
     LearningObjectiveCorrection,
+    MathsGeneratorSpec,
     PracticeAttempt,
     PracticeAttemptQuestion,
     PracticeMessage,
@@ -80,6 +81,8 @@ from standalone.services.question_builder import (
     practice_validation_readiness,
     run_course_question_bank_builder_pass,
 )
+from standalone.services.questions import _payload_for_generation_attempt
+from standalone.services.structured_maths import sync_structured_maths_specs_for_block
 from standalone.services.numeric_questions import (
     NumericQuestionValidationError,
     _build_local_distractors,
@@ -119,6 +122,7 @@ from standalone.services.questions import (
     _normalize_generated_payload,
     _objective_alignment_error,
     _ratio_gap_ranked_question_types,
+    _resolve_unique_question_identity,
     _single_answer_option_balance_error,
     _single_answer_length_signal_error,
     coding_signal_for_text,
@@ -263,17 +267,17 @@ class StandaloneFlowTests(TestCase):
                     "note": "You matched the distance-time relationship correctly and kept the unit consistent.",
                 },
                 {
-                    "answer_text": "5.2 m/s",
+                    "answer_text": "6 m/s",
                     "is_correct": False,
-                    "note": "This is slightly too high, so recheck the arithmetic after dividing the distance by the time.",
+                    "note": "This is too high, so recheck the arithmetic after dividing the distance by the time.",
                 },
                 {
-                    "answer_text": "4.7 m/s",
+                    "answer_text": "4 m/s",
                     "is_correct": False,
-                    "note": "This is slightly too low, which suggests an arithmetic slip after the division step.",
+                    "note": "This is too low, which suggests an arithmetic slip after the division step.",
                 },
                 {
-                    "answer_text": "5.7 m/s",
+                    "answer_text": "7 m/s",
                     "is_correct": False,
                     "note": "Check the denominator carefully because using the wrong time value makes the speed too large.",
                 },
@@ -298,12 +302,12 @@ class StandaloneFlowTests(TestCase):
             "validation": {
                 "answer_expression": "distance / time",
             },
-            "output_snapshot": {
-                "answer_value": 5.0,
-                "answer_unit": "m/s",
-                "correct_answer": "5 m/s",
-                "distractors": ["5.2 m/s", "4.7 m/s", "5.7 m/s"],
-            },
+                "output_snapshot": {
+                    "answer_value": 5.0,
+                    "answer_unit": "m/s",
+                    "correct_answer": "5 m/s",
+                    "distractors": ["6 m/s", "4 m/s", "7 m/s"],
+                },
         }
         if feedback_payload is not None:
             metadata["feedback_v2"] = feedback_payload
@@ -2706,6 +2710,63 @@ class StandaloneFlowTests(TestCase):
         self.assertIn("x-coordinates", validated["stem"])
 
     @override_settings(OPENAI_API_KEY="")
+    def test_build_math_mcq_payload_uses_axis_intercept_transformation_template(self):
+        objective_text = "Determine coordinates of points where graphs intersect the axes after transformations"
+        chunk_text = "Use graph transformations to find x-axis and y-axis intercepts from translated quadratic graphs."
+
+        with patch("standalone.services.math_questions.OpenAI") as mock_client:
+            payload = build_math_mcq_payload(
+                SimpleNamespace(pk=46, text=chunk_text),
+                SimpleNamespace(text=objective_text),
+                3,
+            )
+
+        validated = validate_math_mcq_payload(
+            payload,
+            distractor_count=3,
+            objective_text=objective_text,
+            chunk_text=chunk_text,
+            explanation_text=payload["explanation"],
+        )
+
+        self.assertEqual(validated["math_metadata"]["answer_family"], "coordinate")
+        self.assertIn("coordinate axes", validated["stem"])
+        self.assertIn("translation", validated["stem"])
+        self.assertNotIn("points of intersection", validated["stem"].lower())
+        mock_client.assert_not_called()
+
+    def test_axis_intercept_objective_rejects_graph_graph_intersection_alignment(self):
+        objective = LearningObjective(
+            text="Determine coordinates of points where graphs intersect the axes after transformations"
+        )
+
+        error = _objective_alignment_error(
+            stem=(
+                r"Given the curves \(y = x^2 - 4x + 6\) and \(y = 3x - 4\), "
+                "which option gives the x-coordinates of their points of intersection?"
+            ),
+            correct_answers=[r"\(x = 2 \text{ or } x = 5\)"],
+            explanation="Set the two curves equal and solve.",
+            objective=objective,
+            chunk_text="Use graph transformations to determine axis intercepts.",
+        )
+
+        self.assertEqual(error, "Generated question does not stay aligned with the target learning objective.")
+
+    def test_duplicate_mcq_identity_does_not_append_visible_variant_marker(self):
+        stem = "Which option gives the transformed graph intercepts?"
+        existing_hashes = {hashlib.sha256(stem.lower().encode("utf-8")).hexdigest()}
+
+        candidate_stem, candidate_hash = _resolve_unique_question_identity(
+            stem,
+            QuestionBankItem.QuestionType.MCQ,
+            existing_hashes,
+        )
+
+        self.assertEqual(candidate_stem, "")
+        self.assertEqual(candidate_hash, "")
+
+    @override_settings(OPENAI_API_KEY="")
     def test_build_math_mcq_payload_uses_local_surd_without_openai(self):
         with patch("standalone.services.math_questions.OpenAI") as mock_client:
             payload = build_math_mcq_payload(
@@ -3505,6 +3566,40 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(form.fields["source_file"].widget.attrs["data-max-file-size-bytes"], str(50 * 1024 * 1024))
         self.assertEqual(form.fields["source_file"].widget.attrs["data-max-file-size-label"], "50 MB")
         self.assertIn("Maximum file size: 50 MB.", form.fields["source_file"].help_text)
+        self.assertIn("use_structured_maths_generation", form.fields)
+        self.assertFalse(form.fields["use_structured_maths_generation"].initial)
+
+    def test_teacher_can_opt_into_structured_maths_generation_per_upload(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+        upload = self.build_pdf_upload([["Chapter 1 Graphs", "Solve simultaneous equations and sketch graphs."]])
+
+        with patch("standalone.views._queue_course_import_analysis"):
+            response = self.client.post(
+                reverse("standalone:course_import_upload", args=[course.pk]),
+                {"source_file": upload, "use_structured_maths_generation": "on"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        course_import = CourseImport.objects.get(course=course)
+        self.assertTrue(course_import.use_structured_maths_generation)
+
+    def test_course_import_review_shows_structured_maths_strategy_state(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=True,
+            status=CourseImport.Status.READY,
+            progress=100,
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:course_import_review", args=[course_import.pk]))
+
+        self.assertContains(response, "Structured maths generators enabled for this upload")
 
     @override_settings(PDF_IMPORT_MAX_FILE_SIZE_BYTES=1024 * 1024)
     def test_course_import_upload_rejects_pdf_over_size_limit(self):
@@ -3517,6 +3612,312 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CourseImport.objects.count(), 0)
         self.assertContains(response, "PDF must be 1 MB or smaller.")
+
+    def test_block_creation_skips_structured_maths_specs_when_toggle_is_off(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=False,
+            status=CourseImport.Status.CREATING,
+        )
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Algebra", order=1)
+        chapter = CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1 Algebra",
+            order=1,
+            start_page=1,
+            end_page=3,
+            extracted_text="Solve simultaneous linear equations.",
+            created_block=block,
+            status=CourseImportChapter.Status.PROCESSING,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="01-chapter.txt",
+            extension=".txt",
+            include_in_generation=True,
+            file=ContentFile(b"Solve simultaneous linear equations.", name="01-chapter.txt"),
+        )
+
+        def fake_regenerate(_block, progress_callback=None):
+            LearningObjective.objects.create(
+                course=course,
+                block=block,
+                source_asset=asset,
+                position=1,
+                code="1.1",
+                text="Solve simultaneous linear equations",
+            )
+            return {"blocks": 1, "objectives": 1}
+
+        with patch("standalone.tasks.ingest_content_asset"), patch(
+            "standalone.tasks.regenerate_block_descriptions_and_objectives",
+            side_effect=fake_regenerate,
+        ), patch("standalone.tasks.generate_and_store_block_avatar"):
+            run_block_creation_processing(block.pk)
+
+        self.assertEqual(chapter.course_import.use_structured_maths_generation, False)
+        self.assertFalse(MathsGeneratorSpec.objects.filter(block=block).exists())
+
+    def test_block_creation_creates_structured_maths_specs_for_opted_in_maths_import(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=True,
+            status=CourseImport.Status.CREATING,
+        )
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Algebra", order=1)
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1 Algebra",
+            order=1,
+            start_page=1,
+            end_page=3,
+            extracted_text="Solve simultaneous linear equations.",
+            created_block=block,
+            status=CourseImportChapter.Status.PROCESSING,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="01-chapter.txt",
+            extension=".txt",
+            include_in_generation=True,
+            file=ContentFile(b"Solve simultaneous linear equations.", name="01-chapter.txt"),
+        )
+
+        def fake_regenerate(_block, progress_callback=None):
+            LearningObjective.objects.create(
+                course=course,
+                block=block,
+                source_asset=asset,
+                position=1,
+                code="1.1",
+                text="Solve simultaneous linear equations",
+            )
+            return {"blocks": 1, "objectives": 1}
+
+        with patch("standalone.tasks.ingest_content_asset"), patch(
+            "standalone.tasks.regenerate_block_descriptions_and_objectives",
+            side_effect=fake_regenerate,
+        ), patch("standalone.tasks.generate_and_store_block_avatar"):
+            run_block_creation_processing(block.pk)
+
+        spec = MathsGeneratorSpec.objects.get(block=block)
+        self.assertEqual(spec.question_archetype, "simultaneous_linear_equations")
+        self.assertEqual(spec.status, MathsGeneratorSpec.Status.VALIDATED)
+        self.assertEqual(spec.source_import, course_import)
+
+    def test_opted_in_non_maths_import_does_not_create_structured_specs(self):
+        course = self.create_course()
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=True,
+            status=CourseImport.Status.CREATING,
+        )
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Biology", order=1)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="01-chapter.txt",
+            extension=".txt",
+            include_in_generation=True,
+            file=ContentFile(b"Explain diffusion and osmosis.", name="01-chapter.txt"),
+        )
+        LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Explain diffusion and osmosis",
+        )
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title="Chapter 1 Biology",
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Explain diffusion and osmosis.",
+            created_block=block,
+        )
+
+        specs = sync_structured_maths_specs_for_block(block)
+
+        self.assertEqual(specs, [])
+        self.assertFalse(MathsGeneratorSpec.objects.filter(block=block).exists())
+
+    def test_opted_in_maths_generation_uses_structured_pipeline_only(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Algebra", order=1)
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=True,
+        )
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title=block.title,
+            order=1,
+            start_page=1,
+            end_page=3,
+            extracted_text="Solve simultaneous linear equations.",
+            created_block=block,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="chapter.txt",
+            extension=".txt",
+            extracted_text="Solve simultaneous linear equations.",
+            include_in_generation=True,
+            file=ContentFile(b"Solve simultaneous linear equations.", name="chapter.txt"),
+        )
+        chunk = ContentChunk.objects.create(asset=asset, course=course, block=block, ordinal=1, text=asset.extracted_text, token_count=4)
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Solve simultaneous linear equations",
+        )
+        sync_structured_maths_specs_for_block(block)
+
+        with patch("standalone.services.questions.build_math_mcq_payload", side_effect=AssertionError("legacy maths path should not run")):
+            payload, effective_type, _expected_language = _payload_for_generation_attempt(
+                chunk,
+                objective,
+                3,
+                QuestionBankItem.QuestionType.MCQ,
+            )
+
+        self.assertEqual(effective_type, QuestionBankItem.QuestionType.MCQ)
+        self.assertTrue(payload["math_metadata"]["structured_generation"])
+        self.assertEqual(payload["math_metadata"]["generator_id"], "simultaneous_linear_equations:%s" % objective.pk)
+
+    def test_unsupported_opted_in_maths_objective_is_blocked_safely(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Future Maths", order=1)
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=True,
+        )
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title=block.title,
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Use trigonometric identities to prove expressions are equivalent.",
+            created_block=block,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="chapter.txt",
+            extension=".txt",
+            extracted_text="Use trigonometric identities to prove expressions are equivalent.",
+            include_in_generation=True,
+            file=ContentFile(b"Use trigonometric identities to prove expressions are equivalent.", name="chapter.txt"),
+        )
+        chunk = ContentChunk.objects.create(asset=asset, course=course, block=block, ordinal=1, text=asset.extracted_text, token_count=9)
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Use trigonometric identities to prove expressions are equivalent",
+        )
+        MathsGeneratorSpec.objects.create(
+            course=course,
+            block=block,
+            source_import=course_import,
+            learning_objective=objective,
+            generator_id=f"unsupported:{objective.pk}",
+            subject="maths",
+            exam_level="A-level",
+            topic=block.title,
+            chapter=block.title,
+            learning_objective_text=objective.text,
+            question_archetype="unsupported",
+            difficulty="core",
+            status=MathsGeneratorSpec.Status.UNSUPPORTED,
+            validation_errors=["unsupported_archetype"],
+        )
+
+        with self.assertRaisesMessage(ValueError, "Structured maths generation is enabled for this upload but this objective is unavailable"):
+            _payload_for_generation_attempt(
+                chunk,
+                objective,
+                3,
+                QuestionBankItem.QuestionType.MCQ,
+            )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_non_opted_in_maths_upload_keeps_existing_generation_path(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Chapter 1 Surds", order=1)
+        course_import = CourseImport.objects.create(
+            course=course,
+            uploaded_by=self.teacher,
+            source_file=SimpleUploadedFile("book.pdf", b"PDF", content_type="application/pdf"),
+            original_filename="book.pdf",
+            use_structured_maths_generation=False,
+        )
+        CourseImportChapter.objects.create(
+            course_import=course_import,
+            title=block.title,
+            order=1,
+            start_page=1,
+            end_page=2,
+            extracted_text="Simplify surds and apply rationalisation techniques to denominators.",
+            created_block=block,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            original_filename="chapter.txt",
+            extension=".txt",
+            extracted_text="Simplify exact surd expressions.",
+            include_in_generation=True,
+            file=ContentFile(b"Simplify exact surd expressions.", name="chapter.txt"),
+        )
+        chunk = ContentChunk.objects.create(asset=asset, course=course, block=block, ordinal=1, text=asset.extracted_text, token_count=4)
+        objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Simplify surds and apply rationalisation techniques to denominators",
+        )
+
+        payload, effective_type, _expected_language = _payload_for_generation_attempt(
+            chunk,
+            objective,
+            3,
+            QuestionBankItem.QuestionType.MCQ,
+        )
+
+        self.assertEqual(effective_type, QuestionBankItem.QuestionType.MCQ)
+        self.assertFalse(payload["math_metadata"].get("structured_generation", False))
 
     def test_teacher_can_review_and_submit_selected_import_chapters(self):
         course = self.create_course()
@@ -7102,6 +7503,92 @@ print(result)""",
         self.assertNotIn("dimensionless", " ".join(output["distractors"]).lower())
         self.assertNotIn("dimensionless", output["worked_solution_tex"].lower())
 
+    def test_numeric_validation_rejects_simultaneous_equation_answer_mismatch(self):
+        with self.assertRaisesMessage(NumericQuestionValidationError, "Displayed simultaneous equations solve to x = 7.5"):
+            _validate_numeric_candidate(
+                {
+                    "question_type": "num",
+                    "stem_template": (
+                        "Given the simultaneous equations:\n\n"
+                        r"\[2x - 3y = {first_rhs}\]"
+                        "\n\n"
+                        r"\[x + 4y = {second_rhs}\]"
+                        "\n\n"
+                        "Find the value of x?"
+                    ),
+                    "variables": [
+                        {"name": "first_rhs", "value": 7, "unit": ""},
+                        {"name": "second_rhs", "value": 18, "unit": ""},
+                    ],
+                    "calculation_expression": "(first_rhs + 3 * second_rhs) / 14",
+                    "answer_unit": "",
+                    "significant_figures": 2,
+                    "explanation": "Solve the simultaneous equations using elimination.",
+                    "difficulty": "core",
+                    "further_study_questions": [
+                        "How can you eliminate y from this system?",
+                        "How can substitution check the x-value?",
+                        "Why should both original equations be checked?",
+                    ],
+                },
+                3,
+                "Solve simultaneous equations",
+                "Use elimination to solve two linear equations.",
+            )
+
+    def test_numeric_validation_accepts_simultaneous_equation_answer_match(self):
+        output, validation = _validate_numeric_candidate(
+            {
+                "question_type": "num",
+                "stem_template": (
+                    "Given the simultaneous equations:\n\n"
+                    r"\[2x - 3y = {first_rhs}\]"
+                    "\n\n"
+                    r"\[x + 4y = {second_rhs}\]"
+                    "\n\n"
+                    "Find the value of x?"
+                ),
+                "variables": [
+                    {"name": "first_rhs", "value": 7, "unit": ""},
+                    {"name": "second_rhs", "value": 18, "unit": ""},
+                ],
+                "calculation_expression": "(4 * first_rhs + 3 * second_rhs) / 11",
+                "answer_unit": "",
+                "significant_figures": 2,
+                "explanation": "Solve the simultaneous equations using elimination.",
+                "difficulty": "core",
+                "further_study_questions": [
+                    "How can you eliminate y from this system?",
+                    "How can substitution check the x-value?",
+                    "Why should both original equations be checked?",
+                ],
+            },
+            3,
+            "Solve simultaneous equations",
+            "Use elimination to solve two linear equations.",
+        )
+
+        self.assertEqual(output["correct_answer"], "7.5")
+        self.assertTrue(validation["expression_evaluated_locally"])
+
+    def test_question_quality_issue_rejects_stored_bad_simultaneous_equation_numeric(self):
+        question = QuestionBankItem(
+            question_type=QuestionBankItem.QuestionType.NUM,
+            is_numerical=True,
+            stem=(
+                "Given the simultaneous equations:\n\n"
+                r"\[2x - 3y = 7\]"
+                "\n\n"
+                r"\[x + 4y = 18\]"
+                "\n\n"
+                "Find the value of x?"
+            ),
+            correct_answer="4.4",
+            distractors=["5.1", "4.1", "4.6"],
+        )
+
+        self.assertIn("Displayed simultaneous equations solve to x = 7.5", question_quality_issue(question))
+
     def test_numeric_validation_rejects_bad_alpha_closest_approach_scale(self):
         with self.assertRaisesMessage(
             NumericQuestionValidationError,
@@ -7743,27 +8230,34 @@ print(result)""",
                     "note": "You used the change in speed and divided by the time interval correctly.",
                 },
                 {
-                    "answer_text": "3.2 m/s^2",
+                    "answer_text": "4 m/s^2",
                     "is_correct": False,
-                    "note": "This is slightly too high, so check the subtraction before dividing by time.",
+                    "note": "This is too high, so check the subtraction before dividing by time.",
                 },
                 {
-                    "answer_text": "2.7 m/s^2",
+                    "answer_text": "2 m/s^2",
                     "is_correct": False,
-                    "note": "This is slightly too low, which suggests a small arithmetic slip in the final step.",
+                    "note": "This is too low, which suggests an arithmetic slip in the final step.",
                 },
                 {
-                    "answer_text": "3.7 m/s^2",
+                    "answer_text": "5 m/s^2",
                     "is_correct": False,
                     "note": "This is too large, so recheck the change in speed or the time used.",
                 },
             ],
         }
+        invalid_speed_feedback = self.sample_numeric_feedback_payload()
+        invalid_speed_feedback["options"] = [
+            {"answer_text": "5 m/s", "is_correct": True, "note": "Correct relationship and unit."},
+            {"answer_text": "5.2 m/s", "is_correct": False, "note": "This old decimal option is no longer generated."},
+            {"answer_text": "4.7 m/s", "is_correct": False, "note": "This old decimal option is no longer generated."},
+            {"answer_text": "5.7 m/s", "is_correct": False, "note": "This old decimal option is no longer generated."},
+        ]
 
         with patch("standalone.services.numeric_questions.OpenAI") as mock_client:
             mock_client.return_value.responses.create.side_effect = [
                 FirstResponse(),
-                SimpleNamespace(output_text=json.dumps(self.sample_numeric_feedback_payload())),
+                SimpleNamespace(output_text=json.dumps(invalid_speed_feedback)),
                 SecondResponse(),
                 SimpleNamespace(output_text=json.dumps(acceleration_feedback)),
             ]

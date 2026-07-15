@@ -56,6 +56,14 @@
       <p class="regeneration-status-copy"><strong>Current chapter:</strong> {{ course_import.current_chapter.title }}</p>
     {% endif %}
     <p class="regeneration-status-copy">
+      <strong>Maths upload strategy:</strong>
+      {% if course_import.use_structured_maths_generation %}
+        Structured maths generators enabled for this upload
+      {% else %}
+        Legacy import behaviour
+      {% endif %}
+    </p>
+    <p class="regeneration-status-copy">
       Processed {{ course_import_completed_count }} · Failed {{ course_import_failed_count }} ·
       Queued {{ course_import_queued_count }} · Remaining {{ course_import_remaining_count }}
     </p>

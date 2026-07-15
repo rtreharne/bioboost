@@ -3683,6 +3683,201 @@ def _build_local_distractors(
     return distractors, distractor_values
 
 
+def _linear_system_plain_text(value: str) -> str:
+    text = _decode_literal_unicode_escapes(str(value or ""))
+    text = text.replace("−", "-").replace("≤", "<=").replace("≥", ">=")
+    text = text.replace(r"\left", "").replace(r"\right", "")
+    text = text.replace(r"\,", " ").replace(r"\;", " ").replace(r"\:", " ")
+    text = text.replace(r"\times", "*").replace(r"\cdot", "*")
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\\(?:mathrm|text)\s*([A-Za-z0-9 ./^+-]+)", r"\1", text)
+    text = re.sub(r"\\[A-Za-z]+", " ", text)
+    return text
+
+
+def _parse_linear_number(value: str) -> float | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    if "/" in cleaned:
+        numerator, denominator = cleaned.split("/", 1)
+        try:
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            return float(numerator) / denominator_value
+        except ValueError:
+            return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_linear_expression_side(side: str) -> tuple[float, float, float] | None:
+    expression = _linear_system_plain_text(side)
+    expression = re.sub(r"\s+", "", expression)
+    expression = expression.replace("*", "")
+    if not expression:
+        return None
+    if expression[0] not in "+-":
+        expression = "+" + expression
+
+    coeff_x = 0.0
+    coeff_y = 0.0
+    constant = 0.0
+    for term in re.findall(r"[+-][^+-]+", expression):
+        sign = -1.0 if term.startswith("-") else 1.0
+        body = term[1:]
+        variable_match = re.fullmatch(r"(?:(\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?))?([xy])", body, flags=re.IGNORECASE)
+        if variable_match:
+            coefficient = _parse_linear_number(variable_match.group(1) or "1")
+            if coefficient is None:
+                return None
+            variable = variable_match.group(2).lower()
+            if variable == "x":
+                coeff_x += sign * coefficient
+            else:
+                coeff_y += sign * coefficient
+            continue
+        constant_value = _parse_linear_number(body)
+        if constant_value is None:
+            return None
+        constant += sign * constant_value
+    return coeff_x, coeff_y, constant
+
+
+def _parse_linear_equation(equation_text: str) -> tuple[float, float, float] | None:
+    equation = _linear_system_plain_text(equation_text)
+    if equation.count("=") != 1:
+        return None
+    left, right = equation.split("=", 1)
+    left_parts = _parse_linear_expression_side(left)
+    right_parts = _parse_linear_expression_side(right)
+    if left_parts is None or right_parts is None:
+        return None
+    left_x, left_y, left_constant = left_parts
+    right_x, right_y, right_constant = right_parts
+    coeff_x = left_x - right_x
+    coeff_y = left_y - right_y
+    rhs = right_constant - left_constant
+    if math.isclose(coeff_x, 0.0, abs_tol=1e-12) and math.isclose(coeff_y, 0.0, abs_tol=1e-12):
+        return None
+    return coeff_x, coeff_y, rhs
+
+
+def _linear_equation_candidates_from_stem(stem: str) -> list[str]:
+    source = str(stem or "")
+    candidates = [
+        match.group(1) or match.group(2)
+        for match in re.finditer(r"\\\[(.*?)\\\]|\\\((.*?)\\\)", source, flags=re.S)
+        if "=" in (match.group(1) or match.group(2) or "")
+    ]
+    if len(candidates) >= 2:
+        return candidates
+
+    plain = _linear_system_plain_text(source)
+    for line in re.split(r"[\n;]+", plain):
+        if "=" in line:
+            candidates.append(line)
+    return candidates
+
+
+def _linear_system_target_variable(stem: str) -> str:
+    plain = _normalize_text(_linear_system_plain_text(stem)).lower()
+    match = re.search(
+        r"\b(?:find|calculate|determine|work out)\s+(?:the\s+)?(?:value\s+of\s+)?(?P<variable>[xy])\b",
+        plain,
+    )
+    return match.group("variable") if match else ""
+
+
+def _solve_linear_system_from_stem(stem: str) -> tuple[str, float] | None:
+    target_variable = _linear_system_target_variable(stem)
+    if target_variable not in {"x", "y"}:
+        return None
+
+    equations: list[tuple[float, float, float]] = []
+    seen: set[tuple[float, float, float]] = set()
+    for candidate in _linear_equation_candidates_from_stem(stem):
+        parsed = _parse_linear_equation(candidate)
+        if parsed is None:
+            continue
+        key = tuple(round(value, 12) for value in parsed)
+        if key in seen:
+            continue
+        seen.add(key)
+        equations.append(parsed)
+        if len(equations) == 2:
+            break
+    if len(equations) < 2:
+        return None
+
+    a1, b1, c1 = equations[0]
+    a2, b2, c2 = equations[1]
+    determinant = (a1 * b2) - (a2 * b1)
+    if math.isclose(determinant, 0.0, abs_tol=1e-12):
+        return None
+    x_value = ((c1 * b2) - (c2 * b1)) / determinant
+    y_value = ((a1 * c2) - (a2 * c1)) / determinant
+    return target_variable, x_value if target_variable == "x" else y_value
+
+
+def _numeric_answer_value_from_text(answer_text: str) -> float | None:
+    text = _normalize_text(str(answer_text or "")).replace("−", "-")
+    scientific_match = re.search(r"([-+]?\d+(?:\.\d+)?)\s*(?:×\s*10\^?([-+]?\d+)|e([-+]?\d+))", text, re.IGNORECASE)
+    if scientific_match:
+        exponent = scientific_match.group(2) or scientific_match.group(3)
+        try:
+            return float(scientific_match.group(1)) * (10 ** int(exponent))
+        except ValueError:
+            return None
+    decimal_match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not decimal_match:
+        return None
+    try:
+        return float(decimal_match.group(0))
+    except ValueError:
+        return None
+
+
+def _displayed_numeric_values_match(left: float, right: float, significant_figures: int) -> bool:
+    display_style = _numeric_display_style(right)
+    return normalize_numeric_answer_text(left, "", significant_figures, display_style=display_style) == normalize_numeric_answer_text(
+        right,
+        "",
+        significant_figures,
+        display_style=display_style,
+    )
+
+
+def _linear_system_numeric_consistency_issue(
+    stem: str,
+    answer_value: float,
+    significant_figures: int,
+) -> str:
+    solved = _solve_linear_system_from_stem(stem)
+    if solved is None:
+        return ""
+    target_variable, expected_value = solved
+    if _displayed_numeric_values_match(answer_value, expected_value, significant_figures):
+        return ""
+    expected_answer = normalize_numeric_answer_text(expected_value, "", significant_figures, display_style=_numeric_display_style(expected_value))
+    actual_answer = normalize_numeric_answer_text(answer_value, "", significant_figures, display_style=_numeric_display_style(expected_value))
+    return (
+        f"Displayed simultaneous equations solve to {target_variable} = {expected_answer}, "
+        f"but the calculation expression gives {actual_answer}."
+    )
+
+
+def numeric_question_quality_issue(stem: str, correct_answer: str) -> str:
+    answer_value = _numeric_answer_value_from_text(correct_answer)
+    if answer_value is None:
+        return ""
+    significant_figures = _infer_significant_figures_from_answer_text(correct_answer)
+    return _linear_system_numeric_consistency_issue(stem, answer_value, significant_figures)
+
+
 def _validate_numeric_candidate(candidate: dict, distractor_count: int, objective_text: str, chunk_text: str) -> tuple[dict, dict]:
     if _normalize_text(candidate.get("question_type", "")).lower() != "num":
         raise NumericQuestionValidationError("question_type must be 'num'.")
@@ -3711,6 +3906,9 @@ def _validate_numeric_candidate(candidate: dict, distractor_count: int, objectiv
         significant_figures,
         display_style=display_style,
     )
+    linear_system_issue = _linear_system_numeric_consistency_issue(stem, answer_value, significant_figures)
+    if linear_system_issue:
+        raise NumericQuestionValidationError(linear_system_issue)
 
     distractors, distractor_values = _build_local_distractors(
         answer_value,

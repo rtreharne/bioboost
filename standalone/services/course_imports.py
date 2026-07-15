@@ -406,6 +406,22 @@ def _create_or_reuse_import_block(course_import: CourseImport, chapter: CourseIm
             config.save(update_fields=["assistant_guidance", "updated_at"])
     chapter.created_block = block
     chapter.save(update_fields=["created_block", "updated_at"])
+    print(
+        "[course-import] "
+        + json.dumps(
+            {
+                "event": "import_block_created",
+                "import_id": course_import.pk,
+                "course_id": course_import.course_id,
+                "chapter_id": chapter.pk,
+                "block_id": block.pk,
+                "block": block.title,
+                "use_structured_maths_generation": course_import.use_structured_maths_generation,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     return block
 
 

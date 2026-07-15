@@ -12,10 +12,12 @@ from standalone.models import (
     CourseAllowedEmail,
     CourseBlock,
     CourseConfig,
+    CourseImport,
     CourseMagicLink,
     Enrollment,
     LearningObjective,
     LearningObjectiveCorrection,
+    MathsGeneratorSpec,
     NotificationLog,
     PracticeAttempt,
     PracticeAttemptQuestion,
@@ -91,6 +93,20 @@ admin.site.register(ProjectArtifact)
 admin.site.register(ProjectAssignment)
 admin.site.register(ProjectMessage)
 admin.site.register(ProjectSubmission)
+
+
+@admin.register(CourseImport)
+class CourseImportAdmin(admin.ModelAdmin):
+    list_display = ("original_filename", "course", "status", "use_structured_maths_generation", "progress", "created_at")
+    list_filter = ("status", "use_structured_maths_generation")
+    search_fields = ("original_filename", "course__title", "uploaded_by__email", "uploaded_by__username")
+
+
+@admin.register(MathsGeneratorSpec)
+class MathsGeneratorSpecAdmin(admin.ModelAdmin):
+    list_display = ("generator_id", "question_archetype", "block", "learning_objective", "status", "source_import")
+    list_filter = ("status", "question_archetype", "subject")
+    search_fields = ("generator_id", "learning_objective_text", "topic", "chapter", "block__title")
 
 
 @admin.register(Enrollment)

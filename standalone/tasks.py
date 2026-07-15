@@ -14,6 +14,7 @@ from standalone.services.course_imports import (
     queue_course_import_creation,
     run_course_import_worker_once,
 )
+from standalone.services.structured_maths import sync_structured_maths_specs_for_block, use_structured_maths_for_block
 
 
 def run_content_asset_processing(asset_id: int) -> None:
@@ -91,6 +92,8 @@ def run_block_creation_processing(block_id: int) -> None:
                 _map_regeneration_progress(progress),
             ),
         )
+        if use_structured_maths_for_block(block):
+            sync_structured_maths_specs_for_block(block)
         block.refresh_from_db(fields=["title", "summary", "avatar_file", "avatar_generation_status", "avatar_generation_error", "avatar_generated_at"])
         generate_and_store_block_avatar(block, force=True)
     except Exception as exc:  # noqa: BLE001

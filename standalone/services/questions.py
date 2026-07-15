@@ -9,7 +9,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 from openai import OpenAI, OpenAIError
 
-from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, QuestionBankItem
+from standalone.models import ContentChunk, Course, CourseBlock, LearningObjective, MathsGeneratorSpec, QuestionBankItem
 from standalone.services.guidance import build_generation_guidance_prompt
 from standalone.services.math_questions import (
     MATH_GENERATION_MODE_SYMBOLIC,
@@ -25,9 +25,16 @@ from standalone.services.numeric_questions import (
     NumericQuestionRequestError,
     NumericQuestionValidationError,
     build_numeric_question_payload,
+    numeric_question_quality_issue,
     normalize_physics_numeric_prose,
     objective_has_numeric_intent,
     supports_local_numeric_mcq,
+)
+from standalone.services.structured_maths import (
+    generate_structured_maths_payload,
+    objective_is_maths_like,
+    objective_requires_structured_maths,
+    use_structured_maths_for_block,
 )
 
 
@@ -946,6 +953,13 @@ def question_quality_issue(question: QuestionBankItem) -> str:
     math_issue = math_question_quality_issue(question)
     if math_issue:
         return math_issue
+    if getattr(question, "is_numerical", False) or getattr(question, "question_type", "") == QuestionBankItem.QuestionType.NUM:
+        numeric_issue = numeric_question_quality_issue(
+            str(getattr(question, "stem", "") or ""),
+            str(getattr(question, "correct_answer", "") or ""),
+        )
+        if numeric_issue:
+            return numeric_issue
     if getattr(question, "math_metadata", None):
         return _objective_alignment_error(
             stem=str(getattr(question, "stem", "") or ""),
@@ -1015,10 +1029,22 @@ def _objective_alignment_error(
 ) -> str:
     if objective is None:
         return ""
+    objective_text = str(objective.text or "")
+    objective_lowered = objective_text.lower()
+    question_text = " ".join([stem, explanation, *correct_answers])
+    question_lowered = question_text.lower()
+    if re.search(r"\b(?:axis|axes|intercepts?)\b", objective_lowered) and "transform" in objective_lowered:
+        has_axis_question_signal = re.search(r"\b(?:axis|axes|intercepts?)\b", question_lowered)
+        has_two_curve_intersection_signal = (
+            "points of intersection" in question_lowered
+            and re.search(r"\b(?:two\s+)?(?:curves|graphs)\b", question_lowered)
+        )
+        if has_two_curve_intersection_signal or not has_axis_question_signal:
+            return "Generated question does not stay aligned with the target learning objective."
     objective_tokens = _keyword_set(objective.text)
     if not objective_tokens:
         return ""
-    question_tokens = _keyword_set(" ".join([stem, explanation, *correct_answers]))
+    question_tokens = _keyword_set(question_text)
     overlap = _keywords_overlap_count(objective_tokens, question_tokens)
     required_overlap = 2 if len(objective_tokens) >= 8 else 1
     if overlap < required_overlap:
@@ -2047,6 +2073,24 @@ def _payload_for_generation_attempt(
 
     if (
         question_type == QuestionBankItem.QuestionType.MCQ
+        and objective is not None
+        and use_structured_maths_for_block(chunk.block)
+        and (
+            objective_is_maths_like(chunk.block, objective, chunk.text)
+            or MathsGeneratorSpec.objects.filter(block=chunk.block, learning_objective=objective).exists()
+        )
+    ):
+        payload = generate_structured_maths_payload(
+            chunk=chunk,
+            objective=objective,
+            distractor_count=distractor_count,
+            question_variant_index=question_variant_index,
+        )
+        _normalize_generated_payload(payload, question_type, distractor_count)
+        return payload, question_type, ""
+
+    if (
+        question_type == QuestionBankItem.QuestionType.MCQ
         and is_math_generation_target(
             objective_text=(objective.text if objective else ""),
             chunk_text=chunk.text,
@@ -2649,11 +2693,6 @@ def _resolve_unique_question_identity(stem: str, question_type: str, existing_ha
         return stem, item_hash
     if question_type == QuestionBankItem.QuestionType.NUM:
         raise NumericQuestionValidationError("OpenAI generated a repeated numerical MCQ that already exists for this course.")
-    for variant_number in range(2, 6):
-        candidate_stem = f"{stem.rstrip('?')} (variant {variant_number})?"
-        candidate_hash = hashlib.sha256(candidate_stem.lower().encode("utf-8")).hexdigest()
-        if candidate_hash not in existing_hashes:
-            return candidate_stem, candidate_hash
     return "", ""
 
 
@@ -3070,6 +3109,8 @@ def _create_question_pair(
         block.question_distractor_count,
         expected_coding_language=expected_coding_language,
     )
+    if re.search(r"\(\s*variant\s+\d+\s*\)", str(normalized_payload.get("stem", "")), flags=re.IGNORECASE):
+        raise ValueError("Generated question contains internal variant marker.")
     if normalized_payload["is_coding_question"]:
         objective_alignment_error = _coding_question_alignment_error(
             stem=normalized_payload["stem"],

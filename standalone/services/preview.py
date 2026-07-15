@@ -1761,6 +1761,7 @@ def _draft_written_answer_alignment(question: QuestionBankItem, block: CourseBlo
     normalized_answer = local_alignment["answer_text"]
     if (
         not settings.OPENAI_API_KEY
+        or not bool(getattr(settings, "PREVIEW_WAQ_OPENAI_DRAFT_ENABLED", False))
         or len(normalized_answer) < PREVIEW_WAQ_OPENAI_DRAFT_MIN_CHARS
         or len(re.findall(r"[a-z0-9]+", normalized_answer.lower())) < PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS
     ):

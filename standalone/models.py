@@ -135,8 +135,8 @@ class CourseConfig(TimeStampedModel):
     advanced_question_start_percent = models.PositiveSmallIntegerField(default=50, validators=[MinValueValidator(0), MaxValueValidator(100)])
     revalidation_attempts = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(10)])
     show_validation_feedback_immediately = models.BooleanField(default=False)
-    question_bank_builder_enabled = models.BooleanField(default=True)
-    question_bank_builder_auto_start = models.BooleanField(default=True)
+    question_bank_builder_enabled = models.BooleanField(default=False)
+    question_bank_builder_auto_start = models.BooleanField(default=False)
     question_bank_builder_last_run_at = models.DateTimeField(null=True, blank=True)
     question_bank_builder_last_generated_at = models.DateTimeField(null=True, blank=True)
     question_bank_builder_last_error = models.TextField(blank=True)
@@ -563,6 +563,7 @@ class CourseImport(TimeStampedModel):
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="course_imports")
     source_file = models.FileField(upload_to="standalone/imports/%Y/%m/%d")
     original_filename = models.CharField(max_length=255)
+    use_structured_maths_generation = models.BooleanField(default=False)
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.QUEUED_ANALYSIS)
     progress = models.PositiveSmallIntegerField(default=0)
     error = models.TextField(blank=True)
@@ -626,6 +627,53 @@ class CourseImportChapter(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.course_import}: {self.title}"
+
+
+class MathsGeneratorSpec(TimeStampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        VALIDATED = "validated", "Validated"
+        REJECTED = "rejected", "Rejected"
+        UNSUPPORTED = "unsupported", "Unsupported"
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="maths_generator_specs")
+    block = models.ForeignKey(CourseBlock, on_delete=models.CASCADE, related_name="maths_generator_specs")
+    source_import = models.ForeignKey(
+        CourseImport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="maths_generator_specs",
+    )
+    learning_objective = models.ForeignKey(
+        LearningObjective,
+        on_delete=models.CASCADE,
+        related_name="maths_generator_specs",
+    )
+    generator_id = models.CharField(max_length=120)
+    subject = models.CharField(max_length=80, default="maths")
+    exam_level = models.CharField(max_length=80, blank=True)
+    topic = models.CharField(max_length=255, blank=True)
+    chapter = models.CharField(max_length=255, blank=True)
+    learning_objective_text = models.TextField()
+    question_archetype = models.CharField(max_length=120)
+    difficulty = models.CharField(max_length=40, default="core")
+    parameter_ranges = models.JSONField(default=dict, blank=True)
+    constraints = models.JSONField(default=dict, blank=True)
+    question_template_latex = models.TextField(blank=True)
+    answer_logic = models.JSONField(default=dict, blank=True)
+    distractor_models = models.JSONField(default=list, blank=True)
+    validation_rules = models.JSONField(default=list, blank=True)
+    worked_solution_style = models.CharField(max_length=120, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    validation_errors = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["block__order", "learning_objective__position", "pk"]
+        unique_together = ("block", "learning_objective", "generator_id")
+
+    def __str__(self) -> str:
+        return f"{self.generator_id} for {self.learning_objective}"
 
 
 class QuestionBankItem(TimeStampedModel):
