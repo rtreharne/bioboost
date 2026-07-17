@@ -57,6 +57,7 @@ if (previewRoot && previewDataNode) {
   const projectPanel = previewRoot.querySelector("[data-preview-project-panel]");
   const resourceButtons = Array.from(previewRoot.querySelectorAll("[data-preview-resource]"));
   const resetDemoButton = previewRoot.querySelector("[data-preview-reset-demo]");
+  const resetCourseButton = previewRoot.querySelector("[data-preview-reset-course]");
   const mobileSidebarMedia = window.matchMedia("(max-width: 980px)");
   const mobileChatMedia = window.matchMedia("(max-width: 640px)");
   const messengerMobileMedia = window.matchMedia("(max-width: 980px)");
@@ -86,7 +87,6 @@ if (previewRoot && previewDataNode) {
   const hideFlagActions = previewRoot.dataset.hideFlagActions === "true";
   const practiceValidationUrl = String(previewRoot.dataset.practiceValidationUrl || "").trim();
   const statsIconUrl = String(previewRoot.dataset.statsIconUrl || "").trim();
-  const messageBackgroundUrl = String(previewRoot.dataset.messageBackgroundUrl || "").trim();
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = "";
@@ -223,39 +223,6 @@ if (previewRoot && previewDataNode) {
     ],
   ];
   const reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
-  function stableMessageHash(seedText) {
-    let hash = 2166136261;
-    const text = String(seedText || "");
-    for (let index = 0; index < text.length; index += 1) {
-      hash ^= text.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
-  }
-
-  function applySeededMessageBackground(article, message) {
-    if (!(article instanceof HTMLElement) || !messageBackgroundUrl) {
-      return;
-    }
-    const seedText = [
-      message?.id,
-      message?.created_at,
-      message?.question_id,
-      message?.resource_key,
-      message?.kind,
-      message?.role,
-      message?.text,
-    ].filter(Boolean).join("|");
-    const hash = stableMessageHash(seedText || "preview-message");
-    const positionX = 12 + (hash % 77);
-    const positionY = 10 + (Math.floor(hash / 97) % 81);
-    const sizePx = 520 + (hash % 140);
-    article.style.setProperty("--message-bg-image", `url("${messageBackgroundUrl}")`);
-    article.style.setProperty("--message-bg-x", `${positionX}%`);
-    article.style.setProperty("--message-bg-y", `${positionY}%`);
-    article.style.setProperty("--message-bg-size", `${sizePx}px auto`);
-  }
-
   const richText = window.StandaloneRichText || {
     appendFormattedMessageContent(container, text) {
       if (!container) {
@@ -2640,6 +2607,19 @@ if (previewRoot && previewDataNode) {
     return parts.length > 1 ? parts.slice(1).join(".") : normalized;
   }
 
+  function isCoverageComplete(metrics) {
+    return Number(metrics?.coverage || 0) >= 100;
+  }
+
+  function objectiveCoverageStatusText(objective) {
+    const target = Math.max(1, Number(objective?.coverage_target_count || 1));
+    const progress = Math.max(0, Math.min(Number(objective?.coverage_progress_count || 0), target));
+    if (objective?.covered) {
+      return "✓";
+    }
+    return target > 1 && progress > 0 ? `${progress}/${target}` : "";
+  }
+
   function blockConversationRowData(block) {
     const lastMessage = latestConversationMessage(block);
     const lastTimestamp = latestConversationTimestamp(block);
@@ -2659,6 +2639,18 @@ if (previewRoot && previewDataNode) {
       title: String(block?.title || ""),
       isSquare: false,
     };
+  }
+
+  function normalizedObjectiveCoverageStatus(objective) {
+    const target = Math.max(1, Number(objective?.coverage_target_count || 1));
+    const progress = Math.max(0, Math.min(Number(objective?.coverage_progress_count || 0), target));
+    if (objective?.covered) {
+      return { text: "\u2713", progressText: "", kind: "complete" };
+    }
+    if (target > 1 && progress > 0) {
+      return { text: "", progressText: `${progress} of ${target} complete`, kind: "progress" };
+    }
+    return { text: "", progressText: "", kind: "empty" };
   }
 
   function collectionConversationRowData(collection) {
@@ -3432,6 +3424,7 @@ if (previewRoot && previewDataNode) {
           const rowTitle = String(entry.title || "");
           const isActive = rowId === String(activeBlockId);
           const isSelectionPreview = !entry.isStats && entry.threadKind !== "collection" && isActive && isSidebarSelectionPreview(rowId);
+          const coverageComplete = entry.threadKind === "block" && isCoverageComplete(entry.block?.metrics);
           const row = document.createElement("button");
           row.type = "button";
           row.className = `preview-conversation-row${isActive ? " is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
@@ -3441,6 +3434,7 @@ if (previewRoot && previewDataNode) {
             <span class="preview-conversation-body">
               <span class="preview-conversation-head">
                 <strong class="preview-conversation-title"></strong>
+                ${coverageComplete ? '<span class="preview-conversation-complete" aria-label="Coverage complete">✓</span>' : ""}
                 <span class="preview-conversation-time">${previewTimestamp || ""}</span>
               </span>
               <span class="preview-conversation-preview"></span>
@@ -3486,6 +3480,7 @@ if (previewRoot && previewDataNode) {
     (previewState.blocks || []).forEach((block) => {
       const isActive = String(block.id) === String(activeBlockId);
       const isSelectionPreview = isActive && isSidebarSelectionPreview(block.id);
+      const coverageComplete = isCoverageComplete(block.metrics);
       const article = document.createElement("article");
       article.className = `preview-block-card${isActive ? " is-expanded is-active" : ""}${isSelectionPreview ? " is-selection-preview" : ""}`;
 
@@ -3502,10 +3497,15 @@ if (previewRoot && previewDataNode) {
       const titleText = document.createElement("span");
       titleText.className = "preview-block-title-text";
       titleText.textContent = String(block.title || "");
+      const titleStatus = document.createElement("span");
+      titleStatus.className = "preview-block-complete";
+      titleStatus.setAttribute("aria-label", "Coverage complete");
+      titleStatus.hidden = !coverageComplete;
+      titleStatus.textContent = "✓";
       const titleIcon = document.createElement("span");
       titleIcon.className = "preview-block-card-icon";
       titleIcon.setAttribute("aria-hidden", "true");
-      titleRow.append(titleText, titleIcon);
+      titleRow.append(titleText, titleStatus, titleIcon);
       button.appendChild(titleRow);
       button.addEventListener("click", () => {
         activeBlockId = String(block.id);
@@ -3547,7 +3547,6 @@ if (previewRoot && previewDataNode) {
     const feedbackClass =
       message.kind === "feedback" ? (message.correct ? " preview-feedback--correct" : " preview-feedback--incorrect") : "";
     article.className = `preview-message ${roleClass}${feedbackClass}`;
-    applySeededMessageBackground(article, message);
 
     if (message.kind === "question") {
       const renderOptions = questionRenderOptions(message);
@@ -3809,22 +3808,35 @@ if (previewRoot && previewDataNode) {
         } else {
           objectives.forEach((objective) => {
             const item = document.createElement("li");
-            item.className = `preview-objective-item${objective.covered ? " is-covered" : ""}`;
+            const status = normalizedObjectiveCoverageStatus(objective);
+            item.className = `preview-objective-item${status.kind === "complete" ? " is-covered" : ""}${status.kind === "progress" ? " is-in-progress" : ""}`;
 
             const tick = document.createElement("span");
             tick.className = "preview-objective-status";
             tick.setAttribute("aria-hidden", "true");
             tick.textContent = objective.covered ? "✓" : "";
 
+            tick.textContent = status.text;
+
             const code = document.createElement("span");
             code.className = "preview-objective-code";
             code.textContent = displayObjectiveCode(objective.code);
 
+            const body = document.createElement("div");
+            body.className = "preview-objective-body";
             const text = document.createElement("span");
             text.className = "preview-objective-text";
             text.textContent = objective.text;
+            body.appendChild(text);
 
-            item.append(tick, code, text);
+            if (status.progressText) {
+              const progressBadge = document.createElement("span");
+              progressBadge.className = "preview-objective-progress";
+              progressBadge.textContent = status.progressText;
+              body.appendChild(progressBadge);
+            }
+
+            item.append(tick, code, body);
 
             if (isTeacherPreview) {
               const actions = document.createElement("div");
@@ -3911,22 +3923,35 @@ if (previewRoot && previewDataNode) {
           } else {
             objectives.forEach((objective) => {
               const item = document.createElement("li");
-              item.className = `preview-objective-item${objective.covered ? " is-covered" : ""}`;
+              const status = normalizedObjectiveCoverageStatus(objective);
+              item.className = `preview-objective-item${status.kind === "complete" ? " is-covered" : ""}${status.kind === "progress" ? " is-in-progress" : ""}`;
 
               const tick = document.createElement("span");
               tick.className = "preview-objective-status";
               tick.setAttribute("aria-hidden", "true");
               tick.textContent = objective.covered ? "✓" : "";
 
+              tick.textContent = status.text;
+
               const code = document.createElement("span");
               code.className = "preview-objective-code";
               code.textContent = displayObjectiveCode(objective.code);
 
+              const body = document.createElement("div");
+              body.className = "preview-objective-body";
               const text = document.createElement("span");
               text.className = "preview-objective-text";
               text.textContent = objective.text;
+              body.appendChild(text);
 
-              item.append(tick, code, text);
+              if (status.progressText) {
+                const progressBadge = document.createElement("span");
+                progressBadge.className = "preview-objective-progress";
+                progressBadge.textContent = status.progressText;
+                body.appendChild(progressBadge);
+              }
+
+              item.append(tick, code, body);
               list.appendChild(item);
             });
           }
@@ -4310,6 +4335,8 @@ if (previewRoot && previewDataNode) {
     const correctCount = Number(summary.correct_count || 0);
     const coveredObjectiveCount = Number(summary.covered_objective_count || 0);
     const totalObjectiveCount = Number(summary.total_objective_count || 0);
+    const coverageProgressCount = Number(summary.coverage_progress_count || 0);
+    const coverageTargetCount = Number(summary.coverage_target_count || totalObjectiveCount || 0);
     const longestStreak = Number(summary.longest_streak || 0);
 
     transcript.innerHTML = "";
@@ -4327,7 +4354,9 @@ if (previewRoot && previewDataNode) {
     list.className = "preview-message-list";
     [
       `Mastery % - ${formatPercentage(summary.mastery)} (${correctCount} correct of ${completedCount} attempted).`,
-      `Coverage % - ${formatPercentage(summary.coverage)} (${coveredObjectiveCount} of ${totalObjectiveCount} objectives covered).`,
+      coverageTargetCount > totalObjectiveCount
+        ? `Coverage % - ${formatPercentage(summary.coverage)} (${coverageProgressCount} of ${coverageTargetCount} required correct objective hits completed).`
+        : `Coverage % - ${formatPercentage(summary.coverage)} (${coveredObjectiveCount} of ${totalObjectiveCount} objectives covered).`,
       `Longest streak - ${longestStreak}.`,
     ].forEach((text) => {
       const item = document.createElement("li");
@@ -4504,7 +4533,9 @@ if (previewRoot && previewDataNode) {
       payload.text = `Average coverage is the mean block coverage across ${liveBlockLabel}.`;
       payload.metric_rows = [
         `Displayed score: ${formatPercentage(metrics.coverage)}`,
-        `Learning objectives covered at least once: ${metrics.covered_objective_count || 0} of ${metrics.total_objective_count || 0} across the whole course`,
+        Number(metrics.coverage_target_count || 0) > Number(metrics.total_objective_count || 0)
+          ? `Coverage progress: ${metrics.coverage_progress_count || 0} of ${metrics.coverage_target_count || 0} required correct objective hits across the whole course`
+          : `Learning objectives covered: ${metrics.covered_objective_count || 0} of ${metrics.total_objective_count || 0} across the whole course`,
       ];
       return payload;
     }
@@ -5367,6 +5398,20 @@ if (previewRoot && previewDataNode) {
     } catch (_error) {
       // Ignore storage failures and continue with the shared reset.
     }
+    await postPreviewAction("reset", {}, { focusComposer: true, scrollMode: "preserve" });
+  });
+
+  resetCourseButton?.addEventListener("click", async () => {
+    closeHeaderMenu();
+    closeSidebarMenu();
+    if (!isTeacherPreview || isDemoMode || requestInFlight) {
+      return;
+    }
+    const confirmed = window.confirm("Reset this course preview for your current session?");
+    if (!confirmed) {
+      return;
+    }
+    persistActiveBlockId("");
     await postPreviewAction("reset", {}, { focusComposer: true, scrollMode: "preserve" });
   });
 

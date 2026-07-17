@@ -63,7 +63,7 @@ CELERY_RESULT_BACKEND=
 CELERY_TASK_ALWAYS_EAGER=False
 CONTACT_EMAIL=replace-me@example.com
 EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-DEFAULT_FROM_EMAIL=no-reply@ninepointeightone.local
+DEFAULT_FROM_EMAIL=no-reply@bioboost.local
 STANDALONE_ENABLE_MAGIC_LINKS=True
 STANDALONE_ENABLE_SELF_ENROL=True
 STANDALONE_INVITE_EXPIRY_HOURS=72
@@ -71,7 +71,7 @@ STANDALONE_MAGIC_LINK_EXPIRY_HOURS=72
 LOCAL_BACKGROUND_JOB_PAUSE_SECONDS=1.0
 LOCAL_BACKGROUND_JOB_STRATEGY=thread
 COURSE_IMPORT_MAX_SELECTED_CHAPTERS=0
-FILE_UPLOAD_TEMP_DIR=/tmp/ninepointeightone-uploads
+FILE_UPLOAD_TEMP_DIR=/tmp/bioboost-uploads
 FILE_UPLOAD_MAX_MEMORY_SIZE=262144
 PDF_IMPORT_MAX_FILE_SIZE_BYTES=209715200
 ```
@@ -112,7 +112,7 @@ Then open `http://127.0.0.1:8000/` or `http://127.0.0.1:8000/app/login/` to sign
 
 ## Notes
 
-- Standalone learning objectives and block/course summaries use the OpenAI API when `OPENAI_API_KEY` is set, with heuristic fallback if the API is unavailable.
+- Standalone learning objectives and block/course summaries use the OpenAI API when `OPENAI_API_KEY` is set. Background block generation now fails loudly instead of silently downgrading to heuristic output unless `BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=true` is explicitly set.
 - The standalone app uses a custom Django user model plus course, enrolment, content-ingestion, question-bank, practice, and validation tables under the `standalone` app.
 - Supported standalone upload types are `.html`, `.docx`, `.pdf`, `.txt`, `.R`, `.py`, `.ipynb`, `.Rmd`, `.md`, `.pptx`, and `.xlsx`.
 - Standalone validation v1 currently generates printable PDF packs with QR identifiers; live scan/OMR capture is still a later step.
@@ -163,19 +163,19 @@ If `DJANGO_ADMIN_USERNAME` and `DJANGO_ADMIN_PASSWORD` are set, each startup wil
 
 ### Custom domain
 
-The Render Blueprint uses `ninepointeightone.example.com` as the example custom domain. Render automatically adds the corresponding `www.ninepointeightone.example.com` host and redirects it to the root domain.
+The Render Blueprint uses `bioboost.example.com` as the example custom domain. Render automatically adds the corresponding `www.bioboost.example.com` host and redirects it to the root domain.
 
 Django is configured through `render.yaml` to accept:
 
 ```text
-ninepointeightone.example.com
-www.ninepointeightone.example.com
+bioboost.example.com
+www.bioboost.example.com
 *.onrender.com
 ```
 
 After deploying the Blueprint, finish setup in Render's Custom Domains section:
 
-1. Verify that `ninepointeightone.example.com` is listed for the web service you deploy.
+1. Verify that `bioboost.example.com` is listed for the web service you deploy.
 2. Add the DNS records Render shows at your domain provider.
 3. Remove any conflicting `AAAA` records for the domain.
 4. Return to Render and click Verify.

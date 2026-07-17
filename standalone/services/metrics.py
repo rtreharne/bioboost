@@ -1,10 +1,10 @@
 from decimal import Decimal
 
+from django.db.models import Count
 from django.utils import timezone
 
 from standalone.models import Enrollment, PracticeAttempt, PracticeAttemptQuestion
-from standalone.services.preview import _engagement_metrics_from_answer_dates
-from standalone.services.practice_scoring import combine_block_practice_metrics
+from standalone.services.practice_scoring import combine_block_practice_metrics, coverage_progress_snapshot
 
 
 def _decimal_percent(value: float) -> Decimal:
@@ -48,25 +48,28 @@ def enrollment_practice_metrics_snapshot(enrollment: Enrollment) -> dict:
         ).select_related("question")
         completed_count = answers.count()
         correct_count = answers.filter(is_correct=True).count()
-        total_objectives = block.learning_objectives.count()
-        covered_objectives = answers.filter(
-            is_correct=True,
-            question__learning_objective__isnull=False,
-        ).values("question__learning_objective_id").distinct().count()
-        target_question_count = max(1, block.preview_target_question_count)
-        engagement_metrics = _engagement_metrics_from_answer_dates(
-            course,
-            block,
-            [answer.created_at.date() for answer in answers],
-            target_question_count=target_question_count,
+        coverage_snapshot = coverage_progress_snapshot(
+            {
+                int(row["question__learning_objective_id"]): int(row["total"] or 0)
+                for row in answers.filter(
+                    is_correct=True,
+                    question__learning_objective__isnull=False,
+                )
+                .values("question__learning_objective_id")
+                .annotate(total=Count("pk"))
+            },
+            {
+                objective.pk: block.practice_coverage_factor
+                for objective in block.learning_objectives.all()
+            },
         )
         block_scores.append(
             {
                 "block": block,
                 "metrics": {
                     "mastery": correct_count * 100 / completed_count if completed_count else 0.0,
-                    "coverage": covered_objectives * 100 / total_objectives if total_objectives else 0.0,
-                    "engagement": float(engagement_metrics["engagement"]),
+                    "coverage": float(coverage_snapshot["coverage"]),
+                    "engagement": 0.0,
                 },
             }
         )
@@ -83,7 +86,7 @@ def refresh_enrollment_metrics(enrollment: Enrollment) -> None:
     snapshot = enrollment_practice_metrics_snapshot(enrollment)
     mastery = _decimal_percent(snapshot["mastery"])
     coverage = _decimal_percent(snapshot["coverage"])
-    engagement = _decimal_percent(snapshot["engagement"])
+    engagement = _decimal_percent(0.0)
 
     enrollment.mastery_score = mastery
     enrollment.coverage_score = coverage

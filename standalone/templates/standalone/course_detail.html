@@ -228,6 +228,12 @@
               <p class="course-setting-help">{{ course_config_form.coding_question_ratio_percent.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.coverage_factor.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'coverage_factor' %}">
+              <label class="course-setting-label" for="{{ course_config_form.coverage_factor.id_for_label }}">{{ course_config_form.coverage_factor.label }}</label>
+              {{ course_config_form.coverage_factor }}
+              <p class="course-setting-help">{{ course_config_form.coverage_factor.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
             <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.advanced_question_start_percent.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'advanced_question_start_percent' %}">
               <label class="course-setting-label" for="{{ course_config_form.advanced_question_start_percent.id_for_label }}">{{ course_config_form.advanced_question_start_percent.label }}</label>
               {{ course_config_form.advanced_question_start_percent }}
@@ -253,18 +259,6 @@
               <label class="course-setting-label" for="{{ course_config_form.validation_weight.id_for_label }}">{{ course_config_form.validation_weight.label }}</label>
               {{ course_config_form.validation_weight }}
               <p class="course-setting-help">{{ course_config_form.validation_weight.help_text }}</p>
-              <p class="course-setting-status" data-course-config-status hidden></p>
-            </div>
-            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.allow_pre_engagement.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'allow_pre_engagement' %}">
-              <label class="course-setting-label" for="{{ course_config_form.allow_pre_engagement.id_for_label }}">{{ course_config_form.allow_pre_engagement.label }}</label>
-              {{ course_config_form.allow_pre_engagement }}
-              <p class="course-setting-help">{{ course_config_form.allow_pre_engagement.help_text }}</p>
-              <p class="course-setting-status" data-course-config-status hidden></p>
-            </div>
-            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.engagement_half_life_days.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'engagement_half_life_days' %}">
-              <label class="course-setting-label" for="{{ course_config_form.engagement_half_life_days.id_for_label }}">{{ course_config_form.engagement_half_life_days.label }}</label>
-              {{ course_config_form.engagement_half_life_days }}
-              <p class="course-setting-help">{{ course_config_form.engagement_half_life_days.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
           </div>
@@ -392,7 +386,6 @@
                     </h3>
                     <div class="block-chip-row" aria-label="Block summary">
                       <span class="block-chip">Available {{ block.available_from|date:"j M Y" }}</span>
-                      <span class="block-chip">Engagement target {{ block.preview_target_question_count }}</span>
                       <span class="block-chip">{{ block.objective_count }} objectives</span>
                       <span class="block-chip">{{ block.asset_count }} uploads</span>
                       {% if block.regeneration_status != 'idle' %}
@@ -501,20 +494,6 @@
                     role="button"
                   >{{ block.available_from|date:"j M Y" }}</strong>
                 </div>
-                <div class="block-meta-tile">
-                  <span class="block-meta-label">Engagement target</span>
-                  <strong
-                    class="inline-editable inline-editable-date"
-                    data-inline-edit
-                    data-inline-url="{% url 'standalone:update_block_config_field' block.pk 'target_question_count' %}"
-                    data-inline-field="target_question_count"
-                    data-inline-input-type="number"
-                    data-inline-value="{{ block.preview_target_question_count }}"
-                    data-inline-label="Engagement target"
-                    tabindex="0"
-                    role="button"
-                  >{{ block.preview_target_question_count }}</strong>
-                </div>
               </div>
 
               <section class="block-detail-section">
@@ -533,6 +512,12 @@
                     <label class="course-setting-label" for="{{ block.block_config_form.distractor_count.id_for_label }}">{{ block.block_config_form.distractor_count.label }}</label>
                     {{ block.block_config_form.distractor_count }}
                     <p class="course-setting-help">{{ block.block_config_form.distractor_count.help_text }}</p>
+                    <p class="course-setting-status" data-block-config-status hidden></p>
+                  </div>
+                  <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.coverage_factor.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'coverage_factor' %}">
+                    <label class="course-setting-label" for="{{ block.block_config_form.coverage_factor.id_for_label }}">{{ block.block_config_form.coverage_factor.label }}</label>
+                    {{ block.block_config_form.coverage_factor }}
+                    <p class="course-setting-help">{{ block.block_config_form.coverage_factor.help_text }}</p>
                     <p class="course-setting-status" data-block-config-status hidden></p>
                   </div>
                   <div class="course-setting-cell" data-block-config-row data-block-config-field="{{ block.block_config_form.numeric_ratio_percent.name }}" data-block-config-url="{% url 'standalone:update_block_config_field' block.pk 'numeric_ratio_percent' %}">

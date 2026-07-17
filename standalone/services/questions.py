@@ -77,6 +77,15 @@ OBJECTIVE_MATCH_STOPWORDS = {
     "there",
     "which",
 }
+QUESTION_FOCUS_STOPWORDS = OBJECTIVE_MATCH_STOPWORDS | {
+    "analyse",
+    "analyze",
+    "apply",
+    "compare",
+    "contrast",
+    "evaluate",
+    "interpret",
+}
 
 QUESTION_TYPE_GENERATION_PRIORITY = {
     QuestionBankItem.QuestionType.NUM: 0,
@@ -296,6 +305,52 @@ def _keyword_set(text: str) -> set[str]:
         for token in re.findall(r"[a-z0-9]+", text.lower())
         if len(token) >= 4 and token not in OBJECTIVE_MATCH_STOPWORDS
     }
+
+
+def _question_focus_terms(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if len(token) >= 4 and token not in QUESTION_FOCUS_STOPWORDS
+    }
+
+
+def _question_focus_bundle(chunk: ContentChunk, objective: LearningObjective | None) -> dict[str, list[str]]:
+    chunk_terms = _question_focus_terms(chunk.text)
+    if objective is None:
+        base_terms = sorted(list(chunk_terms))[:8]
+        return {
+            "target_terms": base_terms,
+            "supporting_terms": base_terms,
+            "excluded_terms": [],
+        }
+
+    objective_terms = _question_focus_terms(objective.text)
+    shared_terms = sorted(objective_terms & chunk_terms)
+    supporting_terms = sorted((objective_terms | chunk_terms) - set(shared_terms))
+    sibling_terms: set[str] = set()
+    for sibling in objective.block.learning_objectives.exclude(pk=objective.pk):
+        sibling_terms.update(_question_focus_terms(sibling.text))
+    excluded_terms = sorted(term for term in sibling_terms if term not in objective_terms)[:8]
+    if not shared_terms:
+        shared_terms = sorted(list(objective_terms))[:8]
+    return {
+        "target_terms": shared_terms[:8],
+        "supporting_terms": supporting_terms[:8],
+        "excluded_terms": excluded_terms,
+    }
+
+
+def _question_focus_bundle_prompt(chunk: ContentChunk, objective: LearningObjective | None) -> str:
+    bundle = _question_focus_bundle(chunk, objective)
+    lines = [
+        "Question focus bundle:",
+        f"- target concepts: {', '.join(bundle['target_terms']) or 'use the learning objective wording directly'}",
+        f"- supporting context: {', '.join(bundle['supporting_terms']) or 'use the most relevant chunk details only'}",
+    ]
+    if bundle["excluded_terms"]:
+        lines.append(f"- avoid drifting into nearby themes: {', '.join(bundle['excluded_terms'])}")
+    return "\n".join(lines)
 
 
 def _normalize_coding_language(language: str) -> str:
@@ -1026,6 +1081,7 @@ def _objective_alignment_error(
     objective: LearningObjective | None,
     explanation: str = "",
     chunk_text: str = "",
+    block: CourseBlock | None = None,
 ) -> str:
     if objective is None:
         return ""
@@ -1052,6 +1108,25 @@ def _objective_alignment_error(
         if chunk_overlap >= required_overlap:
             return ""
         return "Generated question does not stay aligned with the target learning objective."
+    sibling_block = block or getattr(objective, "block", None)
+    if sibling_block is not None:
+        max_sibling_overlap = 0
+        for sibling in sibling_block.learning_objectives.exclude(pk=objective.pk):
+            max_sibling_overlap = max(max_sibling_overlap, _keywords_overlap_count(_keyword_set(sibling.text), question_tokens))
+        if max_sibling_overlap >= overlap and overlap <= 2:
+            return "Generated question is too broad and overlaps sibling learning objectives."
+    return ""
+
+
+def _maq_requires_scenario_error(stem: str) -> str:
+    lowered = re.sub(r"\s+", " ", str(stem or "").strip().lower())
+    if not lowered:
+        return "MAQ payload must include a meaningful scenario."
+    if not re.search(
+        r"\b(?:when|during|after|while|given|scenario|case|student|patient|team|class|lab|experiment|investigation|example|situation|teacher|researcher|observes|notices|decides|plans|uses)\b",
+        lowered,
+    ):
+        return "MAQ payload must be scenario-based rather than a generic checklist."
     return ""
 
 
@@ -2049,6 +2124,39 @@ def _generate_question_pair_for_question_type(
         last_generation_error = "objective not numeric-eligible"
     if question_type != QuestionBankItem.QuestionType.NUM and generation_attempts >= MAX_STANDARD_GENERATION_ATTEMPTS and not last_generation_error:
         last_generation_error = "Generation stopped after too many rejected attempts."
+    if question_type != QuestionBankItem.QuestionType.NUM:
+        for chunk in candidate_chunks[: min(len(candidate_chunks), 3)]:
+            try:
+                generation_attempts += 1
+                coding_signal = coding_signals.get(chunk.pk) if (coding_generation_due and question_type != QuestionBankItem.QuestionType.NUM) else None
+                payload, effective_question_type, expected_coding_language = _payload_for_generation_attempt(
+                    chunk,
+                    None,
+                    distractor_count,
+                    question_type,
+                    coding_signal=coding_signal,
+                    avoid_question_angles=_recent_question_avoidance_notes(block, question_type),
+                    question_variant_index=question_type_chunk_counts.get(chunk.pk, 0),
+                )
+                practice, validation = _create_question_pair(
+                    course=course,
+                    block=block,
+                    chunk=chunk,
+                    objective=None,
+                    question_type=effective_question_type,
+                    payload=payload,
+                    existing_hashes=existing_hashes,
+                    expected_coding_language=expected_coding_language,
+                    relax_similarity_checks=relax_similarity_checks,
+                )
+            except QuestionGenerationUnavailableError:
+                raise
+            except (ValueError, OpenAIError) as exc:
+                last_generation_error = str(exc)
+                _trace_generation_rejection(block, question_type, last_generation_error, chunk=chunk, objective=None)
+                continue
+            if practice is not None and validation is not None:
+                return practice, validation, ""
     return None, None, last_generation_error
 
 
@@ -2062,6 +2170,7 @@ def _payload_for_generation_attempt(
     avoid_question_angles: list[str] | None = None,
     question_variant_index: int = 0,
 ) -> tuple[dict, str, str]:
+    focus_bundle_prompt = _question_focus_bundle_prompt(chunk, objective)
     if question_type == QuestionBankItem.QuestionType.NUM:
         payload = _numeric_question_payload(
             chunk,
@@ -2135,6 +2244,7 @@ def _payload_for_generation_attempt(
                     question_type,
                     coding_signal,
                     avoid_question_angles=avoid_question_angles,
+                    focus_bundle_prompt=focus_bundle_prompt,
                 )
                 if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
                     raise ValueError("Question stem depends on source/meta phrasing.")
@@ -2169,6 +2279,7 @@ def _payload_for_generation_attempt(
             distractor_count,
             question_type,
             avoid_question_angles=avoid_question_angles,
+            focus_bundle_prompt=focus_bundle_prompt,
         )
         if _is_source_dependent_question_stem(str(payload.get("stem", ""))):
             raise ValueError("Question stem depends on source/meta phrasing.")
@@ -2304,6 +2415,7 @@ def _openai_question_payload(
     question_type: str,
     *,
     avoid_question_angles: list[str] | None = None,
+    focus_bundle_prompt: str = "",
 ) -> dict:
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     objective_text = objective.text if objective else "this block"
@@ -2344,9 +2456,14 @@ Rules:
 - further_study_questions should invite deeper understanding, examples, comparison, application, or common mistakes when helpful
 - each further_study_questions item must be phrased as a question a student could click to ask next
 - prioritise a genuinely different question angle from recent questions when possible{avoidance_prompt}
+{"- for MAQ only: make the stem scenario-based using a short concrete vignette, case, experiment, decision, or applied situation" if is_maq else ""}
+{"- for MAQ only: do not return a generic checklist stem such as \"Which statements are true about ...\" without concrete scenario context" if is_maq else ""}
+{"- for MAQ only: each answer option must be a claim, action, interpretation, or judgement about that scenario" if is_maq else ""}
 
 Learning objective:
 {objective_text}
+
+{focus_bundle_prompt}
 
 Source text:
 {chunk.text}
@@ -2380,6 +2497,7 @@ def _openai_coding_question_payload(
     coding_signal: dict[str, str],
     *,
     avoid_question_angles: list[str] | None = None,
+    focus_bundle_prompt: str = "",
 ) -> dict:
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     objective_text = objective.text if objective else "programming understanding"
@@ -2425,9 +2543,12 @@ Rules:
 - {"n/a" if is_waq else "each answer option must be a direct substantive claim about the code, not commentary about whether another option is relevant, partial, plausible, or complete"}
 - {"n/a" if is_waq else "do not make all distractors start with the same stock opener such as Because, It, This, or The unless the correct answer uses the same opener and comparable phrasing"}
 - further_study_questions must be an array of exactly 3 concise student-facing follow-up questions{avoidance_prompt}
+{"- for MAQ only: make the stem scenario-based using the code context, such as a debugging case, execution situation, or applied programming decision" if is_maq else ""}
 
 Learning objective:
 {objective_text}
+
+{focus_bundle_prompt}
 
 Detected snippet:
 ```{language}
@@ -2975,6 +3096,9 @@ def _normalize_generated_payload(
         if len(correct_answers) < 2:
             raise ValueError("MAQ payload must contain at least two correct answers.")
         written_answer_keywords = []
+        maq_scenario_error = _maq_requires_scenario_error(stem)
+        if maq_scenario_error:
+            raise ValueError(maq_scenario_error)
 
     if normalized_type == QuestionBankItem.QuestionType.NUM:
         if len(distractors) != distractor_count:
@@ -3126,6 +3250,7 @@ def _create_question_pair(
             objective=objective,
             explanation=normalized_payload["explanation"],
             chunk_text=chunk.text,
+            block=block,
         )
     if objective_alignment_error:
         raise ValueError(objective_alignment_error)

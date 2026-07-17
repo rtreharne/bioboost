@@ -4,7 +4,7 @@ set -euo pipefail
 PORT="${PORT:-10000}"
 SQLITE_PATH="${SQLITE_PATH:-/app/data/db.sqlite3}"
 MEDIA_ROOT="${MEDIA_ROOT:-/app/media}"
-FILE_UPLOAD_TEMP_DIR="${FILE_UPLOAD_TEMP_DIR:-/tmp/ninepointeightone-uploads}"
+FILE_UPLOAD_TEMP_DIR="${FILE_UPLOAD_TEMP_DIR:-/tmp/bioboost-uploads}"
 export SQLITE_PATH
 export MEDIA_ROOT
 export FILE_UPLOAD_TEMP_DIR

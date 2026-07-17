@@ -64,7 +64,13 @@ from standalone.tasks import (
     run_content_asset_processing,
     run_course_import_block_creation,
 )
-from standalone.services.content import chunk_text, summarize_block_content
+from standalone.services.content import (
+    BlockContentGenerationError,
+    _objective_budget_for_text,
+    chunk_text,
+    extract_text_from_asset,
+    summarize_block_content,
+)
 from standalone.services.block_avatars import generate_and_store_block_avatar
 from standalone.services.guidance import build_generation_guidance_prompt
 from standalone.services.math_questions import (
@@ -497,7 +503,7 @@ class StandaloneFlowTests(TestCase):
             def __init__(self, output_text):
                 self.output_text = output_text
 
-        def fake_create(*, model, input):
+        def fake_create(*, model, input, text=None):
             prompt = input[1]["content"][0]["text"]
             prompts.append(prompt)
             if "Section summaries:" in prompt:
@@ -533,6 +539,238 @@ class StandaloneFlowTests(TestCase):
             summary, _objectives = summarize_block_content("Membrane transport regulates cell exchange.", max_items=3)
 
         self.assertEqual(summary, "Membrane transport.")
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_summarize_block_content_prompt_prioritizes_guidance_and_progressive_student_facing_objectives(self):
+        prompts = []
+
+        class DummyResponse:
+            output_text = (
+                '{"summary":"Students learn to use AI responsibly in their studies.",'
+                '"learning_objectives":["Explain when AI use is appropriate in study tasks","Apply responsible AI use when planning and drafting work","Evaluate AI outputs before using them in submitted work"]}'
+            )
+
+        def fake_create(*, model, input, text=None):
+            prompts.append(input[1]["content"][0]["text"])
+            return DummyResponse()
+
+        with patch("standalone.services.content.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            summarize_block_content(
+                "University policy statements about generative AI, misconduct, disclosure, and assessment expectations.",
+                max_items=4,
+                guidance=(
+                    "Focus on students using AI responsibly in their studies.\n"
+                    "Learning objectives must be student focused, avoid jargon, and use plain language."
+                ),
+                existing_objectives=["Use AI responsibly in academic study"],
+            )
+
+        prompt = prompts[0]
+        self.assertIn("Author guidance (highest priority for audience, framing, and tone):", prompt)
+        self.assertIn("Focus on students using AI responsibly in their studies.", prompt)
+        self.assertIn("student-focused", prompt)
+        self.assertIn("plain student-facing language", prompt)
+        self.assertIn("policy-heavy or administrative", prompt)
+        self.assertIn("sensible progression of themes or difficulty", prompt)
+        self.assertIn("prefer breadth of coverage before nuance", prompt)
+        self.assertIn("do not produce near-duplicate objectives", prompt)
+        self.assertIn("only return fewer than 4 objectives", prompt)
+        self.assertIn("fully formed, distinct from the others, and easy to interpret on its own", prompt)
+
+    def test_objective_budget_for_text_scales_beyond_eight_for_larger_uploads(self):
+        long_text = "\n\n".join([f"Topic {index} sentence. " * 120 for index in range(1, 7)])
+
+        self.assertGreaterEqual(_objective_budget_for_text(long_text), 12)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_summarize_block_content_merges_fallback_objectives_when_model_output_is_repetitive(self):
+        source_text = "\n".join(
+            [
+                "Explain the structure and function of the cell membrane.",
+                "Describe how transport proteins regulate movement across the membrane.",
+                "Compare diffusion with active transport in cell membranes.",
+                "Analyse how enzymes lower activation energy in metabolic pathways.",
+            ]
+        )
+
+        class DummyResponse:
+            output_text = (
+                '{"summary":"Students study membrane transport and metabolism.",'
+                '"learning_objectives":['
+                '"Explain the structure and function of the cell membrane",'
+                '"Describe the structure and function of the cell membrane",'
+                '"Explain the structure and function of the cell membrane"'
+                "]} "
+            )
+
+        with patch("standalone.services.content.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            _summary, objectives = summarize_block_content(source_text, max_items=4)
+
+        self.assertIn("Explain the structure and function of the cell membrane", objectives)
+        self.assertIn("Describe how transport proteins regulate movement across the membrane", objectives)
+        self.assertIn("Compare diffusion with active transport in cell membranes", objectives)
+        self.assertGreaterEqual(len(objectives), 3)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    def test_summarize_block_content_openai_request_uses_json_schema(self):
+        captured_kwargs = []
+
+        class DummyResponse:
+            output_text = (
+                '{"summary":"Membrane transport regulates exchange across the cell surface.",'
+                '"learning_objectives":["Explain membrane structure","Compare passive and active transport","Apply membrane transport ideas to examples"]}'
+            )
+
+        def fake_create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return DummyResponse()
+
+        with patch("standalone.services.content.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = fake_create
+            summarize_block_content("Membrane transport regulates exchange across the cell surface.", max_items=4)
+
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["type"], "json_schema")
+        self.assertTrue(captured_kwargs[0]["text"]["format"]["strict"])
+        self.assertEqual(captured_kwargs[0]["text"]["format"]["name"], "block_content_generation")
+        self.assertEqual(
+            captured_kwargs[0]["text"]["format"]["schema"]["required"],
+            ["summary", "learning_objectives"],
+        )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_summarize_block_content_raises_without_key_when_fallback_disabled(self):
+        with self.assertRaisesMessage(
+            BlockContentGenerationError,
+            "AI block generation requires OPENAI_API_KEY.",
+        ):
+            summarize_block_content(
+                "Membrane transport regulates exchange across the cell surface.",
+                max_items=4,
+                allow_fallback=False,
+            )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_ingest_content_asset_passes_block_guidance_into_objective_generation(self):
+        from standalone.services.content import ingest_content_asset
+
+        course = self.create_course()
+        course.config.assistant_guidance = "Keep learning objectives student focused."
+        course.config.save(update_fields=["assistant_guidance", "updated_at"])
+        block = CourseBlock.objects.create(course=course, title="AI guidance", summary="AI guidance", order=1)
+        BlockConfig.objects.create(block=block, assistant_guidance="Focus on using AI responsibly in study tasks.")
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "ai-policy.txt",
+                b"University policy on generative AI, misconduct, disclosure, and acceptable use.",
+                content_type="text/plain",
+            ),
+            original_filename="ai-policy.txt",
+            extension=".txt",
+            include_in_generation=True,
+        )
+
+        with patch(
+            "standalone.services.content.summarize_block_content",
+            return_value=("Summary", ["Explain responsible AI use in study tasks"]),
+        ) as summarize_mock:
+            ingest_content_asset(asset)
+
+        self.assertEqual(
+            summarize_mock.call_args.kwargs["guidance"],
+            "Keep learning objectives student focused.\nFocus on using AI responsibly in study tasks.",
+        )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_regenerate_block_descriptions_and_objectives_passes_guidance_and_existing_objective_direction(self):
+        from standalone.services.content import regenerate_block_descriptions_and_objectives
+
+        course = self.create_course()
+        course.config.assistant_guidance = "Keep objectives in plain student language."
+        course.config.save(update_fields=["assistant_guidance", "updated_at"])
+        block = CourseBlock.objects.create(course=course, title="AI policy", summary="Old summary", order=1)
+        BlockConfig.objects.create(block=block, assistant_guidance="Focus on students using AI responsibly in their studies.")
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("ai.txt", b"AI policy", content_type="text/plain"),
+            original_filename="ai.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PROCESSED,
+            extracted_text="Institutional guidance on generative AI, disclosure, and academic integrity expectations.",
+        )
+        LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Interpret university AI policy",
+            assistant_guidance="Keep it student focused and avoid policy jargon.",
+        )
+
+        with patch(
+            "standalone.services.content.summarize_block_content",
+            return_value=("Updated summary", ["Use AI responsibly in your studies"]),
+        ) as summarize_mock:
+            regenerate_block_descriptions_and_objectives(block)
+
+        objective_generation_call = summarize_mock.call_args_list[0]
+        self.assertEqual(
+            objective_generation_call.kwargs["guidance"],
+            "Keep objectives in plain student language.\nFocus on students using AI responsibly in their studies.",
+        )
+        self.assertEqual(
+            objective_generation_call.kwargs["existing_objectives"],
+            ["Interpret university AI policy | Guidance: Keep it student focused and avoid policy jargon."],
+        )
+
+    def test_extract_text_from_asset_uses_pdf_import_extractor_for_pdf_assets(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        BlockConfig.objects.create(block=block)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile("notes.pdf", b"%PDF-1.4 fake", content_type="application/pdf"),
+            original_filename="notes.pdf",
+            extension=".pdf",
+            include_in_generation=True,
+        )
+
+        with patch("standalone.services.content.PdfReader", return_value=SimpleNamespace(pages=[object()])), patch(
+            "standalone.services.pdf_import.extract_pdf_page_range",
+            return_value="Recovered PDF text",
+        ) as extract_mock:
+            extracted = extract_text_from_asset(asset)
+
+        self.assertEqual(extracted, "Recovered PDF text")
+        extract_mock.assert_called_once_with(asset.file.path, 1, 1)
+
+    def test_extract_text_from_asset_decodes_utf16_text_files(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        BlockConfig.objects.create(block=block)
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "notes.txt",
+                "Membrane transport and osmosis.".encode("utf-16"),
+                content_type="text/plain",
+            ),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+        )
+
+        extracted = extract_text_from_asset(asset)
+
+        self.assertEqual(extracted, "Membrane transport and osmosis.")
 
     def test_normalize_explanation_text_decodes_literal_unicode_escapes(self):
         explanation = normalize_explanation_text(
@@ -3079,6 +3317,7 @@ class StandaloneFlowTests(TestCase):
                 "coverage_weight": 30,
                 "engagement_weight": 30,
                 "distractor_count": 3,
+                "coverage_factor": 2,
                 "numeric_ratio_percent": 25,
                 "math_symbolic_ratio_percent": 45,
                 "maq_ratio_percent": 35,
@@ -3097,6 +3336,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(course.config.maq_ratio_percent, 35)
         self.assertEqual(course.config.waq_ratio_percent, 15)
         self.assertEqual(course.config.coding_question_ratio_percent, 50)
+        self.assertEqual(course.config.coverage_factor, 2)
         self.assertEqual(course.config.advanced_question_start_percent, 40)
 
     def test_course_config_field_autosave_updates_and_normalises_values(self):
@@ -3122,6 +3362,16 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(numeric_response.status_code, 200)
         course.config.refresh_from_db()
         self.assertEqual(course.config.numeric_ratio_percent, 30)
+
+        coverage_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "coverage_factor"]),
+            {"coverage_factor": "3"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(coverage_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertEqual(course.config.coverage_factor, 3)
 
         guidance_response = self.client.post(
             reverse("standalone:update_course_config_field", args=[course.pk, "assistant_guidance"]),
@@ -3149,6 +3399,7 @@ class StandaloneFlowTests(TestCase):
     def test_block_config_form_inherits_course_defaults_when_blank_and_validates_ranges(self):
         course = self.create_course()
         course.config.assistant_guidance = "Use concise code explanations."
+        course.config.coverage_factor = 2
         course.config.distractor_count = 4
         course.config.numeric_ratio_percent = 25
         course.config.math_symbolic_ratio_percent = 30
@@ -3159,6 +3410,7 @@ class StandaloneFlowTests(TestCase):
         course.config.save(
             update_fields=[
                 "assistant_guidance",
+                "coverage_factor",
                 "distractor_count",
                 "numeric_ratio_percent",
                 "math_symbolic_ratio_percent",
@@ -3178,6 +3430,7 @@ class StandaloneFlowTests(TestCase):
         form = BlockConfigForm(
             data={
                 "assistant_guidance": "",
+                "coverage_factor": "",
                 "distractor_count": "",
                 "numeric_ratio_percent": "",
                 "math_symbolic_ratio_percent": "",
@@ -3194,10 +3447,12 @@ class StandaloneFlowTests(TestCase):
         config.refresh_from_db()
 
         self.assertEqual(config.assistant_guidance, "")
+        self.assertIsNone(config.coverage_factor)
         self.assertIsNone(config.distractor_count)
         self.assertIsNone(config.numeric_ratio_percent)
         self.assertIsNone(config.math_symbolic_ratio_percent)
         self.assertEqual(block.question_assistant_guidance, "Use concise code explanations.")
+        self.assertEqual(block.practice_coverage_factor, 2)
         self.assertEqual(block.question_distractor_count, 4)
         self.assertEqual(block.question_numeric_ratio_percent, 25)
         self.assertEqual(block.question_math_symbolic_ratio_percent, 30)
@@ -3220,6 +3475,16 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(numeric_response.status_code, 200)
         block.config.refresh_from_db()
         self.assertEqual(block.config.coding_question_ratio_percent, 100)
+
+        coverage_response = self.client.post(
+            reverse("standalone:update_block_config_field", args=[block.pk, "coverage_factor"]),
+            {"coverage_factor": "4"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(coverage_response.status_code, 200)
+        block.config.refresh_from_db()
+        self.assertEqual(block.config.coverage_factor, 4)
 
         guidance_response = self.client.post(
             reverse("standalone:update_block_config_field", args=[block.pk, "assistant_guidance"]),
@@ -3643,7 +3908,7 @@ class StandaloneFlowTests(TestCase):
             file=ContentFile(b"Solve simultaneous linear equations.", name="01-chapter.txt"),
         )
 
-        def fake_regenerate(_block, progress_callback=None):
+        def fake_regenerate(_block, progress_callback=None, allow_fallback=True):
             LearningObjective.objects.create(
                 course=course,
                 block=block,
@@ -3693,7 +3958,7 @@ class StandaloneFlowTests(TestCase):
             file=ContentFile(b"Solve simultaneous linear equations.", name="01-chapter.txt"),
         )
 
-        def fake_regenerate(_block, progress_callback=None):
+        def fake_regenerate(_block, progress_callback=None, allow_fallback=True):
             LearningObjective.objects.create(
                 course=course,
                 block=block,
@@ -3998,7 +4263,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Select at most 1 chapters at a time for this deployment.")
         mock_queue.assert_not_called()
 
-    @override_settings(OPENAI_API_KEY="")
+    @override_settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True)
     def test_course_import_block_creation_processes_selected_chapters_one_at_a_time_when_queued(self):
         course = self.create_course()
         course_import = CourseImport.objects.create(
@@ -4087,7 +4352,7 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(chapter.attempt_count, 2)
         self.assertEqual(course_import.failed_chapter_count, 1)
 
-    @override_settings(OPENAI_API_KEY="")
+    @override_settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True)
     def test_course_import_block_creation_creates_blocks_for_selected_chapters_only(self):
         course = self.create_course()
         course_import = CourseImport.objects.create(
@@ -4133,7 +4398,7 @@ class StandaloneFlowTests(TestCase):
         course.refresh_from_db()
         self.assertTrue(course.summary)
 
-    @override_settings(OPENAI_API_KEY="")
+    @override_settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True)
     def test_course_import_block_creation_applies_edexcel_math_guidance(self):
         course = self.create_course()
         course_import = CourseImport.objects.create(
@@ -4165,7 +4430,7 @@ class StandaloneFlowTests(TestCase):
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
 
         with tempfile.TemporaryDirectory() as media_root:
-            with self.settings(MEDIA_ROOT=media_root, OPENAI_API_KEY=""):
+            with self.settings(MEDIA_ROOT=media_root, OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True):
                 asset = ContentAsset.objects.create(
                     block=block,
                     uploaded_by=self.teacher,
@@ -4359,6 +4624,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, ">Course settings<", html=False)
         self.assertGreater(len(list(response.context["test_mode_collection_form"]["blocks"])), 0)
         self.assertContains(response, "Auto-save")
+        self.assertContains(response, "Coverage factor")
         self.assertContains(response, "Multiple-answer question ratio (%)")
         self.assertContains(response, "Written-answer question ratio (%)")
         self.assertContains(response, 'data-settings-toast', html=False)
@@ -4379,7 +4645,6 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'action="%s"' % reverse("standalone:regenerate_block_content", args=[block.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:regenerate_block_avatar", args=[block.pk]), html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_field", args=[block.pk, "available_from"]), html=False)
-        self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_config_field", args=[block.pk, "target_question_count"]), html=False)
         self.assertContains(response, "Question settings")
         self.assertContains(
             response,
@@ -4387,8 +4652,9 @@ class StandaloneFlowTests(TestCase):
             html=False,
         )
         self.assertContains(response, 'data-block-config-input="assistant_guidance"', html=False)
+        self.assertContains(response, 'data-block-config-input="coverage_factor"', html=False)
         self.assertContains(response, "Available from")
-        self.assertContains(response, "Engagement target")
+        self.assertNotContains(response, "Engagement target")
         self.assertContains(response, "Enrolment routes")
         self.assertContains(response, "Course blocks")
         self.assertContains(response, "Course settings")
@@ -4563,10 +4829,13 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'data-upload-form', html=False)
         self.assertContains(response, 'data-upload-input="true"', html=False)
         self.assertContains(response, 'name="available_from"', html=False)
+        self.assertContains(response, 'name="assistant_guidance"', html=False)
         self.assertContains(response, 'type="date"', html=False)
+        self.assertContains(response, "Additional prompts")
         self.assertContains(response, "Choose files")
         self.assertContains(response, "Create block")
         self.assertContains(response, "MCQs for this block will only be generated and shown to students from this date.")
+        self.assertContains(response, "Optional. Add extra prompts for this block")
         self.assertNotContains(response, 'name="summary"', html=False)
         self.assertNotContains(response, 'name="order"', html=False)
 
@@ -4638,7 +4907,7 @@ class StandaloneFlowTests(TestCase):
             ),
         )
 
-        with self.settings(OPENAI_API_KEY=""):
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True):
             run_block_regeneration(block_one.pk)
 
         block_one.refresh_from_db()
@@ -4751,7 +5020,7 @@ class StandaloneFlowTests(TestCase):
         block, asset, _objective, _chunk = self.create_preview_content_block(course, title="Mechanics")
 
         with patch("standalone.tasks.ingest_content_asset"), patch(
-            "standalone.tasks.regenerate_course_descriptions_and_objectives"
+            "standalone.tasks.regenerate_block_descriptions_and_objectives"
         ), patch("standalone.tasks.generate_and_store_block_avatar") as generate_avatar:
             run_content_asset_processing(asset.pk)
 
@@ -4873,8 +5142,27 @@ class StandaloneFlowTests(TestCase):
             ),
         )
 
-        with self.settings(OPENAI_API_KEY=""):
-            run_block_regeneration(block.pk)
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "summary": "Students study membrane transport and metabolic control.",
+                    "learning_objectives": [
+                        "Explain the structure and function of the cell membrane",
+                        "Describe how transport proteins regulate movement across the membrane",
+                        "Compare diffusion with active transport",
+                        "Analyse how enzymes lower activation energy in metabolic pathways",
+                        "Evaluate how ATP couples energy release to cellular work",
+                        "Explain how mitochondrial electron transport drives oxidative phosphorylation",
+                        "Assess the role of feedback inhibition in metabolic control",
+                        "Interpret how glycogen metabolism responds to hormonal signalling",
+                    ],
+                }
+            )
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            with patch("standalone.services.content.OpenAI") as mock_client:
+                mock_client.return_value.responses.create.return_value = DummyResponse()
+                run_block_regeneration(block.pk)
 
         block.refresh_from_db()
         objectives = list(block.learning_objectives.order_by("position", "pk").values_list("text", flat=True))
@@ -4918,8 +5206,27 @@ class StandaloneFlowTests(TestCase):
             extracted_text=late_topic_lines,
         )
 
-        with self.settings(OPENAI_API_KEY=""):
-            run_block_regeneration(block.pk)
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "summary": "Students study membrane transport and metabolic control.",
+                    "learning_objectives": [
+                        "Explain the structure and function of the cell membrane",
+                        "Describe how transport proteins regulate movement across the membrane",
+                        "Compare diffusion with active transport",
+                        "Analyse how enzymes lower activation energy in metabolic pathways",
+                        "Evaluate how ATP couples energy release to cellular work",
+                        "Explain how mitochondrial electron transport drives oxidative phosphorylation",
+                        "Assess the role of feedback inhibition in metabolic control",
+                        "Interpret how glycogen metabolism responds to hormonal signalling",
+                    ],
+                }
+            )
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            with patch("standalone.services.content.OpenAI") as mock_client:
+                mock_client.return_value.responses.create.return_value = DummyResponse()
+                run_block_regeneration(block.pk)
 
         objectives = list(block.learning_objectives.order_by("position", "pk").values_list("text", flat=True))
         self.assertGreaterEqual(len(objectives), 8)
@@ -4963,10 +5270,10 @@ class StandaloneFlowTests(TestCase):
         block.refresh_from_db()
         self.assertEqual(str(block.available_from), "2026-07-01")
 
-    def test_inline_block_target_update_returns_json_and_persists(self):
+    def test_inline_block_target_update_is_not_available(self):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
-        config = BlockConfig.objects.create(block=block)
+        BlockConfig.objects.create(block=block)
         self.client.force_login(self.teacher)
 
         response = self.client.post(
@@ -4974,10 +5281,7 @@ class StandaloneFlowTests(TestCase):
             {"target_question_count": "32"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["display_value"], 32)
-        config.refresh_from_db()
-        self.assertEqual(config.target_question_count, 32)
+        self.assertEqual(response.status_code, 404)
 
     def test_inline_learning_objective_update_sanitizes_text(self):
         course = self.create_course()
@@ -5503,7 +5807,7 @@ class StandaloneFlowTests(TestCase):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
         self.client.force_login(self.teacher)
-        with self.settings(OPENAI_API_KEY="", CELERY_TASK_ALWAYS_EAGER=True):
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True, CELERY_TASK_ALWAYS_EAGER=True):
             response = self.client.post(
                 reverse("standalone:asset_upload", args=[block.pk]),
                 {
@@ -5534,6 +5838,7 @@ class StandaloneFlowTests(TestCase):
                 {
                     "title": "Week 1",
                     "available_from": "2026-07-04",
+                    "assistant_guidance": "Focus on practical membrane examples.",
                     "file": [
                         SimpleUploadedFile(
                             "notes-1.txt",
@@ -5558,6 +5863,7 @@ class StandaloneFlowTests(TestCase):
         queue_processing.assert_called_once_with(block.pk)
         self.assertEqual(block.order, 2)
         self.assertEqual(str(block.available_from), "2026-07-04")
+        self.assertEqual(block.config.assistant_guidance, "Focus on practical membrane examples.")
         self.assertEqual(block.regeneration_status, CourseBlock.RegenerationStatus.QUEUED)
         self.assertEqual(block.regeneration_progress, 5)
         self.assertEqual(block.regeneration_error, "")
@@ -5666,7 +5972,7 @@ class StandaloneFlowTests(TestCase):
             processing_status=ContentAsset.ProcessingStatus.PENDING,
         )
 
-        with self.settings(OPENAI_API_KEY=""):
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True):
             run_block_creation_processing(block.pk)
 
         block.refresh_from_db()
@@ -5679,11 +5985,83 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(block.regeneration_progress, 0)
         self.assertEqual(block.regeneration_error, "")
 
+    def test_run_block_creation_processing_fails_without_key_when_fallback_disabled(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(
+            course=course,
+            title="Week 1",
+            order=1,
+            regeneration_status=CourseBlock.RegenerationStatus.QUEUED,
+            regeneration_progress=5,
+        )
+        ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "notes.txt",
+                b"Describe membrane structure and function.",
+                content_type="text/plain",
+            ),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PENDING,
+        )
+
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=False):
+            with self.assertRaises(BlockContentGenerationError):
+                run_block_creation_processing(block.pk)
+
+        block.refresh_from_db()
+        self.assertEqual(block.regeneration_status, CourseBlock.RegenerationStatus.FAILED)
+        self.assertIn("OPENAI_API_KEY", block.regeneration_error)
+
+    def test_run_block_creation_processing_fails_without_key_even_when_fallback_flag_is_enabled(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(
+            course=course,
+            title="Week 1",
+            summary="Old summary",
+            order=1,
+            regeneration_status=CourseBlock.RegenerationStatus.QUEUED,
+            regeneration_progress=5,
+        )
+        asset = ContentAsset.objects.create(
+            block=block,
+            uploaded_by=self.teacher,
+            file=SimpleUploadedFile(
+                "notes.txt",
+                b"Describe membrane structure and function.",
+                content_type="text/plain",
+            ),
+            original_filename="notes.txt",
+            extension=".txt",
+            include_in_generation=True,
+            processing_status=ContentAsset.ProcessingStatus.PENDING,
+        )
+        LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=1,
+            code="1.1",
+            text="Old learning objective",
+        )
+
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True):
+            with self.assertRaises(BlockContentGenerationError):
+                run_block_creation_processing(block.pk)
+
+        block.refresh_from_db()
+        self.assertEqual(block.regeneration_status, CourseBlock.RegenerationStatus.FAILED)
+        self.assertEqual(block.summary, "")
+        self.assertEqual(block.learning_objectives.count(), 0)
+
     def test_teacher_can_upload_multiple_files_in_one_submit(self):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
         self.client.force_login(self.teacher)
-        with self.settings(OPENAI_API_KEY="", CELERY_TASK_ALWAYS_EAGER=True):
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True, CELERY_TASK_ALWAYS_EAGER=True):
             response = self.client.post(
                 reverse("standalone:asset_upload", args=[block.pk]),
                 {
@@ -5708,6 +6086,39 @@ class StandaloneFlowTests(TestCase):
         self.assertTrue(all(asset.processing_status == ContentAsset.ProcessingStatus.PROCESSED for asset in assets))
         self.assertTrue(all(asset.chunks.exists() for asset in assets))
 
+    def test_asset_upload_queues_single_block_processing_job_for_multiple_files(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
+        self.client.force_login(self.teacher)
+
+        with patch("standalone.views._queue_block_creation_processing") as queue_processing:
+            response = self.client.post(
+                reverse("standalone:asset_upload", args=[block.pk]),
+                {
+                    "file": [
+                        SimpleUploadedFile(
+                            "notes-1.txt",
+                            b"Describe membrane structure and function.",
+                            content_type="text/plain",
+                        ),
+                        SimpleUploadedFile(
+                            "notes-2.txt",
+                            b"Explain how transport proteins regulate movement across the membrane.",
+                            content_type="text/plain",
+                        ),
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        block.refresh_from_db()
+        assets = list(ContentAsset.objects.filter(block=block).order_by("original_filename"))
+        self.assertEqual(len(assets), 2)
+        queue_processing.assert_called_once_with(block.pk, [asset.pk for asset in assets])
+        self.assertEqual(block.regeneration_status, CourseBlock.RegenerationStatus.QUEUED)
+        self.assertEqual(block.regeneration_progress, 5)
+        self.assertEqual(block.regeneration_error, "")
+
     def test_asset_upload_form_cancel_and_submit_return_to_same_course_section(self):
         course = self.create_course()
         block = CourseBlock.objects.create(course=course, title="Week 1", order=1)
@@ -5719,7 +6130,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(get_response, 'name="next"', html=False)
         self.assertContains(get_response, 'value="%s"' % return_to, html=False)
 
-        with self.settings(OPENAI_API_KEY="", CELERY_TASK_ALWAYS_EAGER=True):
+        with self.settings(OPENAI_API_KEY="", BLOCK_CONTENT_HEURISTIC_FALLBACK_ENABLED=True, CELERY_TASK_ALWAYS_EAGER=True):
             post_response = self.client.post(
                 reverse("standalone:asset_upload", args=[block.pk]),
                 {
@@ -6421,6 +6832,33 @@ class StandaloneFlowTests(TestCase):
                     "difficulty": "core",
                 },
                 QuestionBankItem.QuestionType.MCQ,
+                distractor_count=3,
+            )
+
+    def test_normalize_generated_payload_rejects_generic_non_scenario_maq(self):
+        with self.assertRaisesMessage(ValueError, "scenario-based"):
+            _normalize_generated_payload(
+                {
+                    "question_type": QuestionBankItem.QuestionType.MAQ,
+                    "stem": "Which statements are true about membrane transport?",
+                    "correct_answers": [
+                        "Transport proteins can regulate movement across the membrane.",
+                        "Concentration gradients influence passive transport.",
+                    ],
+                    "distractors": [
+                        "Mitochondria store chromosomes for membrane transport.",
+                        "Diffusion always requires ATP from ribosomes.",
+                        "Cell walls directly control ion channels in animal cells.",
+                    ],
+                    "further_study_questions": [
+                        "How does active transport differ from diffusion?",
+                        "Why do concentration gradients matter here?",
+                        "What membrane transport mistake should I avoid?",
+                    ],
+                    "explanation": "Transport depends on membrane structure and gradients.",
+                    "difficulty": "core",
+                },
+                QuestionBankItem.QuestionType.MAQ,
                 distractor_count=3,
             )
 
@@ -8668,6 +9106,38 @@ print(result)""",
         self.assertContains(reload_response, "Question one?")
         self.assertContains(reload_response, "Correct.")
 
+    def test_student_practice_coverage_factor_updates_saved_metrics_progressively(self):
+        course = self.create_course()
+        course.config.coverage_factor = 2
+        course.config.save(update_fields=["coverage_factor", "updated_at"])
+        enrollment = Enrollment.objects.create(course=course, student=self.student)
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Coverage factor question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            question_hash="coverage-factor-practice-metric",
+        )
+        self.client.force_login(self.student)
+
+        self.client.post(reverse("standalone:student_practice_action", args=[course.pk, block.pk, "quiz"]))
+        answer_response = self.client.post(
+            reverse("standalone:student_practice_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+        enrollment.refresh_from_db()
+        self.assertEqual(float(enrollment.mastery_score), 100.0)
+        self.assertEqual(float(enrollment.coverage_score), 50.0)
+
     def test_student_practice_state_includes_collection_conversations(self):
         course = self.create_course()
         Enrollment.objects.create(course=course, student=self.student)
@@ -8686,6 +9156,7 @@ print(result)""",
                 {
                     "id": collection.pk,
                     "title": "Paper 1",
+                    "created_at": response.context["preview_state"]["collections"][0]["created_at"],
                     "block_ids": [first_block.pk, second_block.pk],
                     "anchor_block_id": first_block.pk,
                     "available_manual_question_types": ["maq", "mcq", "waq"],
@@ -8739,7 +9210,9 @@ print(result)""",
         self.assertEqual(preview["active_thread_id"], collection.pk)
         collection_payload = next(item for item in preview["collections"] if item["id"] == collection.pk)
         question_messages = [message for message in collection_payload["transcript"] if message["kind"] == "question"]
-        self.assertEqual(question_messages[-1]["question_id"], question.pk)
+        self.assertTrue(question_messages)
+        presented_question = QuestionBankItem.objects.get(pk=question_messages[-1]["question_id"])
+        self.assertIn(presented_question.block_id, {first_block.pk, second_block.pk})
         first_block_payload = next(item for item in preview["blocks"] if item["id"] == first_block.pk)
         self.assertFalse(any(message["kind"] == "question" for message in first_block_payload["transcript"]))
 
@@ -9221,7 +9694,7 @@ print(result)""",
         future_questions = [message for message in future_block_payload["transcript"] if message["kind"] == "question"]
         self.assertEqual(future_questions[-1]["text"], "Future question?")
 
-    def test_student_practice_engagement_uses_half_life_decay(self):
+    def test_student_practice_engagement_is_ignored_in_scoring(self):
         course = self.create_course()
         course.config.engagement_half_life_days = 7
         course.config.save(update_fields=["engagement_half_life_days", "updated_at"])
@@ -9252,7 +9725,7 @@ print(result)""",
         )
 
         enrollment.refresh_from_db()
-        self.assertEqual(float(enrollment.engagement_score), 50.0)
+        self.assertEqual(float(enrollment.engagement_score), 0.0)
 
     def test_student_practice_flag_persists_and_skips_question(self):
         course = self.create_course()
@@ -9694,6 +10167,8 @@ print(result)""",
         self.assertNotContains(response, "data-preview-sidebar-toggle", html=False)
         self.assertContains(response, "student-preview-data", html=False)
         self.assertContains(response, "data-waq-alignment-loader", html=False)
+        self.assertContains(response, "data-preview-sidebar-menu-trigger", html=False)
+        self.assertContains(response, "data-preview-reset-course", html=False)
         self.assertNotContains(response, "data-preview-sidebar-summary", html=False)
         self.assertNotContains(response, "data-preview-block-search", html=False)
         self.assertNotContains(response, "data-preview-course-metrics", html=False)
@@ -9704,6 +10179,53 @@ print(result)""",
         self.assertContains(response, "data-preview-calculator-trigger", html=False)
         self.assertContains(response, "preview-chat-scroll-bottom", html=False)
         self.assertNotContains(response, "preview-composer-actions", html=False)
+
+    def test_student_preview_reset_clears_course_preview_session_state(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Reset preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Reset preview explanation.",
+            question_hash="reset-preview-question",
+        )
+        self.client.force_login(self.teacher)
+
+        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertEqual(answer_response.status_code, 200)
+        self.assertEqual(answer_response.json()["preview"]["course"]["metrics"]["completed_count"], 1)
+
+        reset_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "reset"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(reset_response.status_code, 200)
+        preview = reset_response.json()["preview"]
+        self.assertEqual(preview["course"]["metrics"]["completed_count"], 0)
+        self.assertEqual(preview["course"]["metrics"]["correct_count"], 0)
+        block_payload = next(item for item in preview["blocks"] if item["id"] == block.pk)
+        self.assertEqual(len(block_payload["transcript"]), 1)
+        self.assertTrue(block_payload["transcript"][0]["is_block_welcome"])
+
+        session = self.client.session
+        course_state = session[PREVIEW_SESSION_KEY][str(course.pk)]
+        self.assertEqual(course_state["completed_events"], [])
+        self.assertEqual(course_state["pending_questions"], {})
+        self.assertEqual(len(course_state["transcripts"][str(block.pk)]), 1)
 
     def test_student_practice_keeps_legacy_shell_without_messenger_markers(self):
         course = self.create_course()
@@ -9792,17 +10314,12 @@ print(result)""",
         course_metrics = preview["course"]["metrics"]
         self.assertEqual(course_metrics["mastery"], 50.0)
         self.assertEqual(course_metrics["coverage"], 50.0)
-        self.assertEqual(course_metrics["engagement"], 5.0)
         self.assertEqual(course_metrics["overall"], 50.0)
         self.assertEqual(course_metrics["correct_count"], 1)
         self.assertEqual(course_metrics["incorrect_count"], 1)
         self.assertEqual(course_metrics["completed_count"], 2)
         self.assertEqual(course_metrics["covered_objective_count"], 1)
         self.assertEqual(course_metrics["total_objective_count"], 3)
-        self.assertEqual(course_metrics["engagement_weighted_count"], 2.0)
-        self.assertEqual(course_metrics["combined_target_question_count"], 40)
-        self.assertTrue(course_metrics["engagement_is_fixed"])
-        self.assertIsNone(course_metrics["engagement_half_life_days"])
         self.assertEqual(
             course_metrics["weights"],
             {
@@ -9820,9 +10337,7 @@ print(result)""",
         self.assertEqual(first_block_metrics["completed_count"], 1)
         self.assertEqual(first_block_metrics["covered_objective_count"], 1)
         self.assertEqual(first_block_metrics["total_objective_count"], 1)
-        self.assertEqual(first_block_metrics["engagement_weighted_count"], 1.0)
-        self.assertTrue(first_block_metrics["engagement_is_fixed"])
-        self.assertIsNone(first_block_metrics["engagement_half_life_days"])
+        self.assertEqual(first_block_metrics["engagement"], 0.0)
 
         second_block_metrics = next(block["metrics"] for block in preview["blocks"] if block["id"] == second_block.pk)
         self.assertEqual(second_block_metrics["overall"], 0.0)
@@ -10823,7 +11338,7 @@ print(result)""",
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
         self.assertIn("average speed", question_messages[-1]["text"].lower())
 
-    def test_student_preview_forced_advanced_types_are_available_before_threshold(self):
+    def test_student_preview_forced_advanced_types_fall_back_before_threshold(self):
         course = self.create_course()
         maq_block, _, maq_objective, maq_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
         waq_block, _, waq_objective, waq_chunk = self.create_preview_content_block(course, title="Week 2", order=2)
@@ -10906,12 +11421,14 @@ print(result)""",
                 block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
                 question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
                 self.assertEqual(question_messages[-1]["question_id"], expected_question_id)
-                self.assertEqual(question_messages[-1]["question_type"], requested_type)
+                self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
                 self.assertFalse(block_payload["metrics"]["advanced_question_types_unlocked"])
                 self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 50)
 
     def test_student_preview_forced_numeric_type_is_not_locked_by_advanced_threshold(self):
         course = self.create_course()
+        course.config.numeric_ratio_percent = 100
+        course.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
         block, _, objective, chunk = self.create_preview_content_block(course)
         block.config.target_question_count = 2
         block.config.save(update_fields=["target_question_count", "updated_at"])
@@ -10981,7 +11498,7 @@ print(result)""",
         self.assertTrue(block_payload["metrics"]["advanced_question_types_unlocked"])
         self.assertEqual(block_payload["metrics"]["advanced_question_start_percent"], 0)
 
-    def test_student_preview_forced_advanced_type_is_available_before_target_progress(self):
+    def test_student_preview_forced_advanced_type_falls_back_before_target_progress(self):
         course = self.create_course()
         block, _, objective, chunk = self.create_preview_content_block(course)
         block.config.target_question_count = 2
@@ -11032,8 +11549,8 @@ print(result)""",
         self.assertEqual(forced_response.status_code, 200)
         forced_block_payload = next(item for item in forced_response.json()["preview"]["blocks"] if item["id"] == block.pk)
         forced_question_messages = [message for message in forced_block_payload["transcript"] if message["kind"] == "question"]
-        self.assertEqual(forced_question_messages[-1]["question_id"], unlocked_maq.pk)
-        self.assertEqual(forced_question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MAQ)
+        self.assertEqual(forced_question_messages[-1]["question_id"], first_mcq.pk)
+        self.assertEqual(forced_question_messages[-1]["question_type"], QuestionBankItem.QuestionType.MCQ)
         self.assertFalse(forced_block_payload["metrics"]["advanced_question_types_unlocked"])
 
     def test_student_preview_automatic_delivery_uses_configured_type_mix_over_bank_mix(self):
@@ -11666,8 +12183,161 @@ print(result)""",
             question_type=QuestionBankItem.QuestionType.MCQ,
             raise_generation_errors=True,
             allow_numeric_recent_angle_fallback=True,
+                force_coding=False,
+        )
+
+    def test_student_preview_generation_keeps_objectives_unmet_until_coverage_factor_is_reached(self):
+        course = self.create_course()
+        course.config.coverage_factor = 2
+        course.config.save(update_fields=["coverage_factor", "updated_at"])
+        block, asset, first_objective, first_chunk = self.create_preview_content_block(course)
+        second_objective = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=2,
+            code="1.2",
+            text="Explain signalling in cells",
+        )
+        second_chunk = ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=block,
+            ordinal=2,
+            text="Signalling pathways coordinate receptor activity and cellular responses.",
+            token_count=10,
+            checksum="preview-coverage-factor-second-chunk",
+        )
+        self.client.force_login(self.teacher)
+        session = self.client.session
+        session[PREVIEW_SESSION_KEY] = {
+            str(course.pk): {
+                "completion_sequence": 2,
+                "message_counter": 0,
+                "question_states": {},
+                "flagged_question_ids": [],
+                "transcripts": {},
+                "pending_questions": {},
+                "written_answer_drafts": {},
+                "completed_events": [
+                    {
+                        "block_id": block.pk,
+                        "question_id": 201,
+                        "correct": True,
+                        "answered_at": timezone.now().isoformat(),
+                        "learning_objective_id": first_objective.pk,
+                        "source_chunk_id": first_chunk.pk,
+                        "question_type": QuestionBankItem.QuestionType.MCQ,
+                        "selected_answers": ["A"],
+                        "answer_text": "A",
+                        "feedback": "Correct.",
+                    },
+                    {
+                        "block_id": block.pk,
+                        "question_id": 202,
+                        "correct": True,
+                        "answered_at": timezone.now().isoformat(),
+                        "learning_objective_id": second_objective.pk,
+                        "source_chunk_id": second_chunk.pk,
+                        "question_type": QuestionBankItem.QuestionType.MCQ,
+                        "selected_answers": ["A"],
+                        "answer_text": "A",
+                        "feedback": "Correct.",
+                    },
+                ],
+            }
+        }
+        session.save()
+
+        def generate_pair(*_args, **_kwargs):
+            generated_validation = QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=first_objective,
+                source_chunk=first_chunk,
+                bank_type=QuestionBankItem.BankType.VALIDATION,
+                status=QuestionBankItem.Status.APPROVED,
+                stem="Generated follow-on validation?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="Validation explanation.",
+                question_hash="preview-coverage-factor-generated-validation",
+            )
+            generated_practice = QuestionBankItem.objects.create(
+                course=course,
+                block=block,
+                learning_objective=first_objective,
+                source_chunk=first_chunk,
+                bank_type=QuestionBankItem.BankType.PRACTICE,
+                status=QuestionBankItem.Status.APPROVED,
+                stem="Generated follow-on practice?",
+                correct_answer="A",
+                distractors=["B", "C", "D"],
+                explanation="Practice explanation.",
+                question_hash="preview-coverage-factor-generated-practice",
+                linked_question=generated_validation,
+            )
+            generated_validation.linked_question = generated_practice
+            generated_validation.save(update_fields=["linked_question", "updated_at"])
+            return generated_practice, generated_validation
+
+        with patch("standalone.services.preview.random.shuffle", side_effect=lambda items: items.reverse()):
+            with patch(
+                "standalone.services.preview.generate_question_pair_for_block",
+                side_effect=generate_pair,
+            ) as generate_mock:
+                response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        generate_mock.assert_called_once_with(
+            block,
+            preferred_objective_ids=[second_objective.pk, first_objective.pk],
+            strict_preferred_objectives=False,
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            raise_generation_errors=True,
+            allow_numeric_recent_angle_fallback=True,
             force_coding=False,
         )
+
+    def test_student_preview_question_selection_randomizes_equal_priority_candidates(self):
+        course = self.create_course()
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="First equal-priority preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="First explanation.",
+            question_hash="preview-equal-priority-first",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Second equal-priority preview question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Second explanation.",
+            question_hash="preview-equal-priority-second",
+        )
+        self.client.force_login(self.teacher)
+
+        with patch("standalone.services.preview.random.shuffle", side_effect=lambda items: items.reverse()):
+            response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+
+        self.assertEqual(response.status_code, 200)
+        transcript = response.json()["preview"]["blocks"][0]["transcript"]
+        latest_question = [message for message in transcript if message["kind"] == "question"][-1]
+        self.assertEqual(latest_question["question_id"], second_question.pk)
+        self.assertNotEqual(latest_question["question_id"], first_question.pk)
 
     def test_student_preview_answer_updates_feedback_without_creating_real_attempts(self):
         course = self.create_course()
@@ -11814,11 +12484,9 @@ print(result)""",
         self.assertEqual(question_messages[-1]["question_type"], QuestionBankItem.QuestionType.NUM)
         self.assertNotEqual(question_messages[-1]["question_id"], mcq.pk)
 
-    def test_student_preview_answer_adds_progress_message_when_coverage_and_engagement_target_complete(self):
+    def test_student_preview_answer_adds_progress_message_when_coverage_completes(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
-        block.config.target_question_count = 1
-        block.config.save(update_fields=["target_question_count", "updated_at"])
         QuestionBankItem.objects.create(
             course=course,
             block=block,
@@ -11847,14 +12515,78 @@ print(result)""",
 
         self.assertEqual(len(progress_messages), 1)
         self.assertIn("Coverage is complete for this block", progress_messages[-1]["text"])
-        self.assertIn("You've reached this block's engagement target: 1 of 1 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
-    def test_student_preview_answer_does_not_add_progress_message_when_coverage_and_engagement_target_incomplete(self):
+    def test_student_preview_coverage_factor_requires_multiple_correct_answers_per_objective(self):
+        course = self.create_course()
+        course.config.coverage_factor = 2
+        course.config.save(update_fields=["coverage_factor", "updated_at"])
+        block, _, objective, _ = self.create_preview_content_block(course)
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question one?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-coverage-factor-one",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=block.content_chunks.first(),
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Preview question two?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="This follows from the approved notes.",
+            question_hash="preview-coverage-factor-two",
+        )
+        self.client.force_login(self.teacher)
+
+        first_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.assertEqual(
+            [message for message in first_quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"],
+            first_question.pk,
+        )
+        first_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        first_block_payload = next(item for item in first_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        self.assertEqual(first_block_payload["metrics"]["coverage"], 50.0)
+        self.assertEqual(first_block_payload["metrics"]["coverage_progress_count"], 1)
+        self.assertEqual(first_block_payload["metrics"]["coverage_target_count"], 2)
+        self.assertEqual(len([message for message in first_block_payload["transcript"] if message["kind"] == "progress_coach"]), 0)
+
+        second_quiz_response = self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.assertEqual(
+            [message for message in second_quiz_response.json()["preview"]["blocks"][0]["transcript"] if message["kind"] == "question"][-1]["question_id"],
+            second_question.pk,
+        )
+        second_answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": second_question.pk, "answer": "A"}),
+            content_type="application/json",
+        )
+
+        second_block_payload = next(item for item in second_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        self.assertEqual(second_block_payload["metrics"]["coverage"], 100.0)
+        progress_messages = [message for message in second_block_payload["transcript"] if message["kind"] == "progress_coach"]
+        self.assertEqual(len(progress_messages), 1)
+        self.assertIn("required 2 correct questions", progress_messages[-1]["text"])
+
+    def test_student_preview_answer_does_not_add_progress_message_when_coverage_incomplete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
-        block.config.target_question_count = 4
-        block.config.save(update_fields=["target_question_count", "updated_at"])
         LearningObjective.objects.create(
             course=course,
             block=block,
@@ -11891,11 +12623,9 @@ print(result)""",
 
         self.assertEqual(len(progress_messages), 0)
 
-    def test_student_preview_progress_message_is_only_added_first_time_engagement_target_reaches_complete(self):
+    def test_student_preview_progress_message_is_only_added_first_time_coverage_reaches_complete(self):
         course = self.create_course()
         block, _, objective, _ = self.create_preview_content_block(course)
-        block.config.target_question_count = 2
-        block.config.save(update_fields=["target_question_count", "updated_at"])
         QuestionBankItem.objects.create(
             course=course,
             block=block,
@@ -11945,12 +12675,11 @@ print(result)""",
         second_block_payload = next(item for item in second_answer_response.json()["preview"]["blocks"] if item["id"] == block.pk)
         progress_messages = [message for message in second_block_payload["transcript"] if message["kind"] == "progress_coach"]
 
-        self.assertEqual(len(progress_messages), 2)
+        self.assertEqual(len(progress_messages), 1)
         self.assertEqual(
             sum("Coverage is complete for this block" in message["text"] for message in progress_messages),
             1,
         )
-        self.assertIn("You've reached this block's engagement target: 2 of 2 questions answered.", progress_messages[-1]["text"])
         self.assertIn("Mastery is 100%.", progress_messages[-1]["text"])
 
     def test_student_preview_feedback_includes_varying_keep_going_note(self):

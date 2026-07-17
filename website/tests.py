@@ -37,7 +37,7 @@ class RootHomepageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "website/home.html")
-        self.assertContains(response, "ForeverPhysics")
+        self.assertContains(response, "BioBoost")
         self.assertContains(response, "Infinite A-Level physics practice")
         self.assertContains(response, "Immediate feedback and support")
         self.assertContains(response, "Step-by-step help when you get stuck")
@@ -64,7 +64,7 @@ class RootHomepageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "website/home.html")
-        self.assertContains(response, "ForeverPhysics")
+        self.assertContains(response, "BioBoost")
         self.assertContains(response, "Opening OCR Physics demo", html=False)
         self.assertContains(response, f'data-redirect-url="{reverse("standalone:demo_practice", args=[access.token])}"', html=False)
         self.assertContains(response, 'data-delay-ms="15000"', html=False)
@@ -134,7 +134,7 @@ class SettingsConfigurationTests(TestCase):
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
 
-        with patch.dict(os.environ, {"MEDIA_ROOT": "/tmp/ninepointeightone-media-test"}, clear=False):
+        with patch.dict(os.environ, {"MEDIA_ROOT": "/tmp/bioboost-media-test"}, clear=False):
             spec.loader.exec_module(module)
 
-        self.assertEqual(module.MEDIA_ROOT, "/tmp/ninepointeightone-media-test")
+        self.assertEqual(module.MEDIA_ROOT, "/tmp/bioboost-media-test")

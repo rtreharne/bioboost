@@ -66,7 +66,11 @@ def _course_guidance(course: Course) -> str:
 def _block_guidance(block: CourseBlock | None) -> str:
     if block is None:
         return ""
-    return sanitize_assistant_guidance(block.question_assistant_guidance)
+    try:
+        guidance = block.config.assistant_guidance
+    except Exception:  # noqa: BLE001
+        guidance = ""
+    return sanitize_assistant_guidance(guidance)
 
 
 def _objective_guidance(objective: LearningObjective | None) -> str:

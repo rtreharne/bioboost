@@ -649,7 +649,7 @@ def _is_print_pdf_noise_line(line: str) -> bool:
         return True
     if "http://" in lowered or "https://" in lowered or " | " in line:
         return True
-    if lowered in {"watch on", "ninepointeightone"}:
+    if lowered in {"watch on", "bioboost"}:
         return True
     return False
 

@@ -43,7 +43,7 @@ When the toggle is off, the existing upload and question-generation behaviour st
 
 ## Adding a new archetype
 
-1. Add an objective-to-archetype matcher in [structured_maths.py](/home/freddie/ninepointeightone_v2/standalone/services/structured_maths.py).
+1. Add an objective-to-archetype matcher in [structured_maths.py](/home/freddie/bioboost_v2/standalone/services/structured_maths.py).
 2. Add a deterministic generator to `GENERATOR_REGISTRY`.
 3. Generate backwards from a clean answer structure where possible.
 4. Return a payload that passes `validate_math_mcq_payload`.

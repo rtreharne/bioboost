@@ -25,7 +25,7 @@ from standalone.services.guidance import build_chat_guidance_prompt, merge_assis
 from standalone.services.math_questions import math_options_equivalent
 from standalone.services.practice_scoring import (
     combine_block_practice_metrics,
-    engagement_release_date,
+    coverage_progress_snapshot,
     weighted_practice_score,
     base_practice_weights,
 )
@@ -260,6 +260,59 @@ def _collection_blocks_for_preview(course: Course, collection: CourseBlockCollec
     ]
 
 
+def _block_objective_targets(block: CourseBlock) -> dict[int, int]:
+    coverage_factor = max(1, int(block.practice_coverage_factor or 1))
+    return {
+        objective.pk: coverage_factor
+        for objective in block.learning_objectives.all()
+    }
+
+
+def _block_objective_coverage_counts(course_state: dict, block: CourseBlock) -> dict[int, int]:
+    counts: dict[int, int] = defaultdict(int)
+    for event in course_state.get("completed_events", []):
+        if int(event.get("block_id") or 0) != block.pk or not event.get("correct"):
+            continue
+        objective_id = event.get("learning_objective_id")
+        if objective_id is None:
+            continue
+        counts[int(objective_id)] += 1
+    return dict(counts)
+
+
+def _collection_objective_targets(blocks: list[CourseBlock]) -> dict[int, int]:
+    targets: dict[int, int] = {}
+    for block in blocks:
+        coverage_factor = max(1, int(block.practice_coverage_factor or 1))
+        for objective in block.learning_objectives.all():
+            targets[int(objective.pk)] = coverage_factor
+    return targets
+
+
+def _collection_objective_coverage_counts(course_state: dict, collection: CourseBlockCollection, block_ids: set[int]) -> dict[int, int]:
+    counts: dict[int, int] = defaultdict(int)
+    for event in course_state.get("completed_events", []):
+        if str(event.get("thread_kind") or "") != PREVIEW_COLLECTION_THREAD_KIND:
+            continue
+        if int(event.get("thread_id") or 0) != collection.pk or not event.get("correct"):
+            continue
+        if int(event.get("block_id") or 0) not in block_ids:
+            continue
+        objective_id = event.get("learning_objective_id")
+        if objective_id is None:
+            continue
+        counts[int(objective_id)] += 1
+    return dict(counts)
+
+
+def _covered_objective_ids_from_counts(objective_counts: dict[int, int], objective_targets: dict[int, int]) -> set[int]:
+    return {
+        int(objective_id)
+        for objective_id, target in objective_targets.items()
+        if int(objective_counts.get(int(objective_id), 0) or 0) >= max(1, int(target or 1))
+    }
+
+
 def _flagged_question_ids(course_state: dict) -> set[int]:
     return {int(question_id) for question_id in course_state.get("flagged_question_ids", [])}
 
@@ -378,6 +431,19 @@ def _manual_preview_question_type_allowed(block: CourseBlock, question_type: str
     return normalized_type in _manual_preview_question_types(block)
 
 
+def _is_advanced_preview_question_type(question_type: str | None) -> bool:
+    return question_type in {
+        QuestionBankItem.QuestionType.MAQ,
+        QuestionBankItem.QuestionType.WAQ,
+    }
+
+
+def _preview_question_type_unlocked(course: Course, block: CourseBlock, course_state: dict, question_type: str | None) -> bool:
+    if not _is_advanced_preview_question_type(question_type):
+        return True
+    return _advanced_question_types_unlocked(course, block, course_state)
+
+
 def _effective_preview_coding_only(block: CourseBlock, question_type: str | None, *, coding_only: bool = False) -> bool:
     if not _is_coding_question_request(question_type, coding_only):
         return False
@@ -488,52 +554,6 @@ def _block_completed_count(course_state: dict, block: CourseBlock) -> int:
     return len([event for event in course_state.get("completed_events", []) if int(event["block_id"]) == block.pk])
 
 
-def _engagement_half_life_days(course: Course) -> int | None:
-    value = getattr(course.config, "engagement_half_life_days", None)
-    if value in (None, ""):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _engagement_release_date(block: CourseBlock) -> date | None:
-    return engagement_release_date(block)
-
-
-def _engagement_decay_weight(days_since_release: int, half_life_days: int) -> float:
-    return math.pow(0.5, max(0, days_since_release) / max(1, half_life_days))
-
-
-def _engagement_metrics_from_answer_dates(course: Course, block: CourseBlock, answer_dates: list[date], *, target_question_count: int) -> dict:
-    half_life_days = _engagement_half_life_days(course)
-    release_date = _engagement_release_date(block)
-    completed_count = len(answer_dates)
-    raw_score = round(min(100.0, completed_count * 100.0 / max(1, target_question_count)), 2)
-    if half_life_days is None or release_date is None:
-        return {
-            "engagement": raw_score,
-            "engagement_weighted_count": float(completed_count),
-            "engagement_half_life_days": half_life_days,
-            "engagement_release_date": release_date.isoformat() if release_date else "",
-            "engagement_is_fixed": True,
-        }
-
-    weighted_count = sum(
-        _engagement_decay_weight((answered_on - release_date).days, half_life_days)
-        for answered_on in answer_dates
-    )
-    return {
-        "engagement": round(min(raw_score, weighted_count * 100.0 / max(1, target_question_count)), 2),
-        "engagement_weighted_count": round(weighted_count, 4),
-        "engagement_half_life_days": half_life_days,
-        "engagement_release_date": release_date.isoformat(),
-        "engagement_is_fixed": False,
-    }
-
-
 def _block_is_accessible(course: Course, block: CourseBlock) -> bool:
     return block.is_available() or bool(getattr(course.config, "allow_pre_engagement", False))
 
@@ -546,9 +566,13 @@ def _advanced_question_types_unlocked(course: Course, block: CourseBlock, course
     threshold_percent = _advanced_question_start_percent(block)
     if threshold_percent <= 0:
         return True
-    target_question_count = max(1, block.preview_target_question_count)
-    completed_count = _block_completed_count(course_state, block)
-    return completed_count * 100 >= threshold_percent * target_question_count
+    coverage = float(
+        coverage_progress_snapshot(
+            _block_objective_coverage_counts(course_state, block),
+            _block_objective_targets(block),
+        ).get("coverage") or 0.0
+    )
+    return coverage >= threshold_percent
 
 
 def _effective_preview_question_type(
@@ -568,6 +592,8 @@ def _effective_preview_question_type(
             ordered_question_types = _ordered_preview_question_types_by_delivery(course, block, course_state)
             normalized_type = ordered_question_types[0] if ordered_question_types else QuestionBankItem.QuestionType.MCQ
     if not _manual_preview_question_type_allowed(block, normalized_type, coding_only=coding_only):
+        normalized_type = QuestionBankItem.QuestionType.MCQ
+    if normalized_type and not _preview_question_type_unlocked(course, block, course_state, normalized_type):
         normalized_type = QuestionBankItem.QuestionType.MCQ
     if force_requested_type:
         return normalized_type
@@ -592,12 +618,9 @@ def _fallback_preview_question_types(
     ]
     if not coding_only and QuestionBankItem.QuestionType.NUM in _manual_preview_question_types(block):
         ordered.append(QuestionBankItem.QuestionType.NUM)
-    ordered.extend(
-        [
-            QuestionBankItem.QuestionType.MAQ,
-            QuestionBankItem.QuestionType.WAQ,
-        ]
-    )
+    for advanced_type in (QuestionBankItem.QuestionType.MAQ, QuestionBankItem.QuestionType.WAQ):
+        if _preview_question_type_unlocked(course, block, course_state, advanced_type):
+            ordered.append(advanced_type)
     fallback_types: list[str] = []
     for question_type in ordered:
         if question_type and question_type not in fallback_types:
@@ -739,8 +762,27 @@ def _block_question_history(question_queryset, course_state: dict, block: Course
         for event in recent_events[:3]
         if event.get("question_id") is not None
     }
-    covered_objective_ids = _covered_objective_ids(course_state, block)
-    return questions, objective_presented_counts, chunk_presented_counts, recent_objective_ids, recent_question_ids, covered_objective_ids
+    objective_coverage_counts = _block_objective_coverage_counts(course_state, block)
+    covered_objective_ids = _covered_objective_ids_from_counts(objective_coverage_counts, _block_objective_targets(block))
+    return (
+        questions,
+        objective_presented_counts,
+        chunk_presented_counts,
+        recent_objective_ids,
+        recent_question_ids,
+        objective_coverage_counts,
+        covered_objective_ids,
+    )
+
+
+def _pick_randomized_best_candidate(candidates: list[tuple[tuple, QuestionBankItem]]) -> QuestionBankItem | None:
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    best_key = candidates[0][0]
+    best_bucket = [item for item in candidates if item[0] == best_key]
+    random.shuffle(best_bucket)
+    return best_bucket[0][1]
 
 
 def _pick_unseen_question(
@@ -766,8 +808,10 @@ def _pick_unseen_question(
         chunk_presented_counts,
         recent_objective_ids,
         recent_question_ids,
+        objective_coverage_counts,
         covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
+    coverage_factor = max(1, int(block.practice_coverage_factor or 1))
     preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
@@ -787,7 +831,9 @@ def _pick_unseen_question(
             continue
         candidates.append(
             (
+                (
                 0 if question.learning_objective_id not in covered_objective_ids else 1,
+                min(objective_coverage_counts.get(int(question.learning_objective_id or 0), 0), coverage_factor),
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
@@ -795,13 +841,11 @@ def _pick_unseen_question(
                 *question_quality_sort_key(question),
                 *coding_question_quality_sort_key(question),
                 question.cohort_seen_count,
-                question.created_at,
-                question.pk,
+                ),
                 question,
             )
         )
-    candidates.sort()
-    return candidates[0][-1] if candidates else None
+    return _pick_randomized_best_candidate(candidates)
 
 
 def _pick_retry_question(
@@ -828,8 +872,10 @@ def _pick_retry_question(
         chunk_presented_counts,
         recent_objective_ids,
         recent_question_ids,
-        _covered_objective_ids,
+        objective_coverage_counts,
+        covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
+    coverage_factor = max(1, int(block.practice_coverage_factor or 1))
     preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
@@ -852,6 +898,9 @@ def _pick_retry_question(
             continue
         candidates.append(
             (
+                (
+                0 if question.learning_objective_id not in covered_objective_ids else 1,
+                min(objective_coverage_counts.get(int(question.learning_objective_id or 0), 0), coverage_factor),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
                 1 if question.pk in recent_question_ids else 0,
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
@@ -860,22 +909,32 @@ def _pick_retry_question(
                 *coding_question_quality_sort_key(question),
                 state["last_presented_sequence"],
                 state["times_incorrect"],
-                question.pk,
+                ),
                 question,
             )
         )
-    candidates.sort()
-    return candidates[0][-1] if candidates else None
+    return _pick_randomized_best_candidate(candidates)
 
 
 def _ordered_unmet_objective_ids(course_state: dict, block: CourseBlock) -> list[int]:
-    covered_objective_ids = _covered_objective_ids(course_state, block)
-    unmet_objective_ids = [
-        objective.pk
-        for objective in block.learning_objectives.all()
-        if objective.pk not in covered_objective_ids
-    ]
-    return unmet_objective_ids
+    objective_coverage_counts = _block_objective_coverage_counts(course_state, block)
+    objective_targets = _block_objective_targets(block)
+    unmet_objectives_by_progress: dict[int, list[int]] = defaultdict(list)
+    for objective in block.learning_objectives.all():
+        progress_count = min(
+            objective_coverage_counts.get(int(objective.pk), 0),
+            objective_targets.get(int(objective.pk), 1),
+        )
+        if objective_coverage_counts.get(int(objective.pk), 0) >= objective_targets.get(int(objective.pk), 1):
+            continue
+        unmet_objectives_by_progress[progress_count].append(int(objective.pk))
+
+    ordered_objective_ids: list[int] = []
+    for progress_count in sorted(unmet_objectives_by_progress):
+        objective_ids = unmet_objectives_by_progress[progress_count]
+        random.shuffle(objective_ids)
+        ordered_objective_ids.extend(objective_ids)
+    return ordered_objective_ids
 
 
 def _generation_objective_ids_for_block(course_state: dict, block: CourseBlock) -> list[int]:
@@ -1157,6 +1216,8 @@ def _question_available_for_collection(
 ) -> bool:
     if not _manual_preview_question_type_allowed(block, question_type):
         return False
+    if not _preview_question_type_unlocked(course, block, course_state, question_type):
+        return False
     for coding_preference in _ordered_preview_coding_preferences(course, block, course_state, question_type):
         if _pick_retry_question(course, block, course_state, question_type, coding_preference=coding_preference) is not None:
             return True
@@ -1216,7 +1277,12 @@ def _ensure_question_for_collection(
         raise QuestionGenerationUnavailableError(live_generation_unavailable_message(course))
 
     for question_type in ordered_types:
-        candidate_blocks = [block for block in blocks if _manual_preview_question_type_allowed(block, question_type)]
+        candidate_blocks = [
+            block
+            for block in blocks
+            if _manual_preview_question_type_allowed(block, question_type)
+            and _preview_question_type_unlocked(course, block, course_state, question_type)
+        ]
         random.shuffle(candidate_blocks)
         for block in candidate_blocks:
             question, _validation = generate_question_pair_for_block(
@@ -1939,23 +2005,21 @@ def _refresh_block_progress_message(course_state: dict, block: CourseBlock) -> N
     milestones = _block_progress_milestones(course_state, block)
     covered_objective_count = int(metrics.get("covered_objective_count") or 0)
     total_objective_count = int(metrics.get("total_objective_count") or 0)
-    completed_count = int(metrics.get("completed_count") or 0)
-    target_question_count = int(metrics.get("target_question_count") or 0)
+    coverage_factor = int(metrics.get("coverage_factor") or 1)
     coverage_complete = total_objective_count > 0 and float(metrics.get("coverage") or 0.0) >= 100.0
-    engagement_complete = target_question_count > 0 and float(metrics.get("engagement") or 0.0) >= 100.0
 
     lines: list[str] = []
     if coverage_complete and not milestones.get("coverage_complete_announced"):
-        lines.append(
-            f"Coverage is complete for this block: you've covered all {covered_objective_count} learning objectives."
-        )
+        if coverage_factor > 1:
+            lines.append(
+                "Coverage is complete for this block: "
+                f"you've met the required {coverage_factor} correct questions for all {covered_objective_count} learning objectives."
+            )
+        else:
+            lines.append(
+                f"Coverage is complete for this block: you've covered all {covered_objective_count} learning objectives."
+            )
         milestones["coverage_complete_announced"] = True
-
-    if engagement_complete and not milestones.get("engagement_complete_announced"):
-        lines.append(
-            f"You've reached this block's engagement target: {completed_count} of {target_question_count} questions answered."
-        )
-        milestones["engagement_complete_announced"] = True
 
     if not lines:
         return
@@ -3078,29 +3142,17 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
     completed_count = _block_completed_count(course_state, block)
     correct_count = sum(1 for event in completed_events if event["correct"])
     incorrect_count = max(0, completed_count - correct_count)
-    objective_ids = {
-        int(event["learning_objective_id"])
-        for event in completed_events
-        if event["correct"] and event.get("learning_objective_id") is not None
-    }
-    total_objectives = block.learning_objectives.count()
-    covered_objective_count = len(objective_ids)
-    target_question_count = max(1, block.preview_target_question_count)
-    answer_dates = [datetime.fromisoformat(event["answered_at"]).date() for event in completed_events]
-    engagement_metrics = _engagement_metrics_from_answer_dates(
-        block.course,
-        block,
-        answer_dates,
-        target_question_count=target_question_count,
-    )
+    objective_targets = _block_objective_targets(block)
+    objective_counts = _block_objective_coverage_counts(course_state, block)
+    coverage_snapshot = coverage_progress_snapshot(objective_counts, objective_targets)
+    total_objectives = int(coverage_snapshot["total_objective_count"])
+    covered_objective_count = int(coverage_snapshot["covered_objective_count"])
 
     mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
-    coverage = round((covered_objective_count * 100 / total_objectives), 2) if total_objectives else 0.0
-    engagement = float(engagement_metrics["engagement"])
+    coverage = float(coverage_snapshot["coverage"])
     metric_values = {
         "mastery": mastery,
         "coverage": coverage,
-        "engagement": engagement,
     }
     overall = _weighted_practice_score(block.course, metric_values)
     weights = base_practice_weights(block.course)
@@ -3110,18 +3162,20 @@ def _block_metrics(course_state: dict, block: CourseBlock) -> dict:
         "overall": overall,
         "mastery": mastery,
         "coverage": coverage,
-        "engagement": engagement,
+        "engagement": 0.0,
         "completed_count": completed_count,
         "correct_count": correct_count,
         "incorrect_count": incorrect_count,
         "covered_objective_count": covered_objective_count,
+        "coverage_progress_count": int(coverage_snapshot["coverage_progress_count"]),
+        "coverage_target_count": int(coverage_snapshot["coverage_target_count"]),
+        "coverage_factor": max(1, int(block.practice_coverage_factor or 1)),
         "total_objective_count": total_objectives,
-        "engagement_weighted_count": engagement_metrics["engagement_weighted_count"],
-        "engagement_half_life_days": engagement_metrics["engagement_half_life_days"],
-        "engagement_release_date": engagement_metrics["engagement_release_date"],
-        "engagement_is_fixed": engagement_metrics["engagement_is_fixed"],
+        "engagement_weighted_count": 0.0,
+        "engagement_half_life_days": None,
+        "engagement_release_date": "",
+        "engagement_is_fixed": True,
         "weights": weights,
-        "target_question_count": target_question_count,
         "advanced_question_start_percent": advanced_question_start_percent,
         "advanced_question_types_unlocked": advanced_question_types_unlocked,
     }
@@ -3139,20 +3193,14 @@ def _collection_metrics(course_state: dict, collection: CourseBlockCollection, b
     completed_count = len(completed_events)
     correct_count = sum(1 for event in completed_events if event.get("correct"))
     incorrect_count = max(0, completed_count - correct_count)
-    covered_objective_ids = {
-        int(event["learning_objective_id"])
-        for event in completed_events
-        if event.get("correct") and event.get("learning_objective_id") is not None
-    }
-    total_objective_ids = {
-        objective.pk
-        for block in blocks
-        for objective in block.learning_objectives.all()
-    }
-    total_objective_count = len(total_objective_ids)
-    covered_objective_count = len(covered_objective_ids)
+    coverage_snapshot = coverage_progress_snapshot(
+        _collection_objective_coverage_counts(course_state, collection, block_ids),
+        _collection_objective_targets(blocks),
+    )
+    total_objective_count = int(coverage_snapshot["total_objective_count"])
+    covered_objective_count = int(coverage_snapshot["covered_objective_count"])
     mastery = round((correct_count * 100 / completed_count), 2) if completed_count else 0.0
-    coverage = round((covered_objective_count * 100 / total_objective_count), 2) if total_objective_count else 0.0
+    coverage = float(coverage_snapshot["coverage"])
     return {
         "mastery": mastery,
         "coverage": coverage,
@@ -3186,11 +3234,9 @@ def _course_metrics(course: Course, serialized_blocks: list[dict], block_metric_
             "correct_count": 0,
             "incorrect_count": 0,
             "covered_objective_count": 0,
+            "coverage_progress_count": 0,
+            "coverage_target_count": sum(block["metrics"].get("coverage_target_count", block.get("learning_objective_count", 0)) for block in serialized_blocks),
             "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
-            "engagement_weighted_count": 0.0,
-            "combined_target_question_count": 0,
-            "engagement_half_life_days": _engagement_half_life_days(course),
-            "engagement_is_fixed": _engagement_half_life_days(course) is None,
             "weights": weights,
         }
 
@@ -3214,11 +3260,9 @@ def _course_metrics(course: Course, serialized_blocks: list[dict], block_metric_
         "correct_count": sum(block["metrics"]["correct_count"] for block in metric_blocks),
         "incorrect_count": sum(block["metrics"]["incorrect_count"] for block in metric_blocks),
         "covered_objective_count": sum(block["metrics"]["covered_objective_count"] for block in serialized_blocks),
+        "coverage_progress_count": sum(block["metrics"].get("coverage_progress_count", 0) for block in serialized_blocks),
+        "coverage_target_count": sum(block["metrics"].get("coverage_target_count", block.get("learning_objective_count", 0)) for block in serialized_blocks),
         "total_objective_count": sum(block.get("learning_objective_count", 0) for block in serialized_blocks),
-        "engagement_weighted_count": round(sum(block["metrics"]["engagement_weighted_count"] for block in metric_blocks), 4),
-        "combined_target_question_count": sum(block["metrics"]["target_question_count"] for block in metric_blocks),
-        "engagement_half_life_days": _engagement_half_life_days(course),
-        "engagement_is_fixed": all(block["metrics"].get("engagement_is_fixed") for block in metric_blocks),
         "weights": weights,
     }
 
@@ -3234,6 +3278,8 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
         "correct_count": correct_count,
         "incorrect_count": int(course_metrics.get("incorrect_count") or 0),
         "covered_objective_count": int(course_metrics.get("covered_objective_count") or 0),
+        "coverage_progress_count": int(course_metrics.get("coverage_progress_count") or 0),
+        "coverage_target_count": int(course_metrics.get("coverage_target_count") or total_objective_count),
         "total_objective_count": int(course_metrics.get("total_objective_count") or total_objective_count),
         "longest_streak": 0,
     }
@@ -3251,12 +3297,19 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
     cumulative_correct = 0
     current_correct_streak = 0
     longest_correct_streak = 0
-    covered_objective_ids: set[int] = set()
+    objective_counts: dict[int, int] = defaultdict(int)
+    objective_targets: dict[int, int] = {}
+    for block in serialized_blocks:
+        coverage_factor = max(1, int(block.get("metrics", {}).get("coverage_factor") or 1))
+        for objective in block.get("learning_objectives", []):
+            objective_id = int(objective.get("id") or 0)
+            if objective_id > 0:
+                objective_targets[objective_id] = coverage_factor
     current_day: date | None = None
 
     def append_timeline_day(day_value: date) -> None:
         mastery = round((cumulative_correct * 100 / cumulative_completed), 2) if cumulative_completed else 0.0
-        coverage = round((len(covered_objective_ids) * 100 / total_objective_count), 2) if total_objective_count else 0.0
+        coverage = float(coverage_progress_snapshot(objective_counts, objective_targets)["coverage"])
         timeline.append(
             {
                 "date": day_value.isoformat(),
@@ -3282,7 +3335,7 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
             longest_correct_streak = max(longest_correct_streak, current_correct_streak)
             objective_id = event.get("learning_objective_id")
             if objective_id is not None:
-                covered_objective_ids.add(int(objective_id))
+                objective_counts[int(objective_id)] += 1
         else:
             current_correct_streak = 0
 
@@ -3330,11 +3383,10 @@ def _course_stats(course_state: dict, serialized_blocks: list[dict], course_metr
 
 
 def _covered_objective_ids(course_state: dict, block: CourseBlock) -> set[int]:
-    return {
-        int(event["learning_objective_id"])
-        for event in course_state.get("completed_events", [])
-        if int(event["block_id"]) == block.pk and event["correct"] and event.get("learning_objective_id") is not None
-    }
+    return _covered_objective_ids_from_counts(
+        _block_objective_coverage_counts(course_state, block),
+        _block_objective_targets(block),
+    )
 
 
 def _serialized_transcript(
@@ -3418,7 +3470,12 @@ def serialize_preview_state(
     for block in blocks:
         transcript = _ensure_block_transcript(course_state, block)
         objectives = list(block.learning_objectives.all())
-        covered_objective_ids = _covered_objective_ids(course_state, block)
+        objective_coverage_counts = _block_objective_coverage_counts(course_state, block)
+        coverage_factor = max(1, int(block.practice_coverage_factor or 1))
+        covered_objective_ids = _covered_objective_ids_from_counts(
+            objective_coverage_counts,
+            {objective.pk: coverage_factor for objective in objectives},
+        )
         block_metrics = _block_metrics(course_state, block)
         released = block.is_available()
         pre_engagement_enabled = bool(getattr(course.config, "allow_pre_engagement", False))
@@ -3435,6 +3492,8 @@ def serialize_preview_state(
                         "code": objective.code,
                         "text": objective.text,
                         "covered": objective.pk in covered_objective_ids,
+                        "coverage_progress_count": min(objective_coverage_counts.get(int(objective.pk), 0), coverage_factor),
+                        "coverage_target_count": coverage_factor,
                         "assistant_guidance": sanitize_assistant_guidance(objective.assistant_guidance),
                         "has_guardrail": bool(sanitize_assistant_guidance(objective.assistant_guidance)),
                     }
@@ -3445,7 +3504,6 @@ def serialize_preview_state(
                 "is_available": _block_is_accessible(course, block),
                 "counts_in_metrics": released or (pre_engagement_enabled and block_metrics["completed_count"] > 0),
                 "learning_objective_count": len(objectives),
-                "target_question_count": block.preview_target_question_count,
                 "available_manual_question_types": _manual_preview_question_types(block),
                 "has_pending_question": bool(pending_questions.get(str(block.pk))),
                 "transcript": _serialized_transcript(course_state, transcript, block, welcome_title=block.title),
@@ -3510,3 +3568,11 @@ def serialize_preview_state(
         "blocks": serialized_blocks,
         "collections": serialized_collections,
     }
+
+
+def reset_preview_state(request, course: Course, *, active_block_id=None) -> dict:
+    preview_root = request.session.setdefault(PREVIEW_SESSION_KEY, {})
+    preview_root[str(course.pk)] = _empty_course_state()
+    request.session[PREVIEW_SESSION_KEY] = preview_root
+    request.session.modified = True
+    return serialize_preview_state(request, course, active_block_id=active_block_id)

@@ -15,8 +15,8 @@ body {
   margin: 0;
   padding: 0;
   background:
-    linear-gradient(180deg, rgba(16, 88, 177, 0.14), rgba(34, 131, 225, 0.08)),
-    linear-gradient(180deg, #dbe8fb, #eef4fe);
+    linear-gradient(180deg, rgba(31, 156, 117, 0.14), rgba(88, 199, 164, 0.08)),
+    linear-gradient(180deg, #dff5ec, #f2fbf7);
   border-radius: 0;
   align-content: stretch;
   align-self: stretch;
@@ -41,9 +41,9 @@ body {
   overflow-y: hidden;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  border-right: 1px solid rgba(29, 84, 163, 0.12);
+  border-right: 1px solid rgba(31, 128, 101, 0.12);
   background:
-    linear-gradient(180deg, rgba(245, 249, 255, 0.98), rgba(235, 243, 255, 0.98));
+    linear-gradient(180deg, rgba(248, 253, 251, 0.98), rgba(237, 248, 243, 0.98));
 }
 
 .preview-page--messenger .preview-sidebar::-webkit-scrollbar-track {
@@ -61,7 +61,7 @@ body {
   padding: 0.6rem 1rem;
   background: transparent;
   color: inherit;
-  border-bottom: 1px solid rgba(29, 84, 163, 0.08);
+  border-bottom: 1px solid rgba(31, 128, 101, 0.08);
 }
 
 .preview-page--messenger .preview-messenger-sidebar-title-row {
@@ -77,7 +77,7 @@ body {
   align-items: center;
   min-width: 0;
   min-height: 2.25rem;
-  color: #1f6fd1;
+  color: #1d8f6b;
   text-decoration: none;
 }
 
@@ -86,7 +86,7 @@ body {
   align-items: center;
   min-width: 0;
   min-height: 2.25rem;
-  color: #1f6fd1;
+  color: #1d8f6b;
   font-size: 1.1rem;
   font-weight: 800;
   letter-spacing: 0;
@@ -94,7 +94,7 @@ body {
 }
 
 .preview-messenger-brand:hover .preview-messenger-brand-wordmark {
-  color: #155cb0;
+  color: #166f53;
 }
 
 .preview-messenger-menu-trigger {
@@ -108,7 +108,7 @@ body {
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: #42678f;
+  color: #4f7a6d;
   font-size: 1.45rem;
   line-height: 1;
 }
@@ -120,13 +120,13 @@ body {
 }
 
 .preview-messenger-menu-trigger:hover {
-  background: rgba(44, 111, 193, 0.08);
-  color: #215ea4;
+  background: rgba(31, 143, 107, 0.08);
+  color: #176c51;
 }
 
 .preview-page--messenger .preview-sidebar-demo-pill {
-  background: rgba(44, 111, 193, 0.08);
-  color: #215ea4;
+  background: rgba(31, 143, 107, 0.1);
+  color: #176c51;
 }
 
 .preview-page--messenger .preview-sidebar-utility-links {
@@ -186,9 +186,9 @@ body {
   gap: 0.4rem;
   padding: 0.95rem 1rem;
   border-radius: 1.15rem;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(237, 244, 255, 0.96));
-  border: 1px solid rgba(32, 101, 181, 0.12);
-  box-shadow: 0 10px 24px rgba(32, 83, 146, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(238, 249, 244, 0.96));
+  border: 1px solid rgba(30, 133, 102, 0.12);
+  box-shadow: 0 10px 24px rgba(25, 93, 73, 0.12);
 }
 
 .preview-page--messenger .preview-sidebar-validate-cta .button {
@@ -196,14 +196,14 @@ body {
   justify-content: center;
   min-height: 2.8rem;
   border-radius: 0.95rem;
-  background: linear-gradient(135deg, #1e67c7, #3f8fea);
+  background: linear-gradient(135deg, #1a9a73, #58c7a4);
   border-color: transparent;
   color: #fff;
 }
 
 .preview-page--messenger .preview-sidebar-validate-copy,
 .preview-page--messenger .preview-sidebar-validate-note {
-  color: #5e7598;
+  color: #5f7f74;
 }
 
 .preview-page--messenger .preview-course-metrics-panel {
@@ -217,8 +217,8 @@ body {
   flex-wrap: wrap;
   flex: 0 0 auto;
   padding: 0.7rem 1rem 0.65rem;
-  border-bottom: 1px solid rgba(29, 84, 163, 0.08);
-  background: linear-gradient(180deg, rgba(245, 249, 255, 0.98), rgba(238, 245, 255, 0.98));
+  border-bottom: 1px solid rgba(31, 128, 101, 0.08);
+  background: linear-gradient(180deg, rgba(248, 253, 251, 0.98), rgba(240, 249, 245, 0.98));
 }
 
 .preview-conversation-switcher[hidden] {
@@ -242,17 +242,17 @@ body {
 
 .preview-conversation-switcher-button:hover,
 .preview-conversation-switcher-button:focus-visible {
-  border-color: rgba(54, 117, 194, 0.34);
-  background: rgba(244, 249, 255, 0.98);
-  color: #2c5f97;
+  border-color: rgba(31, 143, 107, 0.34);
+  background: rgba(246, 252, 249, 0.98);
+  color: #1b7055;
   outline: none;
 }
 
 .preview-conversation-switcher-button.is-active,
 .preview-conversation-switcher-button[aria-pressed="true"] {
-  border-color: rgba(58, 125, 205, 0.34);
-  background: linear-gradient(180deg, #d9ebff, #c3defd);
-  color: #1f5e91;
+  border-color: rgba(31, 143, 107, 0.34);
+  background: linear-gradient(180deg, #d9f3e8, #c4eadb);
+  color: #19694f;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
@@ -370,6 +370,20 @@ body {
   min-width: 0;
 }
 
+.preview-conversation-complete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  background: rgba(233, 251, 246, 0.98);
+  color: #14806d;
+  font-size: 0.78rem;
+  font-weight: 900;
+  box-shadow: inset 0 0 0 1px rgba(46, 190, 169, 0.28);
+}
+
 .preview-conversation-title {
   flex: 1 1 auto;
   min-width: 0;
@@ -484,10 +498,7 @@ body {
 }
 
 .preview-page--messenger .preview-chat-transcript {
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.62)),
-    url("../img/ninepointeightonebackground.png") center / cover no-repeat;
-  background-attachment: scroll;
+  background: rgba(248, 251, 255, 0.94);
   padding: 1.1rem 1rem 0.85rem;
 }
 
@@ -1825,6 +1836,25 @@ body {
   outline: none;
 }
 
+.preview-block-complete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.28rem;
+  height: 1.28rem;
+  margin-left: auto;
+  border-radius: 999px;
+  background: rgba(233, 251, 246, 0.98);
+  color: #14806d;
+  font-size: 0.82rem;
+  font-weight: 900;
+  box-shadow: inset 0 0 0 1px rgba(46, 190, 169, 0.28);
+}
+
+.preview-block-complete[hidden] {
+  display: none;
+}
+
 .preview-block-overall-button {
   display: inline-flex;
   align-items: baseline;
@@ -2321,10 +2351,7 @@ body {
   display: grid;
   gap: 0.75rem;
   min-height: 0;
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.62)),
-    url("../img/ninepointeightonebackground.png") center / cover no-repeat;
-  background-attachment: scroll;
+  background: rgba(248, 251, 255, 0.94);
   padding-right: 0.25rem;
   padding-bottom: max(1.5rem, var(--preview-composer-clearance, 6.25rem));
   overflow-y: auto;
@@ -2851,15 +2878,16 @@ body {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 0.7rem;
   align-items: start;
-  padding: 0.15rem 0;
+  padding: 0.2rem 0;
 }
 
 .preview-objective-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.25rem;
-  min-height: 1.25rem;
+  width: 1.45rem;
+  min-height: 1.45rem;
+  padding: 0;
   margin-top: 0.1rem;
   border-radius: 999px;
   border: 1px solid rgba(88, 112, 144, 0.2);
@@ -2867,12 +2895,20 @@ body {
   color: transparent;
   font-size: 0.76rem;
   font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .preview-objective-item.is-covered .preview-objective-status {
-  border-color: rgba(46, 190, 169, 0.24);
-  background: rgba(233, 251, 246, 0.95);
-  color: #8b4d22;
+  border-color: rgba(32, 150, 115, 0.24);
+  background: rgba(226, 248, 239, 0.95);
+  color: #177056;
+}
+
+.preview-objective-item.is-in-progress .preview-objective-status {
+  border-color: rgba(88, 112, 144, 0.2);
+  background: rgba(246, 251, 255, 0.92);
+  color: transparent;
 }
 
 .preview-objective-code {
@@ -2882,14 +2918,38 @@ body {
   min-width: 3rem;
   padding: 0.3rem 0.6rem;
   border-radius: 999px;
-  background: #f7e5e5;
-  color: #7c3434;
+  background: #e4f5ed;
+  color: #176c51;
   font-size: 0.82rem;
   font-weight: 700;
 }
 
+.preview-objective-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+  min-width: 0;
+  padding-top: 0.05rem;
+}
+
 .preview-objective-text {
   line-height: 1.5;
+}
+
+.preview-objective-progress {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.55rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 143, 107, 0.18);
+  background: rgba(229, 248, 239, 0.95);
+  color: #176c51;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .preview-objective-actions {
@@ -4815,29 +4875,29 @@ body {
 /* Student view monochrome redesign */
 
 :root {
-  --student-bg: #f3f3f3;
+  --student-bg: #eef8f3;
   --student-surface: #ffffff;
-  --student-surface-2: #f7f7f7;
-  --student-surface-3: #ededed;
-  --student-border: #d1d1d1;
-  --student-border-strong: #aaaaaa;
-  --student-text: #121212;
-  --student-text-muted: #585858;
-  --student-text-soft: #767676;
-  --student-answer-surface: #f8f9fb;
-  --student-answer-surface-hover: #f1f4f7;
-  --student-answer-accent-surface: #edf3f8;
-  --student-answer-accent-border: #c8d3dd;
-  --student-review-correct-surface: #e7f0f8;
-  --student-review-correct-border: #a9bfd2;
-  --student-review-correct-accent: #476986;
+  --student-surface-2: #f6fcf9;
+  --student-surface-3: #eaf7f1;
+  --student-border: #c8e1d5;
+  --student-border-strong: #87b7a4;
+  --student-text: #17382e;
+  --student-text-muted: #5b7a6f;
+  --student-text-soft: #7e9a90;
+  --student-answer-surface: #f4fbf8;
+  --student-answer-surface-hover: #e9f7f1;
+  --student-answer-accent-surface: #def4ea;
+  --student-answer-accent-border: #add9c6;
+  --student-review-correct-surface: #ddf5ea;
+  --student-review-correct-border: #9fd3bc;
+  --student-review-correct-accent: #1a7c5d;
   --student-review-incorrect-surface: #fdf0f1;
   --student-review-incorrect-border: #e2b7bd;
   --student-review-incorrect-accent: #b44a57;
   --student-review-missed-surface: #fef4f5;
   --student-review-missed-border: #e8c2c8;
   --student-review-missed-accent: #bc5c68;
-  --student-shadow: 0 18px 44px rgba(0, 0, 0, 0.08);
+  --student-shadow: 0 18px 44px rgba(26, 92, 69, 0.09);
   --student-shadow-soft: 0 10px 26px rgba(0, 0, 0, 0.06);
   --student-shadow-hover: 0 20px 48px rgba(0, 0, 0, 0.12);
   --student-radius-xl: 2rem;
@@ -5103,38 +5163,38 @@ body {
 .preview-block-card {
   border-radius: var(--student-radius-lg) !important;
   overflow: hidden !important;
-  border-color: #bfdcf2 !important;
-  background: #edf7ff !important;
+  border-color: #b9dfcb !important;
+  background: #ecfaf3 !important;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease !important;
 }
 
 .preview-block-card.is-active,
 .preview-block-card.is-selection-preview {
-  border-color: #0374b5 !important;
-  background: #d9ecff !important;
+  border-color: #1a9a73 !important;
+  background: #daf3e7 !important;
   animation: preview-block-selection-glow 1100ms ease-in-out infinite alternate !important;
   box-shadow:
-    0 18px 40px rgba(3, 116, 181, 0.14),
-    0 0 0 4px rgba(93, 169, 255, 0.14) !important;
+    0 18px 40px rgba(26, 122, 92, 0.14),
+    0 0 0 4px rgba(117, 214, 180, 0.16) !important;
 }
 
 .preview-block-card.is-active .preview-block-card-toggle,
 .preview-block-card.is-active .preview-block-card-content,
 .preview-block-card.is-selection-preview .preview-block-card-toggle,
 .preview-block-card.is-selection-preview .preview-block-card-content {
-  background: #d9ecff !important;
+  background: #daf3e7 !important;
 }
 
 .preview-block-card.is-active .preview-block-metric,
 .preview-block-card.is-selection-preview .preview-block-metric {
-  border-color: #9fc8e8 !important;
-  background: #eef6ff !important;
+  border-color: #a8d7c2 !important;
+  background: #f0fbf5 !important;
 }
 
 .preview-block-card.is-active .preview-block-metric--overall,
 .preview-block-card.is-selection-preview .preview-block-metric--overall {
-  border-color: #78add7 !important;
-  background: #cfe5ff !important;
+  border-color: #7bc5a7 !important;
+  background: #cfeedd !important;
 }
 
 .preview-block-card-toggle,
@@ -5264,10 +5324,7 @@ body {
 }
 
 .preview-chat-transcript {
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.62)),
-    url("../img/ninepointeightonebackground.png") center / cover no-repeat !important;
-  background-attachment: scroll !important;
+  background: rgba(248, 251, 255, 0.94) !important;
   padding-inline: 5% !important;
   padding-bottom: max(1.8rem, var(--preview-composer-clearance, 6.35rem)) !important;
 }
@@ -5702,24 +5759,24 @@ body {
 /* Canvas-style embed mode */
 
 :is(.app-body--embed, .app-body--canvas-theme) {
-  --canvas-text: #2d3b45;
-  --canvas-muted: #5b6d7a;
-  --canvas-link: #0374b5;
-  --canvas-link-hover: #055d8c;
-  --canvas-border: #c7cdd1;
-  --canvas-border-strong: #8a97a3;
+  --canvas-text: #1a3a30;
+  --canvas-muted: #5d7c71;
+  --canvas-link: #1a9a73;
+  --canvas-link-hover: #167a5c;
+  --canvas-border: #c7dfd4;
+  --canvas-border-strong: #84b6a2;
   --canvas-surface: #ffffff;
-  --canvas-surface-muted: #f5f7fa;
-  --canvas-surface-soft: #f8f9fb;
-  --canvas-blue-wash: #edf7ff;
-  --canvas-blue-border: #bfdcf2;
-  --canvas-success-wash: #e9f8f1;
-  --canvas-success-border: #b9ddcb;
-  --canvas-success-text: #2f7a5f;
+  --canvas-surface-muted: #f4fbf7;
+  --canvas-surface-soft: #f7fcfa;
+  --canvas-blue-wash: #e6f7ef;
+  --canvas-blue-border: #b9dfcb;
+  --canvas-success-wash: #dcf5e8;
+  --canvas-success-border: #a7d8bf;
+  --canvas-success-text: #1a7c5d;
   --canvas-amber-wash: #fdf1f2;
   --canvas-amber-border: #e3bcc3;
   --canvas-amber-text: #b14c59;
-  --canvas-focus: #0374b5;
+  --canvas-focus: #1a9a73;
   color: var(--canvas-text) !important;
   background: #ffffff !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif !important;
@@ -6759,34 +6816,34 @@ body {
 
 :root {
   --canvas-link: #111111;
-  --canvas-link-hover: #333333;
-  --canvas-border: #d7d7d7;
-  --canvas-border-strong: #111111;
-  --canvas-text: #111111;
-  --canvas-muted: #5b5b5b;
+  --canvas-link-hover: #166a51;
+  --canvas-border: #c9dfd4;
+  --canvas-border-strong: #5c8d79;
+  --canvas-text: #17382e;
+  --canvas-muted: #5b7a6f;
   --canvas-surface: #ffffff;
-  --canvas-surface-soft: #f5f5f5;
-  --canvas-surface-muted: #fafafa;
-  --canvas-blue-wash: #f5f5f5;
-  --canvas-blue-border: #d7d7d7;
+  --canvas-surface-soft: #f4fbf7;
+  --canvas-surface-muted: #f8fcfa;
+  --canvas-blue-wash: #e8f7ef;
+  --canvas-blue-border: #c9dfd4;
   --canvas-amber-wash: #faf7f0;
   --canvas-amber-border: #ded6c7;
   --canvas-amber-text: #714d20;
-  --canvas-success-wash: #f4faf4;
-  --canvas-success-border: #d6e2d6;
-  --canvas-success-text: #244024;
-  --canvas-focus: #000000;
-  --student-bg: #ffffff;
+  --canvas-success-wash: #ddf5e8;
+  --canvas-success-border: #afd9c3;
+  --canvas-success-text: #1a7c5d;
+  --canvas-focus: #1a9a73;
+  --student-bg: #eef8f3;
   --student-surface: #ffffff;
-  --student-surface-2: #fafafa;
-  --student-surface-3: #f5f5f5;
-  --student-border: #d7d7d7;
-  --student-border-strong: #111111;
-  --student-text: #111111;
-  --student-text-muted: #5b5b5b;
-  --student-shadow: rgba(0, 0, 0, 0.08);
-  --student-shadow-soft: rgba(0, 0, 0, 0.05);
-  --student-shadow-hover: rgba(0, 0, 0, 0.1);
+  --student-surface-2: #f7fcfa;
+  --student-surface-3: #ecf8f2;
+  --student-border: #c9dfd4;
+  --student-border-strong: #5c8d79;
+  --student-text: #17382e;
+  --student-text-muted: #5b7a6f;
+  --student-shadow: rgba(24, 92, 68, 0.08);
+  --student-shadow-soft: rgba(24, 92, 68, 0.05);
+  --student-shadow-hover: rgba(24, 92, 68, 0.11);
 }
 
 body.app-body--canvas-theme {
@@ -6990,8 +7047,8 @@ body.app-body--canvas-theme {
   padding: 0 !important;
   gap: 0 !important;
   background:
-    linear-gradient(180deg, rgba(16, 88, 177, 0.14), rgba(34, 131, 225, 0.08)),
-    linear-gradient(180deg, #dbe8fb, #eef4fe) !important;
+    linear-gradient(180deg, rgba(31, 156, 117, 0.14), rgba(88, 199, 164, 0.08)),
+    linear-gradient(180deg, #dff5ec, #f2fbf7) !important;
 }
 
 :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar,
@@ -7013,17 +7070,17 @@ body.app-body--canvas-theme {
   overflow-y: hidden !important;
   overscroll-behavior: contain !important;
   scrollbar-gutter: stable !important;
-  border-right: 1px solid rgba(29, 84, 163, 0.12) !important;
+  border-right: 1px solid rgba(31, 128, 101, 0.12) !important;
   background:
-    linear-gradient(180deg, rgba(245, 249, 255, 0.98), rgba(235, 243, 255, 0.98)) !important;
+    linear-gradient(180deg, rgba(248, 253, 251, 0.98), rgba(237, 248, 243, 0.98)) !important;
 }
 
 :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-shell {
   gap: 0 !important;
   padding: 0 !important;
   background:
-    radial-gradient(circle at top left, rgba(99, 163, 235, 0.12), transparent 24%),
-    linear-gradient(180deg, rgba(245, 249, 255, 0.96), rgba(236, 244, 255, 0.98)) !important;
+    radial-gradient(circle at top left, rgba(91, 198, 162, 0.12), transparent 24%),
+    linear-gradient(180deg, rgba(246, 252, 249, 0.96), rgba(238, 248, 243, 0.98)) !important;
 }
 
 :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-head {
@@ -7033,7 +7090,7 @@ body.app-body--canvas-theme {
   flex: 0 0 auto !important;
   gap: 0.55rem !important;
   padding: 0.6rem 1rem !important;
-  border-bottom: 1px solid rgba(29, 84, 163, 0.08) !important;
+  border-bottom: 1px solid rgba(31, 128, 101, 0.08) !important;
   background: transparent !important;
 }
 
@@ -7184,9 +7241,7 @@ body.app-body--canvas-theme {
 
 .preview-page--messenger .preview-chat-shell,
 :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-shell {
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.62)),
-    url("../img/ninepointeightonebackground.png") center / cover no-repeat !important;
+  background: #f3f7fc !important;
 }
 
 .preview-page--messenger .preview-chat-transcript,

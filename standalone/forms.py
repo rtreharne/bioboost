@@ -49,6 +49,12 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
         }
     )
     fields["numeric_ratio_percent"].label = "Numeric question ratio (%)"
+    fields["coverage_factor"].label = "Coverage factor"
+    fields["coverage_factor"].help_text = (
+        "Leave blank to inherit the course default."
+        if block_level
+        else "Number of correct questions each learning objective must receive before it counts as covered. Use 2 to require two correct questions per objective."
+    )
     fields["numeric_ratio_percent"].help_text = (
         "Leave blank to inherit the course default."
         if block_level
@@ -79,11 +85,11 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
         if block_level
         else "Target percentage of newly generated questions that should use coding comprehension or debugging snippets when coding content is detected."
     )
-    fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after engagement progress (%)"
+    fields["advanced_question_start_percent"].label = "Start MAQ/WAQ after coverage progress (%)"
     fields["advanced_question_start_percent"].help_text = (
         "Leave blank to inherit the course default."
         if block_level
-        else "Block progress threshold before students are asked multiple-answer or written-answer questions. Use 0 to allow them from the start."
+        else "Coverage progress threshold before students are asked multiple-answer or written-answer questions. Use 0 to allow them from the start."
     )
     fields["distractor_count"].help_text = (
         "Leave blank to inherit the course default."
@@ -93,6 +99,7 @@ def _apply_question_setting_field_attributes(fields, *, block_level: bool = Fals
 
     for name in (
         "assistant_guidance",
+        "coverage_factor",
         "distractor_count",
         "numeric_ratio_percent",
         "math_symbolic_ratio_percent",
@@ -298,22 +305,13 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["validation_weight"].help_text = (
             "Weighting of validation relative to practice in the overall course score."
         )
-        self.fields["allow_pre_engagement"].label = "Allow pre-engagement before release"
-        self.fields["allow_pre_engagement"].help_text = (
-            "If enabled, students can practise unreleased blocks early. "
-            "Any answers submitted before the block release date receive full engagement credit."
-        )
-        self.fields["engagement_half_life_days"].label = "Engagement half-life (days)"
-        self.fields["engagement_half_life_days"].help_text = (
-            "Optional. Engagement decays exponentially from each block release date. "
-            "After one half-life, an answered question counts for 50%; after two, 25%. "
-            "Leave blank to measure engagement by completed questions only."
-        )
         self.fields["revalidation_attempts"].help_text = "Number of additional validation attempts permitted after the first."
         self.fields["show_validation_feedback_immediately"].label = "Release validation feedback immediately"
         self.fields["show_validation_feedback_immediately"].help_text = (
             "If enabled, students can review validation feedback as soon as they submit."
         )
+        self.fields.pop("allow_pre_engagement", None)
+        self.fields.pop("engagement_half_life_days", None)
         self.fields.pop("mastery_weight", None)
         self.fields.pop("coverage_weight", None)
         self.fields.pop("engagement_weight", None)
@@ -435,6 +433,16 @@ class MultipleFileField(forms.FileField):
 
 class CourseBlockForm(forms.ModelForm):
     file = MultipleFileField(label="Files", required=False)
+    assistant_guidance = forms.CharField(
+        label="Additional prompts",
+        required=False,
+        widget=forms.Textarea(
+            attrs={
+                "rows": 4,
+                "placeholder": "Optional extra steering for this block.",
+            }
+        ),
+    )
 
     class Meta:
         model = CourseBlock
@@ -442,10 +450,14 @@ class CourseBlockForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.order_fields(["title", "available_from", "assistant_guidance", "file"])
         self.fields["available_from"].initial = timezone.localdate()
         self.fields["available_from"].required = False
         self.fields["available_from"].help_text = "MCQs for this block will only be generated and shown to students from this date."
         self.fields["available_from"].widget = forms.DateInput(attrs={"type": "date"})
+        self.fields["assistant_guidance"].help_text = (
+            "Optional. Add extra prompts for this block's summary, learning objectives, questions, and chat."
+        )
         self.fields["file"].widget.attrs.update(
             {
                 "class": "upload-native-input",
@@ -465,6 +477,9 @@ class CourseBlockForm(forms.ModelForm):
     def clean_available_from(self):
         return self.cleaned_data.get("available_from") or timezone.localdate()
 
+    def clean_assistant_guidance(self):
+        return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
+
     def save_assets(self, block, uploaded_by):
         assets = []
         for uploaded_file in self.cleaned_data.get("file", []):
@@ -479,6 +494,14 @@ class CourseBlockForm(forms.ModelForm):
             )
             assets.append(asset)
         return assets
+
+    def save_block_config(self, block):
+        config, _ = BlockConfig.objects.get_or_create(block=block)
+        guidance = self.cleaned_data.get("assistant_guidance", "")
+        if config.assistant_guidance != guidance:
+            config.assistant_guidance = guidance
+            config.save(update_fields=["assistant_guidance", "updated_at"])
+        return config
 
 
 class CourseBlockCollectionForm(forms.ModelForm):
@@ -561,6 +584,7 @@ class BlockConfigForm(forms.ModelForm):
         model = BlockConfig
         fields = [
             "assistant_guidance",
+            "coverage_factor",
             "distractor_count",
             "numeric_ratio_percent",
             "math_symbolic_ratio_percent",
@@ -581,26 +605,6 @@ class BlockConfigForm(forms.ModelForm):
 
     def clean_assistant_guidance(self):
         return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
-
-
-class BlockConfigTargetQuestionCountInlineForm(forms.ModelForm):
-    class Meta:
-        model = BlockConfig
-        fields = ["target_question_count"]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["target_question_count"].label = "Engagement target"
-
-    def clean_target_question_count(self):
-        value = self.cleaned_data["target_question_count"]
-        if value is None:
-            raise forms.ValidationError("Please enter an engagement target.")
-        if value < 1:
-            raise forms.ValidationError("Engagement target must be at least 1 question.")
-        return value
-
-
 class BlockProjectCreateForm(forms.ModelForm):
     class Meta:
         model = BlockProject

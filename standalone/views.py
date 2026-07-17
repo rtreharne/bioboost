@@ -25,7 +25,6 @@ from django.views.decorators.csrf import csrf_exempt
 from standalone.forms import (
     BlockAvailableFromInlineForm,
     BlockConfigForm,
-    BlockConfigTargetQuestionCountInlineForm,
     BlockProjectCreateForm,
     BlockProjectEditForm,
     BlockSummaryInlineForm,
@@ -147,6 +146,7 @@ from standalone.services.preview import (
     flag_preview_question,
     regenerate_preview_collection_numeric_feedback,
     regenerate_preview_numeric_feedback,
+    reset_preview_state,
     request_preview_collection_quiz,
     request_preview_quiz,
     save_preview_objective_guardrail,
@@ -280,14 +280,14 @@ def _queue_block_regeneration(block_id: int) -> None:
     enqueue_registered_background_task("block_regeneration", block_id)
 
 
-def _queue_block_creation_processing(block_id: int) -> None:
+def _queue_block_creation_processing(block_id: int, asset_ids: list[int] | None = None) -> None:
     if _celery_is_enabled():
         from standalone.tasks import process_block_creation_task
 
-        process_block_creation_task.delay(block_id)
+        process_block_creation_task.delay(block_id, asset_ids)
         return
 
-    enqueue_registered_background_task("block_creation_processing", block_id)
+    enqueue_registered_background_task("block_creation_processing", block_id, asset_ids)
 
 
 def _queue_block_avatar_generation(block_id: int, *, force: bool = False) -> None:
@@ -507,7 +507,6 @@ def teacher_dashboard(request: HttpRequest) -> HttpResponse:
         ),
         practice_mastery_average=Avg("enrollments__mastery_score"),
         practice_coverage_average=Avg("enrollments__coverage_score"),
-        practice_engagement_average=Avg("enrollments__engagement_score"),
     )
     course_list = list(courses)
     _attach_course_practice_averages(course_list)
@@ -810,7 +809,7 @@ def _course_detail_context(
         try:
             block_config = block.config
         except BlockConfig.DoesNotExist:
-            block_config = BlockConfig(block=block, target_question_count=block.preview_target_question_count)
+            block_config = BlockConfig(block=block)
         block.block_config_form = BlockConfigForm(instance=block_config, prefix=f"block-{block.pk}")
         block.project_create_form = BlockProjectCreateForm(prefix=f"project-create-{block.pk}")
         block.projects_for_course_detail = []
@@ -886,7 +885,6 @@ def _attach_course_practice_average(course: Course) -> None:
     averages = course.enrollments.aggregate(
         practice_mastery_average=Avg("mastery_score"),
         practice_coverage_average=Avg("coverage_score"),
-        practice_engagement_average=Avg("engagement_score"),
     )
     for key, value in averages.items():
         setattr(course, key, value)
@@ -895,7 +893,7 @@ def _attach_course_practice_average(course: Course) -> None:
 
 def _normalise_course_practice_averages(course: Course) -> None:
     metrics = {}
-    for metric_name in ("mastery", "coverage", "engagement"):
+    for metric_name in ("mastery", "coverage"):
         attr_name = f"practice_{metric_name}_average"
         metric_value = round(float(getattr(course, attr_name, 0) or 0), 2)
         setattr(course, attr_name, metric_value)
@@ -1349,40 +1347,22 @@ def update_block_config_field(request: HttpRequest, block_id: int, field_name: s
     block = _teacher_block_or_404(request.user, block_id)
     config, _ = BlockConfig.objects.get_or_create(block=block)
 
-    form_class = {
-        "target_question_count": BlockConfigTargetQuestionCountInlineForm,
-    }.get(field_name)
-    if form_class is None:
-        config_form = BlockConfigForm(instance=config)
-        if field_name not in config_form.fields:
-            raise Http404
-        override_value = request.POST.get(field_name, "")
-        form = BlockConfigForm(_block_config_form_payload(config, {field_name: override_value}), instance=config)
-        if not form.is_valid():
-            return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
-
-        updated_config = form.save()
-        value = getattr(updated_config, field_name)
-        return JsonResponse(
-            {
-                "ok": True,
-                "value": value,
-                "raw_value": value,
-                "message": "Block settings updated.",
-            }
-        )
-
-    form = form_class(request.POST, instance=config)
+    config_form = BlockConfigForm(instance=config)
+    if field_name not in config_form.fields:
+        raise Http404
+    override_value = request.POST.get(field_name, "")
+    form = BlockConfigForm(_block_config_form_payload(config, {field_name: override_value}), instance=config)
     if not form.is_valid():
         return JsonResponse({"ok": False, "errors": form.errors.get(field_name, form.non_field_errors())}, status=400)
 
     updated_config = form.save()
+    value = getattr(updated_config, field_name)
     return JsonResponse(
         {
             "ok": True,
-            "value": updated_config.target_question_count,
-            "raw_value": updated_config.target_question_count,
-            "display_value": updated_config.target_question_count,
+            "value": value,
+            "raw_value": value,
+            "message": "Block settings updated.",
         }
     )
 
@@ -1735,6 +1715,10 @@ def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, a
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         return JsonResponse({"ok": True, "preview": payload})
 
+    if action == "reset":
+        payload = reset_preview_state(request, course)
+        return JsonResponse({"ok": True, "preview": payload})
+
     if request_data is None:
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
     data = request_data
@@ -1986,7 +1970,7 @@ def regenerate_course_content(request: HttpRequest, course_id: int) -> HttpRespo
     if request.method != "POST" or not _is_teacher(request.user):
         raise Http404
     course = _teacher_course_or_404(request.user, course_id)
-    refreshed = regenerate_course_descriptions_and_objectives(course)
+    refreshed = regenerate_course_descriptions_and_objectives(course, allow_fallback=False)
     if refreshed["blocks"] == 0:
         messages.info(request, "No included content was available to regenerate descriptions and learning objectives.")
     else:
@@ -2824,9 +2808,7 @@ def block_create(request: HttpRequest, course_id: int) -> HttpResponse:
         last_block = course.blocks.order_by("-order", "-pk").first()
         block.order = (last_block.order + 1) if last_block else 1
         block.save()
-        from standalone.models import BlockConfig
-
-        BlockConfig.objects.get_or_create(block=block)
+        form.save_block_config(block)
         assets = form.save_assets(block=block, uploaded_by=request.user)
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#block-content-{block.pk}"
         if assets:
@@ -2879,8 +2861,11 @@ def asset_upload(request: HttpRequest, block_id: int) -> HttpResponse:
     form = ContentAssetForm(request.POST or None, request.FILES or None)
     if request.method == "POST" and form.is_valid():
         assets = form.save_assets(block=block, uploaded_by=request.user)
-        for asset in assets:
-            _queue_content_asset_processing(asset.pk)
+        block.regeneration_status = CourseBlock.RegenerationStatus.QUEUED
+        block.regeneration_progress = 5
+        block.regeneration_error = ""
+        block.save(update_fields=["regeneration_status", "regeneration_progress", "regeneration_error", "updated_at"])
+        _queue_block_creation_processing(block.pk, [asset.pk for asset in assets])
         file_count = len(assets)
         noun = "file" if file_count == 1 else "files"
         messages.success(request, f"{file_count} {noun} uploaded. Processing is running in the background.")

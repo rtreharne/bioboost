@@ -38,7 +38,6 @@
   data-hide-flag-actions="{% if hide_flag_actions %}true{% else %}false{% endif %}"
   data-practice-validation-url="{{ practice_validation_url|default:'' }}"
   data-stats-icon-url="{% static 'standalone/img/my-stats-icon.svg' %}"
-  data-message-background-url="{% static 'standalone/img/ninepointeightonebackground.png' %}"
 >
   <div class="preview-launch-loader" hidden data-preview-launch-loader>
     <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing Test Me">
@@ -58,9 +57,9 @@
           <a
             class="preview-messenger-brand"
             href="{% url 'website:home' %}"
-            aria-label="FOREVER PHYSICS"
+            aria-label="BIOBOOST"
           >
-            <span class="preview-messenger-brand-wordmark">ForeverPhysics</span>
+            <span class="preview-messenger-brand-wordmark">BioBoost</span>
           </a>
           {% if is_demo_mode %}
             <div class="preview-chat-header-menu" data-preview-sidebar-menu>
@@ -81,14 +80,23 @@
               </div>
             </div>
           {% else %}
-            <button
-              class="preview-messenger-menu-trigger"
-              type="button"
-              aria-label="Sidebar menu"
-              hidden
-            >
-              <span aria-hidden="true">&#8942;</span>
-            </button>
+            <div class="preview-chat-header-menu" data-preview-sidebar-menu>
+              <button
+                class="preview-messenger-menu-trigger"
+                type="button"
+                aria-label="Sidebar menu"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                data-preview-sidebar-menu-trigger
+              >
+                <span aria-hidden="true">&#8942;</span>
+              </button>
+              <div class="preview-chat-header-menu-panel" role="menu" hidden data-preview-sidebar-menu-panel>
+                <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-reset-course="true">
+                  Reset preview
+                </button>
+              </div>
+            </div>
           {% endif %}
         </div>
       {% else %}

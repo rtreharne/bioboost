@@ -50,7 +50,8 @@ def _run_registered_task(task_name: str, *args) -> None:
         run_block_regeneration(int(args[0]))
         return
     if task_name == "block_creation_processing":
-        run_block_creation_processing(int(args[0]))
+        selected_asset_ids = [int(asset_id) for asset_id in list(args[1] or [])] if len(args) > 1 else None
+        run_block_creation_processing(int(args[0]), selected_asset_ids)
         return
     if task_name == "block_avatar_generation":
         run_block_avatar_generation(int(args[0]), force=bool(args[1]) if len(args) > 1 else False)

@@ -127,6 +127,7 @@ class CourseConfig(TimeStampedModel):
         validators=[MinValueValidator(1), MaxValueValidator(3650)],
     )
     distractor_count = models.PositiveSmallIntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
+    coverage_factor = models.PositiveSmallIntegerField(default=1, validators=[MinValueValidator(1)])
     numeric_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     math_symbolic_ratio_percent = models.PositiveSmallIntegerField(default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
     maq_ratio_percent = models.PositiveSmallIntegerField(default=20, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -354,6 +355,10 @@ class CourseBlock(TimeStampedModel):
         return self._resolved_numeric_override("distractor_count", "distractor_count")
 
     @property
+    def practice_coverage_factor(self) -> int:
+        return self._resolved_numeric_override("coverage_factor", "coverage_factor")
+
+    @property
     def question_numeric_ratio_percent(self) -> int:
         return self._resolved_numeric_override("numeric_ratio_percent", "numeric_ratio_percent")
 
@@ -418,6 +423,11 @@ class BlockConfig(TimeStampedModel):
     release_date = models.DateTimeField(null=True, blank=True)
     target_question_count = models.PositiveSmallIntegerField(default=20)
     assistant_guidance = models.TextField(blank=True)
+    coverage_factor = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+    )
     distractor_count = models.PositiveSmallIntegerField(
         null=True,
         blank=True,

@@ -19,6 +19,30 @@ def engagement_release_date(block) -> date | None:
     return None
 
 
+def coverage_progress_snapshot(objective_counts: dict[int, int], objective_targets: dict[int, int]) -> dict[str, int | float]:
+    normalized_targets = {
+        int(objective_id): max(1, int(target or 1))
+        for objective_id, target in objective_targets.items()
+    }
+    total_objective_count = len(normalized_targets)
+    coverage_target_count = sum(normalized_targets.values())
+    coverage_progress_count = 0
+    covered_objective_count = 0
+    for objective_id, target in normalized_targets.items():
+        count = max(0, int(objective_counts.get(int(objective_id), 0) or 0))
+        coverage_progress_count += min(count, target)
+        if count >= target:
+            covered_objective_count += 1
+    coverage = round((coverage_progress_count * 100 / coverage_target_count), 2) if coverage_target_count else 0.0
+    return {
+        "coverage": coverage,
+        "covered_objective_count": covered_objective_count,
+        "coverage_progress_count": coverage_progress_count,
+        "coverage_target_count": coverage_target_count,
+        "total_objective_count": total_objective_count,
+    }
+
+
 def base_practice_weights(course) -> dict[str, int]:
     return {
         "mastery": 1,

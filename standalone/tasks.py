@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.utils import timezone
 
 from celery import shared_task
@@ -17,14 +18,21 @@ from standalone.services.course_imports import (
 from standalone.services.structured_maths import sync_structured_maths_specs_for_block, use_structured_maths_for_block
 
 
+def _block_generation_allow_fallback() -> bool:
+    return False
+
+
 def run_content_asset_processing(asset_id: int) -> None:
     try:
         asset = ContentAsset.objects.select_related("block", "block__course").get(pk=asset_id)
     except ContentAsset.DoesNotExist:
         return
     try:
-        ingest_content_asset(asset)
-        regenerate_course_descriptions_and_objectives(asset.block.course)
+        ingest_content_asset(asset, generate_objectives=False)
+        regenerate_block_descriptions_and_objectives(
+            asset.block,
+            allow_fallback=_block_generation_allow_fallback(),
+        )
         asset.block.refresh_from_db(fields=["title", "summary", "avatar_file", "avatar_generation_status", "avatar_generation_error", "avatar_generated_at"])
         generate_and_store_block_avatar(asset.block, force=True)
     except Exception as exc:  # noqa: BLE001
@@ -48,13 +56,16 @@ def _map_regeneration_progress(progress: int, start: int = 70, end: int = 100) -
     return min(end, start + round((end - start) * (bounded_progress / 100)))
 
 
-def run_block_creation_processing(block_id: int) -> None:
+def run_block_creation_processing(block_id: int, asset_ids: list[int] | None = None) -> None:
     try:
         block = CourseBlock.objects.select_related("course").prefetch_related("assets", "learning_objectives").get(pk=block_id)
     except CourseBlock.DoesNotExist:
         return
 
-    assets = list(block.assets.order_by("pk"))
+    assets_queryset = block.assets.order_by("pk")
+    if asset_ids:
+        assets_queryset = assets_queryset.filter(pk__in=[int(asset_id) for asset_id in asset_ids])
+    assets = list(assets_queryset)
     _set_block_regeneration_state(block_id, CourseBlock.RegenerationStatus.RUNNING, 10)
 
     processed_count = 0
@@ -64,7 +75,7 @@ def run_block_creation_processing(block_id: int) -> None:
         total_assets = len(assets)
         for index, asset in enumerate(assets, start=1):
             try:
-                ingest_content_asset(asset)
+                ingest_content_asset(asset, generate_objectives=False)
                 processed_count += 1
             except Exception as exc:  # noqa: BLE001
                 asset.processing_status = ContentAsset.ProcessingStatus.FAILED
@@ -91,6 +102,7 @@ def run_block_creation_processing(block_id: int) -> None:
                 CourseBlock.RegenerationStatus.RUNNING,
                 _map_regeneration_progress(progress),
             ),
+            allow_fallback=_block_generation_allow_fallback(),
         )
         if use_structured_maths_for_block(block):
             sync_structured_maths_specs_for_block(block)
@@ -124,6 +136,7 @@ def run_block_regeneration(block_id: int) -> None:
                 CourseBlock.RegenerationStatus.RUNNING,
                 progress,
             ),
+            allow_fallback=_block_generation_allow_fallback(),
         )
         block.refresh_from_db(fields=["title", "summary", "avatar_file", "avatar_generation_status", "avatar_generation_error", "avatar_generated_at"])
         generate_and_store_block_avatar(block, force=True)
@@ -197,8 +210,8 @@ def regenerate_block_content_task(block_id: int) -> None:
 
 
 @shared_task(ignore_result=True)
-def process_block_creation_task(block_id: int) -> None:
-    run_block_creation_processing(block_id)
+def process_block_creation_task(block_id: int, asset_ids: list[int] | None = None) -> None:
+    run_block_creation_processing(block_id, asset_ids)
 
 
 @shared_task(ignore_result=True)
