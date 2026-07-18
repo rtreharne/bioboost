@@ -7,20 +7,14 @@ from standalone.models import Course, CourseConfig
 from standalone.services.demo_mode import ensure_demo_access
 
 
-OCR_PHYSICS_COURSE_SLUG = "a-level-physics-ocr"
-LANDING_FEATURES = (
-    "Infinite A-Level physics practice",
-    "Immediate feedback and support",
-    "Step-by-step help when you get stuck",
-    "Ask about anything in the course",
-    "Build confidence one question at a time",
-)
+BIOBOOST_FOUNDATIONS_COURSE_SLUG = "bioboost-foundations"
+HOME_REDIRECT_DELAY_MS = 15000
 
 
 def home(request: HttpRequest) -> HttpResponse:
-    course = Course.objects.filter(slug=OCR_PHYSICS_COURSE_SLUG, is_active=True).select_related("config").first()
+    course = Course.objects.filter(slug=BIOBOOST_FOUNDATIONS_COURSE_SLUG, is_active=True).select_related("config").first()
     if course is None:
-        raise Http404("OCR Physics demo course is not available.")
+        raise Http404("BioBoost Foundations demo course is not available.")
 
     config, _created = CourseConfig.objects.get_or_create(course=course)
     if not config.demo_enabled:
@@ -28,11 +22,9 @@ def home(request: HttpRequest) -> HttpResponse:
         config.save(update_fields=["demo_enabled", "updated_at"])
 
     access = ensure_demo_access(course)
-    redirect_delay_ms = 15000
     context = {
+        "course": course,
         "cta_url": reverse("standalone:demo_practice", args=[access.token]),
-        "redirect_delay_ms": redirect_delay_ms,
-        "redirect_delay_seconds": redirect_delay_ms // 1000,
-        "landing_features": LANDING_FEATURES,
+        "redirect_delay_ms": HOME_REDIRECT_DELAY_MS,
     }
     return render(request, "website/home.html", context)

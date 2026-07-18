@@ -1,4 +1,5 @@
 import json
+import logging
 import csv
 from datetime import timedelta
 from functools import lru_cache
@@ -20,13 +21,20 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_exempt
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+
+logger = logging.getLogger(__name__)
+
+_JSON_REQUEST_MISSING = object()
+_JSON_REQUEST_INVALID = object()
+_JSON_REQUEST_CACHE_ATTR = "_cached_json_request_data"
 
 from standalone.forms import (
     BlockAvailableFromInlineForm,
     BlockConfigForm,
     BlockProjectCreateForm,
     BlockProjectEditForm,
+    BlockResourceForm,
     BlockSummaryInlineForm,
     BlockTitleInlineForm,
     ContentAssetForm,
@@ -54,6 +62,7 @@ from standalone.forms import (
 from standalone.models import (
     BlockConfig,
     BlockProject,
+    BlockResource,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -415,6 +424,12 @@ def _teacher_project_or_404(user: User, project_id: int) -> BlockProject:
     return project
 
 
+def _teacher_resource_or_404(user: User, resource_id: int) -> BlockResource:
+    resource = get_object_or_404(BlockResource.objects.select_related("block__course"), pk=resource_id)
+    _teacher_course_or_404(user, resource.block.course_id)
+    return resource
+
+
 def _student_enrollment_or_404(user: User, course_id: int) -> Enrollment:
     return get_object_or_404(
         Enrollment.objects.select_related("course", "course__config", "student"),
@@ -768,6 +783,19 @@ def _ensure_course_config(course: Course) -> tuple[CourseConfig, bool]:
         raise
 
 
+def _course_calculator_enabled(course: Course) -> bool:
+    config, _ = _ensure_course_config(course)
+    return bool(config.calculator_enabled)
+
+
+def _preview_supports_manual_question_type(preview_state: dict, question_type: str) -> bool:
+    conversations = list(preview_state.get("blocks") or []) + list(preview_state.get("collections") or [])
+    return any(
+        question_type in list(conversation.get("available_manual_question_types") or [])
+        for conversation in conversations
+    )
+
+
 def _course_detail_context(
     course: Course,
     *,
@@ -784,6 +812,8 @@ def _course_detail_context(
         .annotate(
             asset_count=Count("assets", distinct=True),
             objective_count=Count("learning_objectives", distinct=True),
+            question_count=Count("question_bank_items", distinct=True),
+            resource_count=Count("resources", distinct=True),
             approved_question_count=Count(
                 "question_bank_items",
                 filter=Q(question_bank_items__status=QuestionBankItem.Status.APPROVED),
@@ -796,6 +826,7 @@ def _course_detail_context(
             "learning_objectives",
             "learning_objectives__corrections__created_by",
             "projects__assignments",
+            "resources",
         )
     )
     _attach_course_practice_average(course)
@@ -812,11 +843,16 @@ def _course_detail_context(
             block_config = BlockConfig(block=block)
         block.block_config_form = BlockConfigForm(instance=block_config, prefix=f"block-{block.pk}")
         block.project_create_form = BlockProjectCreateForm(prefix=f"project-create-{block.pk}")
+        block.resource_create_form = BlockResourceForm(prefix=f"resource-create-{block.pk}")
         block.projects_for_course_detail = []
         for project in block.projects.all():
             project.edit_form = BlockProjectEditForm(instance=project, prefix=f"project-{project.pk}")
             project.assignment_count = project.assignments.count()
             block.projects_for_course_detail.append(project)
+        block.resources_for_course_detail = []
+        for resource in block.resources.all():
+            resource.edit_form = BlockResourceForm(instance=resource, prefix=f"resource-{resource.pk}")
+            block.resources_for_course_detail.append(resource)
         return_to = f"{reverse('standalone:course_detail', args=[course.pk])}#assets-content-{block.pk}"
         block.upload_url = f"{reverse('standalone:asset_upload', args=[block.pk])}?next={quote(return_to, safe='/:?=&')}"
 
@@ -1516,6 +1552,56 @@ def block_project_archive_view(request: HttpRequest, project_id: int) -> HttpRes
 
 
 @login_required
+def block_resource_create(request: HttpRequest, block_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    form = BlockResourceForm(request.POST, prefix=f"resource-create-{block.pk}")
+    if not form.is_valid():
+        context = _course_detail_context(block.course, request=request)
+        for context_block in context["blocks"]:
+            if context_block.pk == block.pk:
+                context_block.resource_create_form = form
+        return render(request, "standalone/course_detail.html", context, status=400)
+
+    resource = form.save(commit=False)
+    resource.block = block
+    resource.save()
+    messages.success(request, f"Added resource to {block.title}.")
+    return redirect(_course_detail_anchor_url(block.course, f"resources-content-{block.pk}"))
+
+
+@login_required
+def block_resource_update(request: HttpRequest, resource_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    resource = _teacher_resource_or_404(request.user, resource_id)
+    form = BlockResourceForm(request.POST, instance=resource, prefix=f"resource-{resource.pk}")
+    if not form.is_valid():
+        context = _course_detail_context(resource.block.course, request=request)
+        for context_block in context["blocks"]:
+            for context_resource in getattr(context_block, "resources_for_course_detail", []):
+                if context_resource.pk == resource.pk:
+                    context_resource.edit_form = form
+        return render(request, "standalone/course_detail.html", context, status=400)
+
+    form.save()
+    messages.success(request, "Resource updated.")
+    return redirect(_course_detail_anchor_url(resource.block.course, f"resources-content-{resource.block.pk}"))
+
+
+@login_required
+def block_resource_delete(request: HttpRequest, resource_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    resource = _teacher_resource_or_404(request.user, resource_id)
+    block = resource.block
+    resource.delete()
+    messages.success(request, "Resource deleted.")
+    return redirect(_course_detail_anchor_url(block.course, f"resources-content-{block.pk}"))
+
+
+@login_required
 def block_project_results_export(request: HttpRequest, block_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
@@ -1633,6 +1719,7 @@ def update_course_config_field(request: HttpRequest, course_id: int, field_name:
     )
 
 
+@ensure_csrf_cookie
 @login_required
 def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
@@ -1661,17 +1748,107 @@ def student_preview(request: HttpRequest, course_id: int) -> HttpResponse:
             "validation_entry_url": reverse("standalone:preview_student_validate", args=[course.pk]),
             "validation_sidebar_cta": _preview_practice_validation_sidebar_cta(request, course),
             "practice_preview_mode": "student-preview",
+            "calculator_enabled": _course_calculator_enabled(course),
+            "numeric_quiz_option_enabled": _preview_supports_manual_question_type(
+                preview_state,
+                QuestionBankItem.QuestionType.NUM,
+            ),
         },
     )
 
 
+def _request_content_length(request: HttpRequest) -> int:
+    try:
+        return int(request.META.get("CONTENT_LENGTH") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _maybe_dechunk_request_body(raw_body: bytes) -> bytes:
+    if not raw_body or b"\r\n" not in raw_body:
+        return raw_body
+
+    cursor = 0
+    decoded = bytearray()
+    while True:
+        line_end = raw_body.find(b"\r\n", cursor)
+        if line_end < 0:
+            return raw_body
+        size_token = raw_body[cursor:line_end].split(b";", 1)[0].strip()
+        if not size_token:
+            return raw_body
+        try:
+            chunk_size = int(size_token, 16)
+        except ValueError:
+            return raw_body
+        cursor = line_end + 2
+        if chunk_size == 0:
+            return bytes(decoded)
+        if len(raw_body) < cursor + chunk_size + 2:
+            return raw_body
+        decoded.extend(raw_body[cursor:cursor + chunk_size])
+        cursor += chunk_size
+        if raw_body[cursor:cursor + 2] != b"\r\n":
+            return raw_body
+        cursor += 2
+
+
+def _parse_json_request_object(request: HttpRequest):
+    cached = getattr(request, _JSON_REQUEST_CACHE_ATTR, None)
+    if cached is not None:
+        return cached
+
+    raw_body = b""
+    content_length = _request_content_length(request)
+    if content_length > 0:
+        try:
+            raw_body = request.body
+        except OSError:
+            setattr(request, _JSON_REQUEST_CACHE_ATTR, _JSON_REQUEST_INVALID)
+            return _JSON_REQUEST_INVALID
+    else:
+        stream = request.META.get("wsgi.input")
+        if stream is not None:
+            try:
+                raw_body = stream.read() or b""
+            except OSError:
+                setattr(request, _JSON_REQUEST_CACHE_ATTR, _JSON_REQUEST_INVALID)
+                return _JSON_REQUEST_INVALID
+        if raw_body:
+            raw_body = _maybe_dechunk_request_body(raw_body)
+
+    if not raw_body:
+        setattr(request, _JSON_REQUEST_CACHE_ATTR, _JSON_REQUEST_MISSING)
+        return _JSON_REQUEST_MISSING
+
+    try:
+        parsed = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning(
+            "Invalid JSON request body for %s %s (content_type=%s, content_length=%s, transfer_encoding=%s)",
+            request.method,
+            request.path,
+            request.content_type or "",
+            request.META.get("CONTENT_LENGTH", ""),
+            request.META.get("HTTP_TRANSFER_ENCODING") or request.META.get("TRANSFER_ENCODING") or "",
+        )
+        setattr(request, _JSON_REQUEST_CACHE_ATTR, _JSON_REQUEST_INVALID)
+        return _JSON_REQUEST_INVALID
+
+    if not isinstance(parsed, dict):
+        setattr(request, _JSON_REQUEST_CACHE_ATTR, _JSON_REQUEST_INVALID)
+        return _JSON_REQUEST_INVALID
+
+    setattr(request, _JSON_REQUEST_CACHE_ATTR, parsed)
+    return parsed
+
+
 def _preview_payload(request: HttpRequest, course: Course, block: CourseBlock, action: str) -> JsonResponse:
     collection = None
-    if request.body and "application/json" in (request.content_type or ""):
-        try:
-            request_data = json.loads(request.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    request_data = _parse_json_request_object(request)
+    if request_data is _JSON_REQUEST_INVALID:
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    if request_data is not _JSON_REQUEST_MISSING:
         if (
             str(request_data.get("thread_kind") or "").strip().lower() == PREVIEW_COLLECTION_THREAD_KIND
             and int(request_data.get("thread_id") or 0) > 0
@@ -2351,11 +2528,10 @@ def demo_embed_origin_token(request: HttpRequest, token) -> JsonResponse:
 
 def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: str, request: HttpRequest) -> JsonResponse:
     collection = None
-    if request.body and "application/json" in (request.content_type or ""):
-        try:
-            request_data = json.loads(request.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    request_data = _parse_json_request_object(request)
+    if request_data is _JSON_REQUEST_INVALID:
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    if request_data is not _JSON_REQUEST_MISSING:
         if (
             str(request_data.get("thread_kind") or "").strip().lower() == PREVIEW_COLLECTION_THREAD_KIND
             and int(request_data.get("thread_id") or 0) > 0
@@ -2434,6 +2610,7 @@ def _demo_preview_payload(access: CourseDemoAccess, block: CourseBlock, action: 
     raise Http404
 
 
+@ensure_csrf_cookie
 @xframe_options_exempt
 def demo_practice(request: HttpRequest, token) -> HttpResponse:
     access = _demo_access_or_404(token)
@@ -2484,6 +2661,11 @@ def demo_practice(request: HttpRequest, token) -> HttpResponse:
             "demo_home_url": _demo_practice_url(access, embed=embed_mode, origin_token=embed_origin_token),
             "hide_flag_actions": True,
             "practice_preview_mode": "student-demo",
+            "calculator_enabled": _course_calculator_enabled(access.course),
+            "numeric_quiz_option_enabled": _preview_supports_manual_question_type(
+                preview_state,
+                QuestionBankItem.QuestionType.NUM,
+            ),
         },
     )
     return _apply_demo_response_headers(request, response, access.course, embed_mode=embed_mode)
@@ -2498,6 +2680,7 @@ def demo_practice_action(request: HttpRequest, token, block_id: int, action: str
     return _demo_preview_payload(access, block, action, request)
 
 
+@ensure_csrf_cookie
 @xframe_options_exempt
 def demo_validation_practice(request: HttpRequest, token) -> HttpResponse:
     access = _demo_access_or_404(token)
@@ -2852,6 +3035,24 @@ def block_delete(request: HttpRequest, block_id: int) -> HttpResponse:
 
 
 @login_required
+def block_questions_delete(request: HttpRequest, block_id: int) -> HttpResponse:
+    if request.method != "POST" or not _is_teacher(request.user):
+        raise Http404
+    block = _teacher_block_or_404(request.user, block_id)
+    question_count = block.question_bank_items.count()
+    if question_count <= 0:
+        messages.info(request, f"No generated questions found for {block.title}.")
+        return redirect(_course_detail_anchor_url(block.course, f"block-content-{block.pk}"))
+
+    block.question_bank_items.all().delete()
+    messages.success(
+        request,
+        f"Deleted {question_count} question{'s' if question_count != 1 else ''} from {block.title}.",
+    )
+    return redirect(_course_detail_anchor_url(block.course, f"block-content-{block.pk}"))
+
+
+@login_required
 def asset_upload(request: HttpRequest, block_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
         raise Http404
@@ -3151,6 +3352,7 @@ def _preview_practice_validation_url(course_id: int, *, restart: bool = False) -
     return f"{url}?restart=1" if restart else url
 
 
+@ensure_csrf_cookie
 @login_required
 def validation_practice_session(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_student(request.user):
@@ -3203,6 +3405,7 @@ def validation_practice_session(request: HttpRequest, course_id: int) -> HttpRes
     )
 
 
+@ensure_csrf_cookie
 @login_required
 def preview_validation_practice(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
@@ -3337,6 +3540,7 @@ def _render_teacher_preview_validate(
     )
 
 
+@ensure_csrf_cookie
 @login_required
 def preview_student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_teacher(request.user):
@@ -3827,6 +4031,7 @@ def _render_student_validate(request: HttpRequest, enrollment: Enrollment, sessi
     )
 
 
+@ensure_csrf_cookie
 @login_required
 def student_validate(request: HttpRequest, course_id: int) -> HttpResponse:
     if not _is_student(request.user):
@@ -4257,6 +4462,7 @@ def _legacy_practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     )
 
 
+@ensure_csrf_cookie
 @login_required
 def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
     mode = request.GET.get("mode", PracticeAttempt.AttemptType.PRACTICE)
@@ -4291,6 +4497,11 @@ def practice_quiz(request: HttpRequest, course_id: int) -> HttpResponse:
             "validation_entry_url": reverse("standalone:student_validate", args=[enrollment.course_id]),
             "validation_sidebar_cta": _student_practice_validation_sidebar_cta(enrollment),
             "practice_preview_mode": "student-practice",
+            "calculator_enabled": _course_calculator_enabled(enrollment.course),
+            "numeric_quiz_option_enabled": _preview_supports_manual_question_type(
+                preview_state,
+                QuestionBankItem.QuestionType.NUM,
+            ),
         },
     )
 
@@ -4303,14 +4514,15 @@ def _student_practice_payload(
     *,
     collection: CourseBlockCollection | None = None,
 ) -> JsonResponse:
+    request_data = _parse_json_request_object(request)
+    if request_data is _JSON_REQUEST_INVALID:
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
     if action == "quiz":
         requested_question_type = None
         coding_only = False
-        if request.body and "application/json" in (request.content_type or ""):
-            try:
-                data = json.loads(request.body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+        if request_data is not _JSON_REQUEST_MISSING:
+            data = request_data
             requested_question_type = str(data.get("question_type", "")).strip().lower() or None
             coding_only = bool(data.get("coding_only"))
         payload = request_student_practice_quiz(
@@ -4322,10 +4534,9 @@ def _student_practice_payload(
         )
         return JsonResponse({"ok": True, "preview": payload})
 
-    try:
-        data = json.loads(request.body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    if request_data is _JSON_REQUEST_MISSING:
         return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    data = request_data
 
     if action in {"project_open", "project_chat", "project_submit"}:
         project_id = int(data.get("project_id") or 0)
@@ -4404,11 +4615,8 @@ def student_practice_action(request: HttpRequest, course_id: int, block_id: int,
     enrollment = _student_enrollment_or_404(request.user, course_id)
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=enrollment.course)
     collection = None
-    if request.body and "application/json" in (request.content_type or ""):
-        try:
-            data = json.loads(request.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            data = {}
+    data = _parse_json_request_object(request)
+    if isinstance(data, dict):
         thread_kind = str(data.get("thread_kind", "")).strip().lower()
         thread_id = int(data.get("thread_id") or 0)
         if thread_kind == "collection" and thread_id > 0:

@@ -26,6 +26,7 @@ from standalone.forms import BlockConfigForm, CourseForm, CourseImportUploadForm
 from standalone.models import (
     BlockConfig,
     BlockProject,
+    BlockResource,
     ContentAsset,
     ContentChunk,
     Course,
@@ -582,6 +583,62 @@ class StandaloneFlowTests(TestCase):
         long_text = "\n\n".join([f"Topic {index} sentence. " * 120 for index in range(1, 7)])
 
         self.assertGreaterEqual(_objective_budget_for_text(long_text), 12)
+
+    def test_objective_budget_for_text_ignores_short_line_noise(self):
+        noisy_text = "\n".join(
+            [
+                "Cell membrane",
+                "Transport proteins",
+                "Diffusion",
+                "Osmosis",
+                "Active transport",
+                "ATP",
+            ]
+            * 12
+        )
+
+        self.assertEqual(_objective_budget_for_text(noisy_text), 6)
+
+    def test_objective_validation_allows_strong_subset_of_large_objective_budget(self):
+        from standalone.services.content import _objective_validation_errors
+
+        source_text = "\n".join(
+            [
+                "Explain how students should disclose AI assistance in assessed coursework and reflective logs.",
+                "Compare acceptable AI-supported brainstorming with prohibited outsourcing of final answers.",
+                "Interpret academic integrity rules for paraphrasing, citation, and verification of AI outputs.",
+                "Apply course guidance when using AI to plan revision, draft notes, and check understanding.",
+                "Evaluate hallucinated claims, fabricated references, and weak reasoning in AI-generated study support.",
+                "Analyse privacy risks when pasting clinical, workplace, or personal data into AI tools.",
+                "Select appropriate prompts that improve clarity without asking AI to complete restricted assessment tasks.",
+                "Justify when students should switch from AI help to independent problem solving and original writing.",
+                "Distinguish formative practice activities from summative tasks with tighter AI restrictions.",
+                "Review tone, accuracy, and bias before reusing AI-generated explanations in coursework preparation.",
+                "Plan a transparent workflow for saving prompts, outputs, and edits as evidence of responsible use.",
+                "Reflect on how AI can support learning while preserving subject understanding and personal accountability.",
+            ]
+        )
+        objectives = [
+            "Explain how to disclose AI support clearly in coursework and reflective study records",
+            "Compare acceptable brainstorming with prohibited outsourcing of assessed answers",
+            "Interpret citation and paraphrasing rules when AI contributes to study materials",
+            "Apply course guidance when using AI for revision planning and note drafting",
+            "Evaluate hallucinated claims and fabricated references before reusing AI outputs",
+            "Analyse privacy risks when sharing personal or sensitive data with AI tools",
+            "Select prompts that improve clarity without delegating restricted assessment work",
+            "Justify when to move from AI support to independent writing and problem solving",
+            "Distinguish formative practice from summative assessment tasks with stricter AI limits",
+            "Review AI-generated explanations for tone, bias, and subject accuracy before reuse",
+            "Plan a transparent record of prompts, outputs, and edits for responsible AI use",
+            "Reflect on using AI to support learning without weakening personal accountability",
+        ]
+
+        errors = _objective_validation_errors(objectives, source_text, 16)
+
+        self.assertNotIn(
+            "Use more of the available objective slots when the source supports it, up to 16.",
+            errors,
+        )
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_summarize_block_content_merges_fallback_objectives_when_model_output_is_repetitive(self):
@@ -3310,6 +3367,7 @@ class StandaloneFlowTests(TestCase):
             reverse("standalone:course_config", args=[course.pk]),
             {
                 "self_enrol_enabled": "on",
+                "calculator_enabled": "on",
                 "self_enrol_domain": "",
                 "practice_weight": 80,
                 "validation_weight": 20,
@@ -3395,6 +3453,16 @@ class StandaloneFlowTests(TestCase):
         self.assertEqual(checkbox_response.status_code, 200)
         course.config.refresh_from_db()
         self.assertFalse(course.config.show_validation_feedback_immediately)
+
+        calculator_response = self.client.post(
+            reverse("standalone:update_course_config_field", args=[course.pk, "calculator_enabled"]),
+            {},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(calculator_response.status_code, 200)
+        course.config.refresh_from_db()
+        self.assertFalse(course.config.calculator_enabled)
 
     def test_block_config_form_inherits_course_defaults_when_blank_and_validates_ranges(self):
         course = self.create_course()
@@ -4606,6 +4674,11 @@ class StandaloneFlowTests(TestCase):
             text="Describe membrane structure",
         )
         objective = block.learning_objectives.first()
+        resource = BlockResource.objects.create(
+            block=block,
+            citation="WHO (2025) guidance on biosafety",
+            hyperlink="https://example.com/biosafety-guidance",
+        )
         self.client.force_login(self.teacher)
         response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
         self.assertNotContains(response, 'class="eyebrow"', html=False)
@@ -4638,6 +4711,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, ">Invite student<", html=False)
         self.assertContains(response, reverse("standalone:asset_upload", args=[block.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:block_delete", args=[block.pk]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:block_questions_delete", args=[block.pk]), html=False)
         self.assertContains(response, 'data-block-menu-trigger', html=False)
         self.assertContains(response, "Block actions")
         self.assertContains(response, 'action="%s"' % reverse("standalone:delete_asset", args=[asset.pk]), html=False)
@@ -4677,6 +4751,7 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, "Students can join from the self-enrol URL only when their exact email address is on this course", html=False)
         self.assertContains(response, "Enrolment magic links do not require an exact allowlist email.")
         self.assertContains(response, "This will replace the current description and learning objectives using every file in this block.")
+        self.assertContains(response, "This removes the question bank entries for this block only.")
         self.assertContains(response, "Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.")
         self.assertContains(response, "Upload files")
         self.assertContains(response, "Re-generate")
@@ -4696,17 +4771,24 @@ class StandaloneFlowTests(TestCase):
         self.assertContains(response, 'aria-expanded="false"', html=False)
         self.assertContains(response, 'id="block-content-%s"' % block.pk, html=False)
         self.assertContains(response, 'id="objectives-content-%s"' % block.pk, html=False)
+        self.assertContains(response, 'id="resources-content-%s"' % block.pk, html=False)
         self.assertContains(response, 'id="assets-content-%s"' % block.pk, html=False)
         self.assertContains(response, 'class="child-block-list course-block-subsections"', html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_block_field", args=[block.pk, "title"]), html=False)
         self.assertContains(response, 'data-inline-url="%s"' % reverse("standalone:update_learning_objective", args=[objective.pk]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:block_resource_create", args=[block.pk]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:block_resource_update", args=[resource.pk]), html=False)
+        self.assertContains(response, 'action="%s"' % reverse("standalone:block_resource_delete", args=[resource.pk]), html=False)
+        self.assertContains(response, resource.citation)
+        self.assertContains(response, resource.hyperlink)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_learning_objective", args=[objective.pk, "up"]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_learning_objective", args=[objective.pk, "down"]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:delete_learning_objective", args=[objective.pk]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_block", args=[block.pk, "up"]), html=False)
         self.assertContains(response, 'action="%s"' % reverse("standalone:move_block", args=[block.pk, "down"]), html=False)
         self.assertContains(response, "Delete this learning objective? This will re-number the remaining objectives.")
-        self.assertLess(response.content.decode("utf-8").find("Learning objectives"), response.content.decode("utf-8").find("Uploads"))
+        self.assertLess(response.content.decode("utf-8").find("Learning objectives"), response.content.decode("utf-8").find("Resources"))
+        self.assertLess(response.content.decode("utf-8").find("Resources"), response.content.decode("utf-8").find("Uploads"))
 
     def test_course_detail_renders_generated_block_avatar_image(self):
         course = self.create_course()
@@ -4821,6 +4903,17 @@ class StandaloneFlowTests(TestCase):
         self.assertNotContains(preview_response, "Continuous practice. Anchored assessment.")
         self.assertNotContains(preview_response, "Flag + save correction")
         self.assertNotContains(preview_response, "Correction note")
+
+    def test_student_preview_hides_numeric_quiz_menu_item_when_numeric_ratio_is_zero(self):
+        course = self.create_course()
+        course.config.numeric_ratio_percent = 0
+        course.config.save(update_fields=["numeric_ratio_percent", "updated_at"])
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertNotContains(response, 'data-quiz-type="num"', html=False)
 
     def test_block_create_form_includes_upload_picker(self):
         course = self.create_course()
@@ -5548,6 +5641,11 @@ class StandaloneFlowTests(TestCase):
         CourseBlock.objects.create(course=course, title="Week 1", summary="Membranes.", order=1)
         deleted_block = CourseBlock.objects.create(course=course, title="Week 2", summary="Transport.", order=2)
         trailing_block = CourseBlock.objects.create(course=course, title="Week 3", summary="Metabolism.", order=3)
+        deleted_resource = BlockResource.objects.create(
+            block=deleted_block,
+            citation="Delete with block",
+            hyperlink="https://example.com/delete-with-block",
+        )
         ContentAsset.objects.create(
             block=deleted_block,
             uploaded_by=self.teacher,
@@ -5584,10 +5682,184 @@ class StandaloneFlowTests(TestCase):
         remaining_blocks = list(course.blocks.order_by("order", "pk"))
         self.assertEqual([block.title for block in remaining_blocks], ["Week 1", "Week 3"])
         self.assertEqual([block.order for block in remaining_blocks], [1, 2])
+        self.assertFalse(BlockResource.objects.filter(pk=deleted_resource.pk).exists())
         trailing_block.refresh_from_db()
         self.assertEqual(trailing_block.learning_objectives.get().code, "2.1")
         course.refresh_from_db()
         self.assertTrue(course.summary)
+
+    def test_block_question_delete_removes_only_target_block_questions(self):
+        course = self.create_course()
+        first_block, _asset, first_objective, first_chunk = self.create_preview_content_block(course, title="Week 1", order=1)
+        second_block, _second_asset, second_objective, second_chunk = self.create_preview_content_block(course, title="Week 2", order=2)
+        first_practice = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Question one?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Explanation one.",
+            question_hash="delete-block-questions-1",
+        )
+        first_validation = QuestionBankItem.objects.create(
+            course=course,
+            block=first_block,
+            learning_objective=first_objective,
+            source_chunk=first_chunk,
+            bank_type=QuestionBankItem.BankType.VALIDATION,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Question one validation?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Explanation validation one.",
+            question_hash="delete-block-questions-2",
+            linked_question=first_practice,
+        )
+        QuestionBankItem.objects.create(
+            course=course,
+            block=second_block,
+            learning_objective=second_objective,
+            source_chunk=second_chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Question two?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="Explanation two.",
+            question_hash="delete-block-questions-3",
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse("standalone:block_questions_delete", args=[first_block.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, f"{reverse('standalone:course_detail', args=[course.pk])}#block-content-{first_block.pk}")
+        self.assertFalse(QuestionBankItem.objects.filter(pk=first_practice.pk).exists())
+        self.assertFalse(QuestionBankItem.objects.filter(pk=first_validation.pk).exists())
+        remaining_questions = list(course.question_bank_items.filter(block=second_block))
+        self.assertEqual(len(remaining_questions), 1)
+        self.assertEqual(remaining_questions[0].block_id, second_block.pk)
+        messages_list = list(response.wsgi_request._messages)
+        self.assertTrue(any("Deleted 2 questions from Week 1." in str(message) for message in messages_list))
+
+    def test_block_resource_create_adds_resource_and_redirects_to_resources_section(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        prefix = f"resource-create-{block.pk}"
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:block_resource_create", args=[block.pk]),
+            {
+                f"{prefix}-citation": "NHS (2026) Laboratory safety",
+                f"{prefix}-hyperlink": "https://example.com/laboratory-safety",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, f"{reverse('standalone:course_detail', args=[course.pk])}#resources-content-{block.pk}")
+        resource = BlockResource.objects.get(block=block)
+        self.assertEqual(resource.citation, "NHS (2026) Laboratory safety")
+        self.assertEqual(resource.hyperlink, "https://example.com/laboratory-safety")
+
+    def test_block_resource_create_renders_validation_errors(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        prefix = f"resource-create-{block.pk}"
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:block_resource_create", args=[block.pk]),
+            {
+                f"{prefix}-citation": "Broken resource",
+                f"{prefix}-hyperlink": "not-a-valid-url",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(BlockResource.objects.filter(block=block).count(), 0)
+        self.assertIn("Enter a valid URL.", response.content.decode("utf-8"))
+        self.assertIn(f'id="resources-content-{block.pk}"', response.content.decode("utf-8"))
+
+    def test_block_resource_update_saves_changes(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        resource = BlockResource.objects.create(
+            block=block,
+            citation="Original citation",
+            hyperlink="https://example.com/original",
+        )
+        prefix = f"resource-{resource.pk}"
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            reverse("standalone:block_resource_update", args=[resource.pk]),
+            {
+                f"{prefix}-citation": "Updated citation",
+                f"{prefix}-hyperlink": "https://example.com/updated",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, f"{reverse('standalone:course_detail', args=[course.pk])}#resources-content-{block.pk}")
+        resource.refresh_from_db()
+        self.assertEqual(resource.citation, "Updated citation")
+        self.assertEqual(resource.hyperlink, "https://example.com/updated")
+
+    def test_block_resource_delete_removes_resource(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        resource = BlockResource.objects.create(
+            block=block,
+            citation="Delete me",
+            hyperlink="https://example.com/delete-me",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse("standalone:block_resource_delete", args=[resource.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, f"{reverse('standalone:course_detail', args=[course.pk])}#resources-content-{block.pk}")
+        self.assertFalse(BlockResource.objects.filter(pk=resource.pk).exists())
+
+    def test_block_resource_views_require_teacher_role(self):
+        course = self.create_course()
+        block = CourseBlock.objects.create(course=course, title="Week 1", summary="Original summary", order=1)
+        resource = BlockResource.objects.create(
+            block=block,
+            citation="Teacher only",
+            hyperlink="https://example.com/teacher-only",
+        )
+        create_prefix = f"resource-create-{block.pk}"
+        update_prefix = f"resource-{resource.pk}"
+        self.client.force_login(self.student)
+
+        create_response = self.client.post(
+            reverse("standalone:block_resource_create", args=[block.pk]),
+            {
+                f"{create_prefix}-citation": "Student add attempt",
+                f"{create_prefix}-hyperlink": "https://example.com/student-attempt",
+            },
+        )
+        update_response = self.client.post(
+            reverse("standalone:block_resource_update", args=[resource.pk]),
+            {
+                f"{update_prefix}-citation": "Student update attempt",
+                f"{update_prefix}-hyperlink": "https://example.com/student-update",
+            },
+        )
+        delete_response = self.client.post(reverse("standalone:block_resource_delete", args=[resource.pk]))
+
+        self.assertEqual(create_response.status_code, 404)
+        self.assertEqual(update_response.status_code, 404)
+        self.assertEqual(delete_response.status_code, 404)
 
     def test_block_can_move_down_and_resequence_learning_objective_codes(self):
         course = self.create_course()
@@ -10176,9 +10448,47 @@ print(result)""",
         self.assertNotContains(response, 'class="app-header"', html=False)
         self.assertContains(response, block.title)
         self.assertContains(response, "Quiz")
+        self.assertContains(response, "Powered by")
+        self.assertContains(response, "knowhow_pink_square.png", html=False)
+        self.assertContains(response, 'href="#preview-conversation-list"', html=False)
+        self.assertContains(response, 'href="#preview-chat-composer"', html=False)
+        self.assertContains(response, 'id="preview-chat-transcript"', html=False)
         self.assertContains(response, "data-preview-calculator-trigger", html=False)
         self.assertContains(response, "preview-chat-scroll-bottom", html=False)
         self.assertNotContains(response, "preview-composer-actions", html=False)
+
+    def test_student_preview_page_sets_csrf_cookie_for_js_actions(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("csrftoken", response.cookies)
+
+    def test_student_practice_page_sets_csrf_cookie_for_js_actions(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+        self.client.force_login(self.student)
+
+        response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("csrftoken", response.cookies)
+
+    def test_student_preview_hides_calculator_when_course_setting_disabled(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        course.config.calculator_enabled = False
+        course.config.save(update_fields=["calculator_enabled", "updated_at"])
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "data-preview-calculator-trigger", html=False)
 
     def test_student_preview_reset_clears_course_preview_session_state(self):
         course = self.create_course()
@@ -10239,6 +10549,7 @@ print(result)""",
         self.assertNotContains(response, "preview-page--messenger", html=False)
         self.assertNotContains(response, 'data-preview-messenger-shell="true"', html=False)
         self.assertNotContains(response, "data-preview-block-search", html=False)
+        self.assertNotContains(response, "Powered by")
 
     def test_demo_practice_uses_messenger_shell_markers(self):
         course = self.create_course()
@@ -10253,12 +10564,30 @@ print(result)""",
         self.assertContains(response, "preview-page--messenger", html=False)
         self.assertContains(response, 'data-preview-messenger-shell="true"', html=False)
         self.assertNotContains(response, "Dashboard")
+        self.assertContains(response, 'href="#preview-conversation-list"', html=False)
+        self.assertContains(response, 'href="#preview-chat-composer"', html=False)
         self.assertNotContains(response, "data-preview-block-search", html=False)
         self.assertNotContains(response, "data-preview-course-metrics", html=False)
         self.assertNotContains(response, "data-preview-sidebar-toggle", html=False)
         self.assertContains(response, "data-preview-calculator-trigger", html=False)
         self.assertContains(response, "preview-chat-scroll-bottom", html=False)
         self.assertNotContains(response, "preview-composer-actions", html=False)
+        self.assertContains(response, "Powered by")
+        self.assertContains(response, "knowhow_pink_square.png", html=False)
+
+    def test_course_detail_shows_calculator_course_setting(self):
+        course = self.create_course()
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:course_detail", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Enable calculator")
+        self.assertContains(
+            response,
+            reverse("standalone:update_course_config_field", args=[course.pk, "calculator_enabled"]),
+            html=False,
+        )
 
     def test_student_preview_course_metrics_average_available_block_metrics(self):
         course = self.create_course()
@@ -10991,6 +11320,200 @@ print(result)""",
         question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
         self.assertIn(QuestionBankItem.QuestionType.NUM, block_payload["available_manual_question_types"])
         self.assertEqual(question_messages[-1]["question_id"], numeric_question.pk)
+
+    def test_student_preview_quiz_follows_learning_objective_order(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, asset, objective_one, chunk_one = self.create_preview_content_block(course)
+        objective_two = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=2,
+            code="1.2",
+            text="Compare membrane transport pathways",
+        )
+        chunk_two = ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=block,
+            ordinal=2,
+            text="Transport pathways include diffusion, facilitated diffusion, and active transport.",
+            token_count=12,
+            checksum="week-1-chunk-2",
+        )
+        first_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective_one,
+            source_chunk=chunk_one,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best matches the first learning objective?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It explains the key ideas in Week 1.",
+            distractors=[
+                "It lists unrelated historical events.",
+                "It focuses only on laboratory safety posters.",
+                "It avoids the main biological concepts completely.",
+            ],
+            explanation="This directly matches the first learning objective.",
+            question_hash="objective-order-question-1",
+        )
+        second_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective_two,
+            source_chunk=chunk_two,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best matches the second learning objective?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It compares membrane transport pathways.",
+            distractors=[
+                "It ignores transport and only names organelles.",
+                "It focuses on geological erosion patterns.",
+                "It describes poetry analysis instead of biology.",
+            ],
+            explanation="This directly matches the second learning objective.",
+            question_hash="objective-order-question-2",
+        )
+        self.client.force_login(self.teacher)
+
+        def reverse_shuffle(values):
+            values.reverse()
+
+        with patch("standalone.services.preview.random.shuffle", side_effect=reverse_shuffle):
+            first_response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.MCQ}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        first_block_payload = next(item for item in first_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        first_question_messages = [message for message in first_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(first_question_messages[-1]["question_id"], first_question.pk)
+        self.assertEqual(first_question_messages[-1]["learning_objective_id"], objective_one.pk)
+
+        answer_response = self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": first_question.pk, "answer": first_question.correct_answer}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(answer_response.status_code, 200)
+
+        with patch("standalone.services.preview.random.shuffle", side_effect=reverse_shuffle):
+            second_response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.MCQ}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(second_response.status_code, 200)
+        second_block_payload = next(item for item in second_response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        second_question_messages = [message for message in second_block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(second_question_messages[-1]["question_id"], second_question.pk)
+        self.assertEqual(second_question_messages[-1]["learning_objective_id"], objective_two.pk)
+
+    def test_student_preview_generates_for_current_learning_objective_before_later_stored_question(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, asset, objective_one, chunk_one = self.create_preview_content_block(course)
+        objective_two = LearningObjective.objects.create(
+            course=course,
+            block=block,
+            source_asset=asset,
+            position=2,
+            code="1.2",
+            text="Compare membrane transport pathways",
+        )
+        chunk_two = ContentChunk.objects.create(
+            asset=asset,
+            course=course,
+            block=block,
+            ordinal=2,
+            text="Transport pathways include diffusion, facilitated diffusion, and active transport.",
+            token_count=12,
+            checksum="week-1-chunk-2-generated-priority",
+        )
+        generated_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective_one,
+            source_chunk=chunk_one,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best matches the first learning objective?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It explains the key ideas in Week 1.",
+            distractors=[
+                "It lists unrelated historical events.",
+                "It focuses only on laboratory safety posters.",
+                "It avoids the main biological concepts completely.",
+            ],
+            explanation="This directly matches the first learning objective.",
+            question_hash="generated-objective-priority-question-1",
+        )
+        stored_later_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective_two,
+            source_chunk=chunk_two,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Which statement best matches the second learning objective?",
+            question_type=QuestionBankItem.QuestionType.MCQ,
+            correct_answer="It compares membrane transport pathways.",
+            distractors=[
+                "It ignores transport and only names organelles.",
+                "It focuses on geological erosion patterns.",
+                "It describes poetry analysis instead of biology.",
+            ],
+            explanation="This directly matches the second learning objective.",
+            question_hash="stored-later-objective-question-2",
+        )
+        self.client.force_login(self.teacher)
+
+        def fake_generate_question_pair_for_block(
+            _block,
+            *,
+            preferred_objective_ids=None,
+            strict_preferred_objectives=False,
+            question_type=None,
+            **_kwargs,
+        ):
+            if (
+                _block.pk == block.pk
+                and preferred_objective_ids == [objective_one.pk]
+                and strict_preferred_objectives
+                and question_type == QuestionBankItem.QuestionType.MCQ
+            ):
+                return generated_question, None
+            return None, None
+
+        with patch(
+            "standalone.services.preview.course_question_generation_budget",
+            return_value=SimpleNamespace(can_generate=True),
+        ), patch(
+            "standalone.services.preview.generate_question_pair_for_block",
+            side_effect=fake_generate_question_pair_for_block,
+        ):
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+                data=json.dumps({"question_type": QuestionBankItem.QuestionType.MCQ}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        block_payload = next(item for item in response.json()["preview"]["blocks"] if item["id"] == block.pk)
+        question_messages = [message for message in block_payload["transcript"] if message["kind"] == "question"]
+        self.assertEqual(question_messages[-1]["question_id"], generated_question.pk)
+        self.assertEqual(question_messages[-1]["learning_objective_id"], objective_one.pk)
+        self.assertNotEqual(question_messages[-1]["question_id"], stored_later_question.pk)
 
     def test_student_preview_available_manual_question_types_include_coding_when_ratio_enabled(self):
         course = self.create_course()
@@ -12796,7 +13319,11 @@ print(result)""",
             question_hash="preview-waq-draft",
         )
         self.client.force_login(self.teacher)
-        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+            content_type="application/json",
+        )
 
         response = self.client.post(
             reverse("standalone:student_preview_action", args=[course.pk, block.pk, "draft_answer"]),
@@ -12815,8 +13342,8 @@ print(result)""",
         self.assertEqual(alignment["alignment_state"], "aligned")
         self.assertGreaterEqual(alignment["alignment_score"], 75)
 
-    @override_settings(OPENAI_API_KEY="test-key")
-    def test_student_preview_waq_draft_answer_uses_semantic_check_by_character_bucket(self):
+    @override_settings(OPENAI_API_KEY="test-key", PREVIEW_WAQ_OPENAI_DRAFT_ENABLED=True)
+    def test_student_preview_waq_draft_answer_uses_exact_answer_cache(self):
         course = self.create_course()
         course.config.advanced_question_start_percent = 0
         course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
@@ -12838,7 +13365,11 @@ print(result)""",
         first_answer = "The cell boundary controls what moves in and out."
         third_answer = f"{first_answer} It manages exchange."
         self.client.force_login(self.teacher)
-        self.client.post(reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]))
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+            content_type="application/json",
+        )
 
         class DummyResponse:
             def __init__(self, score):
@@ -12892,6 +13423,135 @@ print(result)""",
         self.assertEqual(mock_client.return_value.responses.create.call_count, 2)
         self.assertEqual(second_response.json()["alignment"]["alignment_score"], 84)
         self.assertEqual(third_response.json()["alignment"]["alignment_score"], 88)
+
+    @override_settings(OPENAI_API_KEY="test-key", PREVIEW_WAQ_OPENAI_DRAFT_ENABLED=True)
+    def test_student_preview_waq_draft_answer_can_decrease_when_answer_gets_weaker(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="How would you explain membrane transport?",
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            correct_answer="Membranes regulate what enters and leaves the cell.",
+            written_answer_keywords=["membranes", "regulate transport", "enters and leaves"],
+            explanation="This follows directly from this block.",
+            question_hash="preview-waq-draft-decrease",
+        )
+        stronger_answer = "Membranes regulate what enters and leaves the cell through selective transport."
+        weaker_answer = "Cells have membranes and things move."
+        self.client.force_login(self.teacher)
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+            content_type="application/json",
+        )
+
+        class DummyResponse:
+            def __init__(self, score, aligned):
+                self.output_text = json.dumps(
+                    {
+                        "aligned": aligned,
+                        "score": score,
+                        "feedback": "Keep refining it.",
+                    }
+                )
+
+        with patch("standalone.services.preview.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.side_effect = [
+                DummyResponse(0.86, True),
+                DummyResponse(0.41, False),
+            ]
+            first_response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "draft_answer"]),
+                data=json.dumps(
+                    {
+                        "question_id": practice.pk,
+                        "answer_text": stronger_answer,
+                    }
+                ),
+                content_type="application/json",
+            )
+            second_response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "draft_answer"]),
+                data=json.dumps(
+                    {
+                        "question_id": practice.pk,
+                        "answer_text": weaker_answer,
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 2)
+        self.assertEqual(first_response.json()["alignment"]["alignment_state"], "aligned")
+        self.assertEqual(first_response.json()["alignment"]["alignment_score"], 86)
+        self.assertEqual(second_response.json()["alignment"]["alignment_state"], "drafting")
+        self.assertEqual(second_response.json()["alignment"]["alignment_score"], 41)
+
+    @override_settings(OPENAI_API_KEY="test-key", PREVIEW_WAQ_OPENAI_DRAFT_ENABLED=False)
+    def test_student_preview_waq_draft_answer_uses_ai_for_short_substantive_answer(self):
+        course = self.create_course()
+        course.config.advanced_question_start_percent = 0
+        course.config.save(update_fields=["advanced_question_start_percent", "updated_at"])
+        block, _, objective, chunk = self.create_preview_content_block(course)
+        practice = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="How would you explain membrane transport?",
+            question_type=QuestionBankItem.QuestionType.WAQ,
+            correct_answer="Membranes regulate what enters and leaves the cell.",
+            written_answer_keywords=["membranes", "regulate transport", "enters and leaves"],
+            explanation="This follows directly from this block.",
+            question_hash="preview-waq-draft-short-ai",
+        )
+        short_answer = "Membranes control entry"
+        self.client.force_login(self.teacher)
+        self.client.post(
+            reverse("standalone:student_preview_action", args=[course.pk, block.pk, "quiz"]),
+            data=json.dumps({"question_type": QuestionBankItem.QuestionType.WAQ}),
+            content_type="application/json",
+        )
+
+        class DummyResponse:
+            output_text = json.dumps(
+                {
+                    "aligned": True,
+                    "score": 0.79,
+                    "feedback": "Good answer.",
+                }
+            )
+
+        with patch("standalone.services.preview.OpenAI") as mock_client:
+            mock_client.return_value.responses.create.return_value = DummyResponse()
+            response = self.client.post(
+                reverse("standalone:student_preview_action", args=[course.pk, block.pk, "draft_answer"]),
+                data=json.dumps(
+                    {
+                        "question_id": practice.pk,
+                        "answer_text": short_answer,
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_client.return_value.responses.create.call_count, 1)
+        alignment = response.json()["alignment"]
+        self.assertEqual(alignment["alignment_state"], "aligned")
+        self.assertEqual(alignment["alignment_score"], 79)
 
     @override_settings(OPENAI_API_KEY="test-key")
     def test_student_preview_chat_uses_openai_for_course_questions(self):
@@ -15216,6 +15876,11 @@ print(result)""",
     def test_student_preview_welcome_message_mentions_practice_mode_and_test_mode(self):
         course = self.create_course()
         block, _, _, _ = self.create_preview_content_block(course, title="Origins of Life")
+        BlockResource.objects.create(
+            block=block,
+            citation="Darwin correspondence archive",
+            hyperlink="https://example.com/darwin-archive",
+        )
         self.client.force_login(self.teacher)
 
         response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
@@ -15230,9 +15895,10 @@ print(result)""",
         assistant_messages = [message for message in block_payload["transcript"] if message["role"] == "assistant" and message["kind"] == "text"]
         self.assertEqual(
             assistant_messages[0]["text"],
-            'Welcome to Origins of Life. Tap the "Quiz" button to generate a quiz question for this topic, or ask about anything in the course.',
+            "Welcome to Origins of Life.\n\nOrigins of Life summary\n\nTap Quiz to generate a quiz question for this topic, and enter any question that pops into your head in the Ask bar at the bottom of the screen.",
         )
-        self.assertEqual(assistant_messages[0]["inline_cta_label"], "Test Mode")
+        self.assertEqual(assistant_messages[0]["welcome_quiz_cta_label"], "Quiz")
+        self.assertEqual(assistant_messages[0]["resource_cta_label"], "Resource List")
 
     def test_preview_demo_and_student_practice_state_include_block_avatar_url(self):
         course = self.create_course()
@@ -15259,6 +15925,58 @@ print(result)""",
         for response in (preview_response, practice_response, demo_response):
             block_payload = next(item for item in response.context["preview_state"]["blocks"] if item["id"] == block.pk)
             self.assertEqual(block_payload["avatar_url"], avatar_url)
+
+    def test_preview_demo_and_student_practice_states_include_block_resources_in_created_order(self):
+        course = self.create_course()
+        Enrollment.objects.create(course=course, student=self.student, status=Enrollment.Status.ACTIVE)
+        block, _, _, _ = self.create_preview_content_block(course, title="Radioactivity")
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        first_resource = BlockResource.objects.create(
+            block=block,
+            citation="CDC (2026) Radiation basics",
+            hyperlink="https://example.com/radiation-basics",
+        )
+        second_resource = BlockResource.objects.create(
+            block=block,
+            citation="NHS (2026) Radiation safety",
+            hyperlink="https://example.com/radiation-safety",
+        )
+
+        self.client.force_login(self.teacher)
+        preview_response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.client.force_login(self.student)
+        practice_response = self.client.get(reverse("standalone:practice_quiz", args=[course.pk]))
+
+        self.client.logout()
+        demo_response = self.client.get(reverse("standalone:demo_practice", args=[access.token]))
+
+        expected_resources = [
+            {
+                "id": first_resource.pk,
+                "citation": "CDC (2026) Radiation basics",
+                "hyperlink": "https://example.com/radiation-basics",
+            },
+            {
+                "id": second_resource.pk,
+                "citation": "NHS (2026) Radiation safety",
+                "hyperlink": "https://example.com/radiation-safety",
+            },
+        ]
+        for response in (preview_response, practice_response, demo_response):
+            block_payload = next(item for item in response.context["preview_state"]["blocks"] if item["id"] == block.pk)
+            self.assertEqual(block_payload["resources"], expected_resources)
+
+    def test_student_preview_contains_resources_menu_item(self):
+        course = self.create_course()
+        self.create_preview_content_block(course)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse("standalone:student_preview", args=[course.pk]))
+
+        self.assertContains(response, 'data-preview-resource="resources"', html=False)
 
     def test_student_practice_state_includes_validation_reminder_when_digital_event_exists(self):
         course = self.create_course()
@@ -17507,6 +18225,18 @@ print(result)""",
         access.refresh_from_db()
 
         self.assertEqual(access.updated_at, initial_updated_at)
+
+    def test_public_demo_practice_page_sets_csrf_cookie(self):
+        course = self.create_course()
+        course.config.demo_enabled = True
+        course.config.save(update_fields=["demo_enabled", "updated_at"])
+        access = CourseDemoAccess.objects.create(course=course)
+        self.create_preview_content_block(course)
+
+        response = self.client.get(reverse("standalone:demo_practice", args=[access.token]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("csrftoken", response.cookies)
 
     def test_public_demo_practice_reset_clears_shared_state(self):
         course = self.create_course()

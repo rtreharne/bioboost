@@ -43,6 +43,7 @@ if (previewRoot && previewDataNode) {
   const headerMenuTrigger = previewRoot.querySelector("[data-preview-header-menu-trigger]");
   const headerMenuPanel = previewRoot.querySelector("[data-preview-header-menu-panel]");
   const descriptionResourceButton = previewRoot.querySelector('[data-preview-resource="description"]');
+  const resourcesResourceButton = previewRoot.querySelector('[data-preview-resource="resources"]');
   const objectivesResourceButton = previewRoot.querySelector('[data-preview-resource="objectives"]');
   const collectionObjectivesResourceButton = previewRoot.querySelector('[data-preview-resource="collection_objectives"]');
   const sidebarMenu = previewRoot.querySelector("[data-preview-sidebar-menu]");
@@ -119,6 +120,7 @@ if (previewRoot && previewDataNode) {
   const activeProjectIdsByBlock = {};
   const projectAnswerDraftsById = {};
   const maqSelectionsByQuestionId = {};
+  const waqDraftDebounceMs = 650;
   const sidebarSelectionPreviewMs = 2000;
   const previewDateFormatter = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
@@ -2017,6 +2019,9 @@ if (previewRoot && previewDataNode) {
     if (descriptionResourceButton) {
       descriptionResourceButton.hidden = !isBlockMode;
     }
+    if (resourcesResourceButton) {
+      resourcesResourceButton.hidden = !isBlockMode;
+    }
     if (objectivesResourceButton) {
       objectivesResourceButton.hidden = !isBlockMode;
     }
@@ -3307,6 +3312,61 @@ if (previewRoot && previewDataNode) {
     container.appendChild(paragraph);
   }
 
+  async function requestWelcomeQuiz() {
+    if (requestInFlight) {
+      return;
+    }
+    const threadId = currentConversationKey();
+    if (threadId) {
+      setQuizLoading(threadId, true);
+      renderTranscript();
+    }
+    let quizRequestSucceeded = false;
+    try {
+      quizRequestSucceeded = await postPreviewAction("quiz", null, { minDurationMs: 2000, scrollMode: "question" });
+    } finally {
+      if (threadId) {
+        setQuizLoading(threadId, false);
+        renderTranscript(quizRequestSucceeded ? "question" : "preserve");
+      }
+    }
+  }
+
+  function appendWelcomeQuizAction(actions, message) {
+    const quizCtaLabel = String(message?.welcome_quiz_cta_label || "").trim();
+    if (!message?.is_block_welcome || !quizCtaLabel) {
+      return;
+    }
+    actions.classList.add("is-welcome-resource");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button";
+    button.textContent = quizCtaLabel;
+    button.disabled = requestInFlight;
+    button.addEventListener("click", () => {
+      void requestWelcomeQuiz();
+    });
+    actions.appendChild(button);
+  }
+
+  function appendWelcomeResourceAction(actions, message) {
+    const resourceCtaLabel = String(message?.resource_cta_label || "").trim();
+    const welcomeBlock = findBlock(message?.thread_id || currentBlock()?.id || 0);
+    if (!message?.is_block_welcome || !resourceCtaLabel || !welcomeBlock || !Array.isArray(welcomeBlock.resources) || !welcomeBlock.resources.length) {
+      return;
+    }
+    actions.classList.add("is-welcome-resource");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button secondary";
+    button.textContent = resourceCtaLabel;
+    button.disabled = requestInFlight;
+    button.addEventListener("click", () => {
+      appendResourceMessage("resources");
+    });
+    actions.appendChild(button);
+  }
+
   function appendQuestionCodeSnippet(container, message) {
     if (!container || !message?.is_coding_question || !message.code_snippet) {
       return;
@@ -3792,6 +3852,34 @@ if (previewRoot && previewDataNode) {
 
         return article;
       }
+      if (message.resource_key === "resources") {
+        const list = document.createElement("ul");
+        list.className = "preview-resource-list";
+        const resourceBlock = findBlock(message.block_id || currentBlock()?.id || 0);
+        const resources = Array.isArray(resourceBlock?.resources)
+          ? resourceBlock.resources
+          : (Array.isArray(message.resources) ? message.resources : []);
+
+        if (!resources.length) {
+          const emptyItem = document.createElement("li");
+          emptyItem.textContent = "No resources yet.";
+          list.appendChild(emptyItem);
+        } else {
+          resources.forEach((resource) => {
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = String(resource.hyperlink || "");
+            link.textContent = String(resource.citation || resource.hyperlink || "Untitled resource");
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            item.appendChild(link);
+            list.appendChild(item);
+          });
+        }
+
+        article.appendChild(list);
+        return article;
+      }
       if (message.resource_key === "objectives") {
         const list = document.createElement("ul");
         list.className = "preview-objective-list";
@@ -3963,7 +4051,13 @@ if (previewRoot && previewDataNode) {
       }
     }
 
-    if (message.role === "assistant" && message.kind === "text" && message.inline_cta_label) {
+    if (
+      message.role === "assistant"
+      && message.kind === "text"
+      && message.inline_cta_label
+      && !message.is_block_welcome
+      && !message.is_collection_welcome
+    ) {
       appendMessageTextWithInlineCta(article, message);
     } else {
       appendFormattedMessageContent(article, message.text || "");
@@ -3976,6 +4070,8 @@ if (previewRoot && previewDataNode) {
     if (message.role === "assistant" && message.kind === "text") {
       const actions = document.createElement("div");
       actions.className = "preview-message-actions";
+      appendWelcomeQuizAction(actions, message);
+      appendWelcomeResourceAction(actions, message);
       appendFurtherStudyAction(actions, message);
       if (actions.childElementCount) {
         article.appendChild(actions);
@@ -4424,6 +4520,20 @@ if (previewRoot && previewDataNode) {
         resource_label: "Description",
         role: "assistant",
         text: block.summary || "No description yet.",
+      };
+    }
+
+    if (resource === "resources") {
+      const resources = Array.isArray(block.resources) ? block.resources : [];
+      return {
+        block_id: block.id,
+        block_label: block.title,
+        kind: "resource",
+        resource_key: "resources",
+        resource_label: "Resources",
+        role: "assistant",
+        text: "These resources were used to generate the questions for this block.",
+        resources,
       };
     }
 
@@ -5358,7 +5468,7 @@ if (previewRoot && previewDataNode) {
           setStatus("Unable to update alignment right now.");
         }
       });
-    }, 120);
+    }, waqDraftDebounceMs);
   });
 
   resourceButtons.forEach((button) => {

@@ -420,6 +420,21 @@ def _source_keyword_set(text: str) -> set[str]:
     }
 
 
+def _objective_like_line_count(text: str, max_items: int) -> int:
+    candidates: list[str] = []
+    for line in text.splitlines():
+        stripped = sanitize_learning_objective(line)
+        if 30 <= len(stripped) <= 180 and _objective_candidate_score(stripped) >= 2:
+            candidates.append(stripped)
+    return min(max_items, len(_dedupe_texts(candidates)))
+
+
+def _recommended_objective_count(text: str, max_items: int) -> int:
+    coverage_candidates = derive_learning_objectives_with_coverage(text, max_items=max_items)
+    evidence_count = max(len(coverage_candidates), _objective_like_line_count(text, max_items))
+    return max(3, min(max_items, evidence_count))
+
+
 def _objective_validation_errors(objectives: list[str], source_text: str, max_items: int) -> list[str]:
     if len(objectives) < 3:
         return ["Return at least 3 learning objectives when content exists."]
@@ -455,7 +470,9 @@ def _objective_validation_errors(objectives: list[str], source_text: str, max_it
         if generic_count >= 2 and overlap <= 3:
             errors.append(f"Objective {index} relies on generic umbrella wording.")
 
-    if len(objectives) < max_items and max_items >= 8 and len(source_keywords) >= 18:
+    recommended_items = _recommended_objective_count(source_text, max_items)
+    minimum_expected_items = max(3, min(max_items, (recommended_items * 3 + 3) // 4))
+    if recommended_items >= 8 and len(objectives) < minimum_expected_items:
         errors.append(f"Use more of the available objective slots when the source supports it, up to {max_items}.")
     return _dedupe_texts(errors)
 
@@ -544,7 +561,7 @@ def _block_objective_generation_guidance(block) -> str:
 def _objective_budget_for_text(text: str, minimum: int = 6, maximum: int = 16) -> int:
     sections = max(1, len(chunk_text(text, target_size=900)))
     paragraphs = len([paragraph for paragraph in normalize_text(text).split("\n\n") if paragraph.strip()])
-    line_candidates = len([line for line in text.splitlines() if sanitize_learning_objective(line)])
+    line_candidates = _objective_like_line_count(text, maximum)
     return max(minimum, min(maximum, max(sections * 3, line_candidates, max(0, paragraphs // 2))))
 
 

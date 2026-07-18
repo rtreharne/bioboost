@@ -228,6 +228,14 @@
               <p class="course-setting-help">{{ course_config_form.coding_question_ratio_percent.help_text }}</p>
               <p class="course-setting-status" data-course-config-status hidden></p>
             </div>
+            <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.calculator_enabled.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'calculator_enabled' %}">
+              <label class="course-setting-label course-setting-label-checkbox" for="{{ course_config_form.calculator_enabled.id_for_label }}">
+                {{ course_config_form.calculator_enabled }}
+                <span>{{ course_config_form.calculator_enabled.label }}</span>
+              </label>
+              <p class="course-setting-help">{{ course_config_form.calculator_enabled.help_text }}</p>
+              <p class="course-setting-status" data-course-config-status hidden></p>
+            </div>
             <div class="course-setting-cell" data-course-config-row data-course-config-field="{{ course_config_form.coverage_factor.name }}" data-course-config-url="{% url 'standalone:update_course_config_field' course.pk 'coverage_factor' %}">
               <label class="course-setting-label" for="{{ course_config_form.coverage_factor.id_for_label }}">{{ course_config_form.coverage_factor.label }}</label>
               {{ course_config_form.coverage_factor }}
@@ -435,6 +443,17 @@
                       {% csrf_token %}
                       <button class="block-action-menu-item" type="submit"{% if block.avatar_generation_status == 'queued' or block.avatar_generation_status == 'running' %} disabled{% endif %}>
                         {% if block.avatar_generation_status == 'queued' or block.avatar_generation_status == 'running' %}Generating avatar...{% else %}Regenerate avatar{% endif %}
+                      </button>
+                    </form>
+                    <form
+                      method="post"
+                      action="{% url 'standalone:block_questions_delete' block.pk %}"
+                      data-async-refresh
+                      data-confirm="Delete all {{ block.question_count }} question{{ block.question_count|pluralize }} for this content block? This removes the question bank entries for this block only."
+                    >
+                      {% csrf_token %}
+                      <button class="block-action-menu-item is-warning" type="submit"{% if not block.question_count %} disabled{% endif %}>
+                        Delete questions
                       </button>
                     </form>
                     <form method="post" action="{% url 'standalone:block_delete' block.pk %}" data-async-refresh data-confirm="Delete this content block? This will remove its uploads, learning objectives, and generated questions. Remaining blocks will be re-numbered.">
@@ -808,6 +827,87 @@
                         <li>No objectives generated yet.</li>
                       {% endfor %}
                     </ul>
+                  </div>
+                </section>
+
+                <section class="block-detail-section course-block-subsection" data-block-card>
+                  <div
+                    class="course-block-subsection-header"
+                    data-block-toggle
+                    data-block-target="resources-content-{{ block.pk }}"
+                    aria-expanded="false"
+                    aria-controls="resources-content-{{ block.pk }}"
+                    tabindex="0"
+                    role="button"
+                  >
+                    <div>
+                      <h4>Resources</h4>
+                    </div>
+                    <div class="subsection-count">
+                      <span>{{ block.resource_count }}</span>
+                      <span class="block-card-icon" aria-hidden="true"></span>
+                    </div>
+                  </div>
+
+                  <div id="resources-content-{{ block.pk }}" class="block-card-content course-block-section-content" hidden>
+                    <form method="post" action="{% url 'standalone:block_resource_create' block.pk %}" class="course-settings-grid">
+                      {% csrf_token %}
+                      <div class="course-setting-cell">
+                        <label class="course-setting-label" for="{{ block.resource_create_form.citation.id_for_label }}">{{ block.resource_create_form.citation.label }}</label>
+                        {{ block.resource_create_form.citation }}
+                        {% if block.resource_create_form.citation.errors %}
+                          <p class="upload-error">{{ block.resource_create_form.citation.errors|join:", " }}</p>
+                        {% endif %}
+                      </div>
+                      <div class="course-setting-cell">
+                        <label class="course-setting-label" for="{{ block.resource_create_form.hyperlink.id_for_label }}">{{ block.resource_create_form.hyperlink.label }}</label>
+                        {{ block.resource_create_form.hyperlink }}
+                        {% if block.resource_create_form.hyperlink.errors %}
+                          <p class="upload-error">{{ block.resource_create_form.hyperlink.errors|join:", " }}</p>
+                        {% endif %}
+                      </div>
+                      <div class="course-setting-cell course-setting-cell--full">
+                        <button class="button" type="submit">Add resource</button>
+                      </div>
+                    </form>
+
+                    <div class="child-block-list resource-form-stack">
+                      {% for resource in block.resources_for_course_detail %}
+                        <article class="block-detail-section resource-editor-card">
+                          <form method="post" action="{% url 'standalone:block_resource_update' resource.pk %}" class="course-settings-grid">
+                            {% csrf_token %}
+                            <div class="course-setting-cell">
+                              <label class="course-setting-label" for="{{ resource.edit_form.citation.id_for_label }}">{{ resource.edit_form.citation.label }}</label>
+                              {{ resource.edit_form.citation }}
+                              {% if resource.edit_form.citation.errors %}
+                                <p class="upload-error">{{ resource.edit_form.citation.errors|join:", " }}</p>
+                              {% endif %}
+                            </div>
+                            <div class="course-setting-cell">
+                              <label class="course-setting-label" for="{{ resource.edit_form.hyperlink.id_for_label }}">{{ resource.edit_form.hyperlink.label }}</label>
+                              {{ resource.edit_form.hyperlink }}
+                              {% if resource.edit_form.hyperlink.errors %}
+                                <p class="upload-error">{{ resource.edit_form.hyperlink.errors|join:", " }}</p>
+                              {% endif %}
+                            </div>
+                            <div class="course-setting-cell course-setting-cell--full">
+                              <div class="block-inline-actions">
+                                <button class="button" type="submit">Save resource</button>
+                                <a class="button secondary" href="{{ resource.hyperlink }}" target="_blank" rel="noopener noreferrer">Open link</a>
+                              </div>
+                            </div>
+                          </form>
+                          <div class="resource-editor-actions">
+                            <form method="post" action="{% url 'standalone:block_resource_delete' resource.pk %}" data-confirm="Delete this resource?">
+                              {% csrf_token %}
+                              <button class="button secondary" type="submit">Delete resource</button>
+                            </form>
+                          </div>
+                        </article>
+                      {% empty %}
+                        <p>No resources yet.</p>
+                      {% endfor %}
+                    </div>
                   </div>
                 </section>
 

@@ -9,6 +9,7 @@ from django.utils.text import slugify
 from standalone.models import (
     BlockConfig,
     BlockProject,
+    BlockResource,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -289,6 +290,10 @@ class CourseConfigForm(forms.ModelForm):
         self.fields["demo_enabled"].label = "Enable public demo mode"
         self.fields["demo_enabled"].help_text = (
             "Publishes a no-login student demo link for this course. Demo practice is shared across all visitors."
+        )
+        self.fields["calculator_enabled"].label = "Enable calculator"
+        self.fields["calculator_enabled"].help_text = (
+            "Shows the calculator button in student practice, teacher preview, and public demo mode for this course."
         )
         self.fields["demo_iframe_allowed_origins"].label = "Allowed iframe origins"
         self.fields["demo_iframe_allowed_origins"].help_text = (
@@ -735,6 +740,38 @@ class LearningObjectiveGuidanceInlineForm(forms.ModelForm):
 
     def clean_assistant_guidance(self):
         return sanitize_assistant_guidance(self.cleaned_data.get("assistant_guidance", ""))
+
+
+class BlockResourceForm(forms.ModelForm):
+    class Meta:
+        model = BlockResource
+        fields = ["citation", "hyperlink"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["citation"].widget.attrs.update(
+            {
+                "placeholder": "E.g. UNESCO (2024) AI in education guidance",
+            }
+        )
+        self.fields["hyperlink"].widget.attrs.update(
+            {
+                "placeholder": "https://example.com/resource",
+                "inputmode": "url",
+            }
+        )
+
+    def clean_citation(self):
+        citation = str(self.cleaned_data.get("citation") or "").strip()
+        if not citation:
+            raise forms.ValidationError("Please enter a citation.")
+        return citation
+
+    def clean_hyperlink(self):
+        hyperlink = str(self.cleaned_data.get("hyperlink") or "").strip()
+        if not hyperlink:
+            raise forms.ValidationError("Please enter a hyperlink.")
+        return hyperlink
 
 
 class ContentAssetForm(forms.Form):

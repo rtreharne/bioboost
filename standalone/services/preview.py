@@ -127,15 +127,21 @@ def _next_message_id(course_state: dict) -> str:
     return f"preview-message-{course_state['message_counter']}"
 
 
-def _welcome_message_text(title: str) -> str:
-    return (
-        f'Welcome to {title}. Tap the "Quiz" button to generate a quiz question for this topic, '
-        "or ask about anything in the course."
-    )
+def _welcome_message_text(title: str, description: str = "") -> str:
+    message_parts = [f"Welcome to {title}."]
+    description_text = str(description or "").strip()
+    if description_text:
+        message_parts.append(description_text)
+    message_parts.append("Tap Quiz to generate a quiz question for this topic, and enter any question that pops into your head in the Ask bar at the bottom of the screen.")
+    return "\n\n".join(message_parts)
 
 
-def _block_welcome_message_text(block_title: str) -> str:
-    return _welcome_message_text(block_title)
+def _block_welcome_message_text(block: CourseBlock) -> str:
+    return _welcome_message_text(block.title, block.summary)
+
+
+def _block_welcome_resource_cta_label(block: CourseBlock) -> str:
+    return "Resource List" if block.resources.exists() else ""
 
 
 def _collection_welcome_message_text(collection_title: str) -> str:
@@ -154,9 +160,10 @@ def _ensure_block_transcript(course_state: dict, block: CourseBlock) -> list[dic
                 "kind": "text",
                 "thread_kind": PREVIEW_BLOCK_THREAD_KIND,
                 "thread_id": block.pk,
-                "text": _block_welcome_message_text(block.title),
+                "text": _block_welcome_message_text(block),
                 "is_block_welcome": True,
-                "inline_cta_label": "Test Mode",
+                "welcome_quiz_cta_label": "Quiz",
+                "resource_cta_label": _block_welcome_resource_cta_label(block),
                 "source_blocks": [block.title],
             }
         )
@@ -245,7 +252,7 @@ def _first_active_block(course: Course):
 
 
 def _preview_blocks(course: Course):
-    return list(course.blocks.select_related("config").prefetch_related("learning_objectives").order_by("order", "created_at"))
+    return list(course.blocks.select_related("config").prefetch_related("learning_objectives", "resources").order_by("order", "created_at"))
 
 
 def _collection_blocks_for_preview(course: Course, collection: CourseBlockCollection, blocks: list[CourseBlock] | None = None) -> list[CourseBlock]:
@@ -704,6 +711,7 @@ def _course_question_queryset(
     course_state: dict,
     question_type: str | None = None,
     *,
+    objective_ids: list[int] | None = None,
     coding_only: bool = False,
     coding_preference: bool | None = None,
 ):
@@ -724,6 +732,8 @@ def _course_question_queryset(
     normalized_type = _normalize_requested_question_type(question_type)
     if normalized_type:
         queryset = queryset.filter(question_type=normalized_type)
+    if objective_ids:
+        queryset = queryset.filter(learning_objective_id__in=objective_ids)
     if coding_only:
         queryset = queryset.filter(is_coding_question=True)
     elif coding_preference is True:
@@ -775,6 +785,13 @@ def _block_question_history(question_queryset, course_state: dict, block: Course
     )
 
 
+def _objective_order_map(block: CourseBlock) -> dict[int, int]:
+    return {
+        int(objective.pk): index
+        for index, objective in enumerate(block.learning_objectives.all())
+    }
+
+
 def _pick_randomized_best_candidate(candidates: list[tuple[tuple, QuestionBankItem]]) -> QuestionBankItem | None:
     if not candidates:
         return None
@@ -791,6 +808,7 @@ def _pick_unseen_question(
     course_state: dict,
     question_type: str | None = None,
     *,
+    objective_ids: list[int] | None = None,
     coding_only: bool = False,
     coding_preference: bool | None = None,
 ):
@@ -799,6 +817,7 @@ def _pick_unseen_question(
         block,
         course_state,
         question_type,
+        objective_ids=objective_ids,
         coding_only=coding_only,
         coding_preference=coding_preference,
     ).annotate(cohort_seen_count=Count("attempt_questions"))
@@ -812,6 +831,7 @@ def _pick_unseen_question(
         covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
     coverage_factor = max(1, int(block.practice_coverage_factor or 1))
+    objective_order = _objective_order_map(block)
     preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
@@ -834,6 +854,7 @@ def _pick_unseen_question(
                 (
                 0 if question.learning_objective_id not in covered_objective_ids else 1,
                 min(objective_coverage_counts.get(int(question.learning_objective_id or 0), 0), coverage_factor),
+                objective_order.get(int(question.learning_objective_id or 0), len(objective_order)),
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
                 chunk_presented_counts.get(int(question.source_chunk_id or 0), 0),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
@@ -854,6 +875,7 @@ def _pick_retry_question(
     course_state: dict,
     question_type: str | None = None,
     *,
+    objective_ids: list[int] | None = None,
     coding_only: bool = False,
     coding_preference: bool | None = None,
 ):
@@ -863,6 +885,7 @@ def _pick_retry_question(
         block,
         course_state,
         question_type,
+        objective_ids=objective_ids,
         coding_only=coding_only,
         coding_preference=coding_preference,
     )
@@ -876,6 +899,7 @@ def _pick_retry_question(
         covered_objective_ids,
     ) = _block_question_history(queryset, course_state, block)
     coverage_factor = max(1, int(block.practice_coverage_factor or 1))
+    objective_order = _objective_order_map(block)
     preferred_languages_by_block: dict[int, str] = {}
     candidates = []
     for question in questions:
@@ -901,6 +925,7 @@ def _pick_retry_question(
                 (
                 0 if question.learning_objective_id not in covered_objective_ids else 1,
                 min(objective_coverage_counts.get(int(question.learning_objective_id or 0), 0), coverage_factor),
+                objective_order.get(int(question.learning_objective_id or 0), len(objective_order)),
                 1 if question.learning_objective_id in recent_objective_ids else 0,
                 1 if question.pk in recent_question_ids else 0,
                 objective_presented_counts.get(int(question.learning_objective_id or 0), 0),
@@ -930,9 +955,12 @@ def _ordered_unmet_objective_ids(course_state: dict, block: CourseBlock) -> list
         unmet_objectives_by_progress[progress_count].append(int(objective.pk))
 
     ordered_objective_ids: list[int] = []
+    objective_order = _objective_order_map(block)
     for progress_count in sorted(unmet_objectives_by_progress):
-        objective_ids = unmet_objectives_by_progress[progress_count]
-        random.shuffle(objective_ids)
+        objective_ids = sorted(
+            unmet_objectives_by_progress[progress_count],
+            key=lambda objective_id: objective_order.get(int(objective_id), len(objective_order)),
+        )
         ordered_objective_ids.extend(objective_ids)
     return ordered_objective_ids
 
@@ -942,9 +970,7 @@ def _generation_objective_ids_for_block(course_state: dict, block: CourseBlock) 
     if unmet_objective_ids:
         return unmet_objective_ids
 
-    objective_ids = [objective.pk for objective in block.learning_objectives.all()]
-    random.shuffle(objective_ids)
-    return objective_ids
+    return [objective.pk for objective in block.learning_objectives.all()]
 
 
 def _pending_question(course: Course, block: CourseBlock, course_state: dict):
@@ -973,6 +999,16 @@ def _objective_for_block(block: CourseBlock, learning_objective_id: int | None):
     if not learning_objective_id:
         return None
     return block.learning_objectives.filter(pk=learning_objective_id).first()
+
+
+def _current_priority_objective_ids(
+    course_state: dict,
+    block: CourseBlock,
+    preferred_objective: LearningObjective | None = None,
+) -> list[int]:
+    if preferred_objective is not None:
+        return [preferred_objective.pk]
+    return _generation_objective_ids_for_block(course_state, block)
 
 
 def _ensure_question_for_block(
@@ -1019,8 +1055,61 @@ def _ensure_question_for_block(
         if question is not None and question.pk not in _flagged_question_ids(course_state):
             return question, False
 
+    priority_objective_ids = _current_priority_objective_ids(course_state, block, preferred_objective)
+    current_priority_objective_id = priority_objective_ids[0] if priority_objective_ids else None
     question = None
     if not force_new:
+        if current_priority_objective_id is not None:
+            for coding_preference in _ordered_preview_coding_preferences(
+                course,
+                block,
+                course_state,
+                effective_type,
+                coding_only=effective_coding_only,
+            ):
+                question = _pick_retry_question(
+                    course,
+                    block,
+                    course_state,
+                    effective_type,
+                    objective_ids=[current_priority_objective_id],
+                    coding_only=effective_coding_only,
+                    coding_preference=coding_preference,
+                )
+                if question is not None:
+                    break
+            if question is None:
+                for coding_preference in _ordered_preview_coding_preferences(
+                    course,
+                    block,
+                    course_state,
+                    effective_type,
+                    coding_only=effective_coding_only,
+                ):
+                    question = _pick_unseen_question(
+                        course,
+                        block,
+                        course_state,
+                        effective_type,
+                        objective_ids=[current_priority_objective_id],
+                        coding_only=effective_coding_only,
+                        coding_preference=coding_preference,
+                    )
+                    if question is not None:
+                        break
+            if question is None and course_question_generation_budget(course).can_generate:
+                question, _ = generate_question_pair_for_block(
+                    block,
+                    preferred_objective_ids=[current_priority_objective_id],
+                    strict_preferred_objectives=True,
+                    question_type=effective_type,
+                    raise_generation_errors=False,
+                    allow_numeric_recent_angle_fallback=True,
+                    force_coding=effective_coding_only,
+                )
+            if question is not None:
+                return question, True
+
         for coding_preference in _ordered_preview_coding_preferences(
             course,
             block,
@@ -1250,7 +1339,6 @@ def _ensure_question_for_collection(
 
     for question_type in ordered_types:
         candidate_blocks = [block for block in blocks if _question_available_for_collection(course, block, course_state, question_type)]
-        random.shuffle(candidate_blocks)
         for block in candidate_blocks:
             for coding_preference in _ordered_preview_coding_preferences(course, block, course_state, question_type):
                 question = _pick_retry_question(
@@ -1283,7 +1371,6 @@ def _ensure_question_for_collection(
             if _manual_preview_question_type_allowed(block, question_type)
             and _preview_question_type_unlocked(course, block, course_state, question_type)
         ]
-        random.shuffle(candidate_blocks)
         for block in candidate_blocks:
             question, _validation = generate_question_pair_for_block(
                 block,
@@ -1297,7 +1384,7 @@ def _ensure_question_for_collection(
             if question is not None:
                 return question, True
 
-    for block in random.sample(blocks, len(blocks)):
+    for block in blocks:
         question, _validation = generate_question_pair_for_block(
             block,
             preferred_objective_ids=_generation_objective_ids_for_block(course_state, block),
@@ -1731,22 +1818,21 @@ def _written_answer_alignment(question: QuestionBankItem, answer_text: str) -> d
 
 def _clear_written_answer_semantic_cache(draft: dict) -> None:
     draft["semantic_answer_text"] = ""
-    draft["semantic_bucket"] = -1
     draft["semantic_score"] = None
     draft["semantic_aligned"] = False
 
 
-def _merged_written_answer_alignment(local_alignment: dict, semantic_score: float | None, semantic_aligned: bool) -> dict:
-    if semantic_score is None:
+def _judged_written_answer_alignment(local_alignment: dict, judged_score: float | None, judged_aligned: bool = False) -> dict:
+    if judged_score is None:
         return local_alignment
-    merged_ratio = max(local_alignment["alignment_ratio"], max(0.0, min(1.0, semantic_score)))
-    if semantic_aligned:
-        merged_ratio = max(merged_ratio, WAQ_ALIGNMENT_THRESHOLD + 0.03)
+    judged_ratio = max(0.0, min(1.0, float(judged_score)))
+    if judged_aligned:
+        judged_ratio = max(judged_ratio, WAQ_ALIGNMENT_THRESHOLD + 0.03)
     return {
         **local_alignment,
-        "alignment_ratio": merged_ratio,
-        "alignment_score": int(round(merged_ratio * 100)),
-        "alignment_state": _written_answer_state(merged_ratio, local_alignment["answer_text"]),
+        "alignment_ratio": judged_ratio,
+        "alignment_score": int(round(judged_ratio * 100)),
+        "alignment_state": _written_answer_state(judged_ratio, local_alignment["answer_text"]),
     }
 
 
@@ -1827,29 +1913,24 @@ def _draft_written_answer_alignment(question: QuestionBankItem, block: CourseBlo
     normalized_answer = local_alignment["answer_text"]
     if (
         not settings.OPENAI_API_KEY
-        or not bool(getattr(settings, "PREVIEW_WAQ_OPENAI_DRAFT_ENABLED", False))
-        or len(normalized_answer) < PREVIEW_WAQ_OPENAI_DRAFT_MIN_CHARS
         or len(re.findall(r"[a-z0-9]+", normalized_answer.lower())) < PREVIEW_WAQ_MIN_SUBSTANTIVE_WORDS
     ):
         _clear_written_answer_semantic_cache(draft)
         return local_alignment
 
-    current_bucket = len(normalized_answer) // PREVIEW_WAQ_OPENAI_CHECK_INTERVAL
     cached_answer = str(draft.get("semantic_answer_text", ""))
-    cached_bucket = int(draft.get("semantic_bucket", -1))
     cached_score = draft.get("semantic_score")
     cached_aligned = bool(draft.get("semantic_aligned"))
 
     if (
         cached_score is not None
-        and cached_bucket == current_bucket
         and cached_answer
-        and normalized_answer.startswith(cached_answer)
+        and normalized_answer == cached_answer
     ):
-        return _merged_written_answer_alignment(local_alignment, float(cached_score), cached_aligned)
+        return _judged_written_answer_alignment(local_alignment, float(cached_score), cached_aligned)
 
     try:
-        judged = _openai_written_answer_grade(question, block, normalized_answer, draft_mode=True)
+        judged = _openai_written_answer_grade(question, block, normalized_answer, draft_mode=False)
     except Exception:
         _clear_written_answer_semantic_cache(draft)
         return local_alignment
@@ -1857,12 +1938,11 @@ def _draft_written_answer_alignment(question: QuestionBankItem, block: CourseBlo
     draft.update(
         {
             "semantic_answer_text": normalized_answer,
-            "semantic_bucket": current_bucket,
             "semantic_score": judged["score"],
             "semantic_aligned": bool(judged["aligned"]),
         }
     )
-    return _merged_written_answer_alignment(local_alignment, judged["score"], bool(judged["aligned"]))
+    return _judged_written_answer_alignment(local_alignment, judged["score"], bool(judged["aligned"]))
 
 
 def _fallback_written_answer_feedback(question: QuestionBankItem, alignment: dict) -> str:
@@ -1884,12 +1964,11 @@ def _grade_written_answer_response(question: QuestionBankItem, block: CourseBloc
         try:
             judged = _openai_written_answer_grade(question, block, answer_text)
             judged_score = judged["score"]
-            judged_alignment = {
-                **fallback_alignment,
-                "alignment_ratio": judged_score,
-                "alignment_score": int(round(judged_score * 100)),
-                "alignment_state": _written_answer_state(judged_score, fallback_alignment["answer_text"]),
-            }
+            judged_alignment = _judged_written_answer_alignment(
+                fallback_alignment,
+                judged_score,
+                bool(judged["aligned"]),
+            )
             is_correct = bool(judged["aligned"]) or judged_score >= WAQ_ALIGNMENT_THRESHOLD
             if is_correct:
                 explanation = normalize_explanation_text(question.explanation, math_metadata=question.math_metadata)
@@ -3418,12 +3497,14 @@ def _serialized_transcript(
                 or (replacement_title and str(message_payload.get("text") or "").startswith(f"Welcome to {replacement_title}."))
             )
         ):
-            message_payload["text"] = _welcome_message_text(replacement_title)
             if message_payload.get("is_collection_welcome"):
+                message_payload["text"] = _collection_welcome_message_text(replacement_title)
                 message_payload["is_collection_welcome"] = True
             else:
+                message_payload["text"] = _block_welcome_message_text(block) if block is not None else _welcome_message_text(replacement_title)
                 message_payload["is_block_welcome"] = True
-            message_payload["inline_cta_label"] = "Test Mode"
+            message_payload["welcome_quiz_cta_label"] = "Quiz"
+            message_payload["resource_cta_label"] = _block_welcome_resource_cta_label(block) if block is not None else ""
         if message_payload.get("kind") == "question":
             question = questions_by_id.get(int(message_payload.get("question_id") or 0))
             if question is not None:
@@ -3470,6 +3551,7 @@ def serialize_preview_state(
     for block in blocks:
         transcript = _ensure_block_transcript(course_state, block)
         objectives = list(block.learning_objectives.all())
+        resources = list(block.resources.all())
         objective_coverage_counts = _block_objective_coverage_counts(course_state, block)
         coverage_factor = max(1, int(block.practice_coverage_factor or 1))
         covered_objective_ids = _covered_objective_ids_from_counts(
@@ -3498,6 +3580,14 @@ def serialize_preview_state(
                         "has_guardrail": bool(sanitize_assistant_guidance(objective.assistant_guidance)),
                     }
                     for objective in objectives
+                ],
+                "resources": [
+                    {
+                        "id": resource.pk,
+                        "citation": resource.citation,
+                        "hyperlink": resource.hyperlink,
+                    }
+                    for resource in resources
                 ],
                 "available_from": block.available_from.isoformat(),
                 "available_from_label": f"{block.available_from.day} {block.available_from:%b %Y}",

@@ -39,6 +39,8 @@
   data-practice-validation-url="{{ practice_validation_url|default:'' }}"
   data-stats-icon-url="{% static 'standalone/img/my-stats-icon.svg' %}"
 >
+  <a class="preview-skip-link" href="#preview-conversation-list">Skip to conversation list</a>
+  <a class="preview-skip-link" href="#preview-chat-composer">Skip to question input</a>
   <div class="preview-launch-loader" hidden data-preview-launch-loader>
     <div class="preview-launch-loader-card" role="status" aria-live="polite" aria-label="Preparing Test Me">
       <div class="preview-loading-dots" aria-hidden="true">
@@ -154,7 +156,22 @@
         </button>
       </div>
     {% endif %}
-    <div class="preview-block-switcher" aria-label="Course blocks" data-preview-conversation-list></div>
+    <div id="preview-conversation-list" class="preview-block-switcher" aria-label="Course blocks" tabindex="-1" data-preview-conversation-list></div>
+    {% if is_demo_mode or not is_student_practice %}
+      <a
+        class="preview-sidebar-powered-by"
+        href="https://libguides.liverpool.ac.uk/knowhow"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <span class="preview-sidebar-powered-by-label">Powered by</span>
+        <img
+          class="preview-sidebar-powered-by-logo"
+          src="{% static 'website/img/knowhow_pink_square.png' %}"
+          alt="KnowHow improve your academic skills"
+        >
+      </a>
+    {% endif %}
   </aside>
   {% if not is_demo_mode and is_student_practice %}
     <button
@@ -175,7 +192,7 @@
     ></button>
   {% endif %}
 
-  <section class="preview-chat-shell">
+  <section class="preview-chat-shell" role="region" aria-label="Conversation panel">
     <div class="preview-chat-header">
       {% if is_demo_mode or not is_student_practice %}
         <button
@@ -217,6 +234,9 @@
           <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="description">
             Description
           </button>
+          <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="resources">
+            Resources
+          </button>
           <button type="button" role="menuitem" class="preview-chat-header-menu-item" data-preview-resource="objectives">
             Learning objectives
           </button>
@@ -239,7 +259,7 @@
       </div>
     </div>
     <section class="preview-project-panel" hidden data-preview-project-panel></section>
-    <div class="preview-chat-transcript" aria-live="polite" aria-label="Chat transcript"></div>
+    <div id="preview-chat-transcript" class="preview-chat-transcript" aria-live="polite" aria-label="Chat transcript" tabindex="-1"></div>
     <button
       class="preview-chat-scroll-bottom"
       type="button"
@@ -249,25 +269,27 @@
     >
       <span aria-hidden="true">↓</span>
     </button>
-    <button
-      class="preview-calculator-trigger"
-      type="button"
-      aria-label="Open calculator"
-      data-preview-calculator-trigger
-    >
-      <span class="preview-calculator-trigger-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-          <rect x="5" y="3.5" width="14" height="17" rx="3.25"></rect>
-          <rect x="7.75" y="6.75" width="8.5" height="3.1" rx="1.1"></rect>
-          <circle cx="9" cy="13" r="1"></circle>
-          <circle cx="12" cy="13" r="1"></circle>
-          <circle cx="15" cy="13" r="1"></circle>
-          <circle cx="9" cy="16.5" r="1"></circle>
-          <circle cx="12" cy="16.5" r="1"></circle>
-          <rect x="14.05" y="15.45" width="1.9" height="4.1" rx="0.95"></rect>
-        </svg>
-      </span>
-    </button>
+    {% if calculator_enabled %}
+      <button
+        class="preview-calculator-trigger"
+        type="button"
+        aria-label="Open calculator"
+        data-preview-calculator-trigger
+      >
+        <span class="preview-calculator-trigger-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+            <rect x="5" y="3.5" width="14" height="17" rx="3.25"></rect>
+            <rect x="7.75" y="6.75" width="8.5" height="3.1" rx="1.1"></rect>
+            <circle cx="9" cy="13" r="1"></circle>
+            <circle cx="12" cy="13" r="1"></circle>
+            <circle cx="15" cy="13" r="1"></circle>
+            <circle cx="9" cy="16.5" r="1"></circle>
+            <circle cx="12" cy="16.5" r="1"></circle>
+            <rect x="14.05" y="15.45" width="1.9" height="4.1" rx="0.95"></rect>
+          </svg>
+        </span>
+      </button>
+    {% endif %}
     <form class="preview-chat-form">
       <p class="preview-chat-status" role="status" aria-live="polite"></p>
       <div class="preview-waq-alignment" hidden data-waq-alignment>
@@ -290,7 +312,7 @@
         </div>
       </div>
       <label class="preview-sr-only" for="preview-chat-input">Ask a related question</label>
-      <div class="preview-chat-composer">
+      <div id="preview-chat-composer" class="preview-chat-composer">
         <textarea id="preview-chat-input" rows="1" maxlength="500" placeholder="Ask"></textarea>
         <div class="preview-quiz-controls">
           <button class="button" type="submit">Quiz</button>
@@ -314,10 +336,12 @@
                 <span class="preview-quiz-menu-item-title">MCQ</span>
                 <span class="preview-quiz-menu-item-copy">Single answer</span>
               </button>
-              <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="num">
-                <span class="preview-quiz-menu-item-title">Numeric</span>
-                <span class="preview-quiz-menu-item-copy">Calculated answer</span>
-              </button>
+              {% if numeric_quiz_option_enabled %}
+                <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="num">
+                  <span class="preview-quiz-menu-item-title">Numeric</span>
+                  <span class="preview-quiz-menu-item-copy">Calculated answer</span>
+                </button>
+              {% endif %}
               <button type="button" role="menuitem" class="preview-quiz-menu-item" data-quiz-type="maq">
                 <span class="preview-quiz-menu-item-title">MAQ</span>
                 <span class="preview-quiz-menu-item-copy">Multiple answers</span>

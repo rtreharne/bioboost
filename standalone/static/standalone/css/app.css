@@ -2187,6 +2187,25 @@ button.button[disabled] {
   width: 100%;
 }
 
+.resource-form-stack {
+  margin-top: 0.9rem;
+}
+
+.resource-editor-card {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.resource-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.resource-editor-actions .button {
+  width: 100%;
+}
+
 .app-shell.preview-app-shell + .app-footer {
   display: none;
 }

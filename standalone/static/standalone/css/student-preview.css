@@ -4,6 +4,30 @@ body {
   overflow: hidden;
 }
 
+.preview-skip-link {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 120;
+  padding: 0.7rem 0.95rem;
+  border-radius: 0.8rem;
+  background: #ffffff;
+  color: #17382e;
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-decoration: none;
+  box-shadow: 0 10px 24px rgba(17, 52, 93, 0.18);
+  transform: translateY(-180%);
+  transition: transform 140ms ease;
+}
+
+.preview-skip-link:focus,
+.preview-skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 3px solid #0f5f50;
+  outline-offset: 3px;
+}
+
 /* Messenger redesign: preview + demo only */
 .preview-page--messenger {
   --preview-sidebar-size: clamp(21rem, 29vw, 27rem);
@@ -137,15 +161,15 @@ body {
 }
 
 .preview-page--messenger .preview-sidebar-utility-link {
-  color: rgba(244, 249, 255, 0.92);
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.08);
+  color: #1b4d43;
+  border-color: rgba(22, 160, 133, 0.22);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .preview-page--messenger .preview-sidebar-utility-link:hover {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.36);
-  background: rgba(255, 255, 255, 0.16);
+  color: #0f5f50;
+  border-color: rgba(22, 160, 133, 0.36);
+  background: rgba(255, 255, 255, 0.96);
 }
 
 .preview-messenger-search {
@@ -2854,6 +2878,21 @@ body {
   font-weight: 700;
 }
 
+.preview-resource-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.preview-resource-list a {
+  color: #176c51;
+  font-weight: 700;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.14em;
+  overflow-wrap: anywhere;
+}
+
 .preview-objective-list {
   list-style: none;
   margin: 0;
@@ -3508,6 +3547,10 @@ body {
   flex-wrap: wrap;
   gap: 0.85rem;
   margin-top: 0.75rem;
+}
+
+.preview-message-actions.is-welcome-resource {
+  justify-content: flex-start;
 }
 
 .preview-message--validation-reminder {
@@ -7519,4 +7562,835 @@ body.app-body--canvas-theme {
 .preview-chat-form.is-waq-mode .preview-chat-composer textarea::-webkit-scrollbar-thumb:hover,
 .validation-chat-composer textarea::-webkit-scrollbar-thumb:hover {
   background: rgba(27, 87, 171, 0.7);
+}
+
+/* Mint palette refresh for student preview */
+.preview-page--messenger,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger {
+  --preview-mint-050: #f2fbf8;
+  --preview-mint-100: #e7f8f3;
+  --preview-mint-200: #d2f1e8;
+  --preview-mint-300: #a3e4d7;
+  --preview-mint-400: #76d7c4;
+  --preview-mint-500: #48c9b0;
+  --preview-mint-600: #1abc9c;
+  --preview-mint-700: #16a085;
+  --preview-mint-800: #12816b;
+  --preview-mint-900: #0f5f50;
+  --preview-mint-ink: #17382e;
+  --preview-mint-muted: #57786f;
+  --preview-messenger-accent-blue: var(--preview-mint-600);
+  --preview-messenger-accent-blue-hover: var(--preview-mint-700);
+  --canvas-link: var(--preview-mint-700);
+  --canvas-focus: var(--preview-mint-700);
+  background:
+    radial-gradient(circle at top left, rgba(163, 228, 215, 0.78), transparent 24%),
+    linear-gradient(180deg, rgba(242, 251, 248, 0.98), rgba(226, 247, 241, 0.96)) !important;
+  color: var(--preview-mint-ink);
+}
+
+.preview-page--messenger .preview-sidebar,
+.preview-page--messenger .preview-chat-shell,
+.preview-page--messenger .preview-chat-header,
+.preview-page--messenger .preview-chat-form,
+.preview-page--messenger .preview-conversation-switcher,
+.preview-page--messenger .preview-sidebar-head,
+.preview-page--messenger .preview-sidebar-summary,
+.preview-page--messenger .preview-course-metrics-panel,
+.preview-page--messenger .preview-block-selection,
+.preview-page--messenger .preview-chat-header-menu-panel,
+.preview-page--messenger .preview-sidebar-menu-panel,
+.preview-page--messenger .preview-quiz-menu-panel,
+.preview-page--messenger .preview-flag-sheet-panel,
+.preview-page--messenger .preview-objective-sheet-panel,
+.preview-page--messenger .preview-written-answer-panel,
+.preview-page--messenger .preview-written-answer-alignment,
+.preview-page--messenger .preview-calculator,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-shell,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-header,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-form,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-header-menu-panel,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-menu-panel,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-flag-sheet-panel,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-objective-sheet-panel {
+  border-color: rgba(22, 160, 133, 0.14);
+}
+
+.preview-page--messenger .preview-sidebar,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar {
+  background:
+    linear-gradient(180deg, rgba(249, 254, 252, 0.98), rgba(236, 249, 244, 0.98));
+  border-right-color: rgba(22, 160, 133, 0.14);
+}
+
+.preview-page--messenger .preview-chat-shell,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-shell {
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, 0.74), transparent 22%),
+    linear-gradient(180deg, rgba(241, 252, 248, 0.98), rgba(228, 247, 241, 0.96)) !important;
+}
+
+.preview-page--messenger .preview-sidebar-head,
+.preview-page--messenger .preview-conversation-switcher,
+.preview-page--messenger .preview-chat-header,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-header {
+  border-bottom-color: rgba(22, 160, 133, 0.12) !important;
+  background:
+    linear-gradient(180deg, rgba(248, 254, 251, 0.98), rgba(236, 249, 244, 0.95)) !important;
+}
+
+.preview-page--messenger .preview-messenger-brand,
+.preview-page--messenger .preview-messenger-brand-wordmark,
+.preview-page--messenger .preview-sidebar-section-label,
+.preview-page--messenger .preview-eyebrow,
+.preview-page--messenger .preview-block-badge,
+.preview-page--messenger .preview-chat-header .preview-eyebrow,
+.preview-page--messenger .preview-inline-message-link {
+  color: var(--preview-mint-700);
+}
+
+.preview-page--messenger .preview-inline-message-link,
+.preview-page--messenger .preview-validation-reminder-link,
+.preview-page--messenger .preview-further-study-button {
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+  text-decoration-thickness: 0.08em;
+}
+
+.preview-page--messenger .preview-sidebar h1,
+.preview-page--messenger .preview-chat-header h2,
+.preview-page--messenger .preview-stats-title,
+.preview-page--messenger .preview-stats-panel-title,
+.preview-page--messenger .preview-booking-option-head strong,
+.preview-page--messenger .preview-active-block-title,
+.preview-page--messenger .preview-block-title-text,
+.preview-page--messenger .preview-block-selection-heading,
+.preview-page--messenger .preview-block-selection-option-title,
+.preview-page--messenger .preview-calculator-result,
+.preview-page--messenger .preview-written-answer-heading,
+.preview-page--messenger .preview-conversation-row,
+.preview-page--messenger .preview-answer-chip,
+.preview-page--messenger .preview-block-metric strong,
+.preview-page--messenger .preview-stats-summary-value,
+.preview-page--messenger .preview-stats-breakdown-head strong,
+.preview-page--messenger .preview-stats-snapshot strong {
+  color: var(--preview-mint-ink);
+}
+
+.preview-page--messenger .preview-active-block-meta,
+.preview-page--messenger .preview-conversation-preview,
+.preview-page--messenger .preview-conversation-time,
+.preview-page--messenger .preview-stats-copy,
+.preview-page--messenger .preview-stats-panel-description,
+.preview-page--messenger .preview-stats-empty,
+.preview-page--messenger .preview-stats-summary-detail,
+.preview-page--messenger .preview-stats-snapshot span,
+.preview-page--messenger .preview-stats-breakdown-head span,
+.preview-page--messenger .preview-stats-breakdown-foot span,
+.preview-page--messenger .preview-sidebar-validate-copy,
+.preview-page--messenger .preview-sidebar-validate-note,
+.preview-page--messenger .preview-block-selection-note,
+.preview-page--messenger .preview-block-selection-summary,
+.preview-page--messenger .preview-booking-option-head span,
+.preview-page--messenger .preview-booking-option-meta span,
+.preview-page--messenger .preview-sidebar-summary-text,
+.preview-page--messenger .preview-sidebar-summary-copy,
+.preview-page--messenger .preview-block-meta,
+.preview-page--messenger .preview-block-overall-button span,
+.preview-page--messenger .preview-block-metric span,
+.preview-page--messenger .preview-message-time,
+.preview-page--messenger .preview-chat-status {
+  color: #3f6158;
+}
+
+.preview-page--messenger .preview-message-time,
+.preview-page--messenger .preview-conversation-time,
+.preview-page--messenger .preview-chat-status,
+.preview-page--messenger .preview-sidebar-validate-copy,
+.preview-page--messenger .preview-sidebar-validate-note,
+.preview-page--messenger .preview-stats-summary-label,
+.preview-page--messenger .preview-stats-legend-item,
+.preview-page--messenger .preview-quiz-menu-item-copy,
+.preview-page--messenger .preview-active-block-meta {
+  font-weight: 600;
+}
+
+.preview-page--messenger .preview-messenger-menu-trigger,
+.preview-page--messenger .preview-sidebar-summary-toggle,
+.preview-page--messenger .preview-header-action,
+.preview-page--messenger .preview-messenger-back,
+.preview-page--messenger .preview-sidebar-utility-link,
+.preview-page--messenger .preview-conversation-switcher-button,
+.preview-page--messenger .preview-block-overall-button,
+.preview-page--messenger .preview-block-metric,
+.preview-page--messenger .preview-validation-history-item,
+.preview-page--messenger .preview-booking-option-card,
+.preview-page--messenger .preview-stats-summary-card,
+.preview-page--messenger .preview-stats-panel,
+.preview-page--messenger .preview-stats-snapshot,
+.preview-page--messenger .preview-block-card,
+.preview-page--messenger .preview-block-selection-option,
+.preview-page--messenger .preview-chat-header-menu-panel,
+.preview-page--messenger .preview-sidebar-menu-panel,
+.preview-page--messenger .preview-quiz-menu-panel,
+.preview-page--messenger .preview-quiz-menu-item,
+.preview-page--messenger .preview-chat-composer,
+.preview-page--messenger .preview-chat-composer textarea,
+.preview-page--messenger .preview-messenger-search-input,
+.preview-page--messenger .preview-calculator-screen,
+.preview-page--messenger .preview-calculator-key,
+.preview-page--messenger .preview-written-answer-panel,
+.preview-page--messenger .preview-written-answer-alignment,
+.preview-page--messenger .preview-answer-chip,
+.preview-page--messenger .preview-answer-chip--review,
+.preview-page--messenger .preview-message--assistant,
+.preview-page--messenger .preview-message--summary,
+.preview-page--messenger .preview-message--validation-reminder,
+.preview-page--messenger .preview-message--stats,
+.preview-page--messenger .preview-course-metrics-panel .preview-block-metric,
+.preview-page--messenger .preview-sidebar-validate-cta {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(239, 250, 245, 0.95));
+  border-color: rgba(22, 160, 133, 0.14);
+  box-shadow: 0 12px 28px rgba(18, 129, 107, 0.08);
+}
+
+.preview-page--messenger .preview-messenger-menu-trigger:hover,
+.preview-page--messenger .preview-messenger-menu-trigger:focus-visible,
+.preview-page--messenger .preview-sidebar-summary-toggle:hover,
+.preview-page--messenger .preview-sidebar-summary-toggle:focus-visible,
+.preview-page--messenger .preview-header-action:hover,
+.preview-page--messenger .preview-header-action:focus-visible,
+.preview-page--messenger .preview-messenger-back:hover,
+.preview-page--messenger .preview-messenger-back:focus-visible,
+.preview-page--messenger .preview-sidebar-utility-link:hover,
+.preview-page--messenger .preview-sidebar-utility-link:focus-visible,
+.preview-page--messenger .preview-conversation-switcher-button:hover,
+.preview-page--messenger .preview-conversation-switcher-button:focus-visible,
+.preview-page--messenger .preview-block-overall-button:hover,
+.preview-page--messenger .preview-block-overall-button:focus-visible,
+.preview-page--messenger .preview-block-metric:hover,
+.preview-page--messenger .preview-block-metric:focus-visible,
+.preview-page--messenger .preview-validation-history-item:hover,
+.preview-page--messenger .preview-validation-history-item:focus-visible,
+.preview-page--messenger .preview-block-selection-option:hover,
+.preview-page--messenger .preview-block-selection-option:focus-within,
+.preview-page--messenger .preview-answer-chip:hover,
+.preview-page--messenger .preview-answer-chip:focus-visible,
+.preview-page--messenger .preview-quiz-menu-item:hover,
+.preview-page--messenger .preview-quiz-menu-item:focus-visible {
+  border-color: rgba(26, 188, 156, 0.36);
+  background: rgba(232, 249, 243, 0.98);
+  color: var(--preview-mint-900);
+  outline: none;
+}
+
+.preview-page--messenger .preview-conversation-switcher-button.is-active,
+.preview-page--messenger .preview-conversation-switcher-button[aria-pressed="true"],
+.preview-page--messenger .preview-validation-history-item.is-active,
+.preview-page--messenger .preview-block-selection-option.is-selected,
+.preview-page--messenger .preview-block-card.is-active,
+.preview-page--messenger .preview-block-card.is-selection-preview,
+.preview-page--messenger .preview-chat-composer textarea:focus,
+.preview-page--messenger .preview-messenger-search-input:focus,
+.preview-page--messenger .preview-quiz-menu-trigger[aria-expanded="true"],
+.preview-page--messenger .preview-answer-chip--maq.is-selected,
+.preview-page--messenger .preview-answer-chip[aria-pressed="true"] {
+  border-color: rgba(26, 188, 156, 0.44);
+  background: linear-gradient(180deg, rgba(222, 245, 238, 0.98), rgba(204, 239, 230, 0.96));
+  box-shadow:
+    0 14px 30px rgba(18, 129, 107, 0.12),
+    0 0 0 3px rgba(72, 201, 176, 0.16);
+}
+
+.preview-page--messenger .preview-conversation-row {
+  border-bottom-color: rgba(22, 160, 133, 0.1);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.preview-page--messenger .preview-conversation-row:hover,
+.preview-page--messenger .preview-conversation-row:focus-visible {
+  background: rgba(233, 249, 244, 0.98);
+}
+
+.preview-page--messenger .preview-conversation-row.is-active {
+  background: linear-gradient(180deg, rgba(222, 245, 238, 0.98), rgba(210, 241, 232, 0.98));
+  box-shadow: inset 3px 0 0 var(--preview-mint-700);
+}
+
+.preview-page--messenger .preview-conversation-avatar,
+.preview-page--messenger .preview-conversation-avatar.is-square,
+.preview-page--messenger .preview-sidebar-validate-cta .button,
+.preview-page--messenger .preview-quiz-controls,
+.preview-page--messenger .preview-quiz-controls > .button[type="submit"],
+.preview-page--messenger .preview-quiz-menu-trigger,
+.preview-page--messenger .preview-chat-composer .button[type="submit"],
+.preview-page--messenger .preview-calculator-trigger,
+.preview-page--messenger .preview-message--user,
+.preview-page--messenger .preview-calculator-key.is-operator,
+.preview-page--messenger .preview-calculator-key.is-equals,
+.preview-page--messenger .preview-calculator-key.is-accent,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-controls,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-controls > .button[type="submit"],
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-menu-trigger,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-calculator-trigger,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-message--user {
+  background:
+    linear-gradient(135deg, var(--preview-mint-600), var(--preview-mint-700)) !important;
+  border-color: rgba(15, 95, 80, 0.22) !important;
+  color: #ffffff !important;
+}
+
+.preview-page--messenger .preview-conversation-avatar,
+.preview-page--messenger .preview-conversation-avatar.is-square {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.preview-page--messenger .preview-sidebar-validate-cta .button:hover,
+.preview-page--messenger .preview-sidebar-validate-cta .button:focus-visible,
+.preview-page--messenger .preview-quiz-controls > .button[type="submit"]:hover,
+.preview-page--messenger .preview-quiz-controls > .button[type="submit"]:focus-visible,
+.preview-page--messenger .preview-quiz-menu-trigger:hover,
+.preview-page--messenger .preview-quiz-menu-trigger:focus-visible,
+.preview-page--messenger .preview-quiz-menu-trigger[aria-expanded="true"],
+.preview-page--messenger .preview-calculator-trigger:hover,
+.preview-page--messenger .preview-calculator-trigger:focus-visible,
+.preview-page--messenger .preview-chat-composer .button[type="submit"]:hover,
+.preview-page--messenger .preview-chat-composer .button[type="submit"]:focus-visible,
+.preview-page--messenger .preview-calculator-key.is-operator:hover,
+.preview-page--messenger .preview-calculator-key.is-operator:focus-visible,
+.preview-page--messenger .preview-calculator-key.is-equals:hover,
+.preview-page--messenger .preview-calculator-key.is-equals:focus-visible,
+.preview-page--messenger .preview-calculator-key.is-accent:hover,
+.preview-page--messenger .preview-calculator-key.is-accent:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-controls > .button[type="submit"]:hover,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-controls > .button[type="submit"]:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-menu-trigger:hover,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-menu-trigger:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-quiz-menu-trigger[aria-expanded="true"],
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-calculator-trigger:hover,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-calculator-trigger:focus-visible {
+  background:
+    linear-gradient(135deg, var(--preview-mint-700), var(--preview-mint-800)) !important;
+  box-shadow: 0 16px 30px rgba(18, 129, 107, 0.2) !important;
+}
+
+.preview-page--messenger .preview-chat-scroll-bottom,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-scroll-bottom {
+  background: rgba(26, 188, 156, 0.96) !important;
+  border-color: rgba(255, 255, 255, 0.58) !important;
+  box-shadow: 0 16px 30px rgba(18, 129, 107, 0.22) !important;
+}
+
+.preview-page--messenger .preview-chat-scroll-bottom:hover,
+.preview-page--messenger .preview-chat-scroll-bottom:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-scroll-bottom:hover,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-scroll-bottom:focus-visible {
+  background: rgba(22, 160, 133, 0.98) !important;
+  box-shadow: 0 18px 34px rgba(18, 129, 107, 0.26) !important;
+}
+
+.preview-page--messenger .preview-message--assistant,
+.preview-page--messenger .preview-message--summary,
+.preview-page--messenger .preview-message--validation-reminder {
+  border-bottom-left-radius: 0.45rem;
+}
+
+.preview-page--messenger .preview-message--user {
+  border-bottom-right-radius: 0.45rem;
+}
+
+.preview-page--messenger .preview-message,
+.preview-page--messenger .preview-block-card,
+.preview-page--messenger .preview-stats-summary-card,
+.preview-page--messenger .preview-stats-panel,
+.preview-page--messenger .preview-booking-option-card {
+  box-shadow: 0 12px 28px rgba(18, 129, 107, 0.08);
+}
+
+.preview-page--messenger .preview-block-card-toggle:hover,
+.preview-page--messenger .preview-block-card-toggle:focus-visible,
+.preview-page--messenger .preview-block-card.is-active .preview-block-card-toggle,
+.preview-page--messenger .preview-block-card.is-active .preview-block-card-content,
+.preview-page--messenger .preview-block-card.is-selection-preview .preview-block-card-toggle,
+.preview-page--messenger .preview-block-card.is-selection-preview .preview-block-card-content,
+.preview-page--messenger .preview-block-card.is-active .preview-block-metric,
+.preview-page--messenger .preview-block-card.is-selection-preview .preview-block-metric,
+.preview-page--messenger .preview-block-badge,
+.preview-page--messenger .preview-booking-option-meta span,
+.preview-page--messenger .preview-stats-breakdown-track {
+  background: rgba(226, 247, 241, 0.9);
+}
+
+.preview-page--messenger .preview-block-card.is-active .preview-block-metric--overall,
+.preview-page--messenger .preview-block-card.is-selection-preview .preview-block-metric--overall,
+.preview-page--messenger .preview-block-metric--overall,
+.preview-page--messenger .preview-course-metrics-panel .preview-block-metric--overall,
+.preview-page--messenger .preview-block-overall-button,
+.preview-page--messenger .preview-conversation-complete,
+.preview-page--messenger .preview-block-complete {
+  background: linear-gradient(135deg, rgba(214, 244, 235, 0.98), rgba(189, 236, 225, 0.96));
+  border-color: rgba(26, 188, 156, 0.26);
+  color: var(--preview-mint-700);
+  box-shadow: inset 0 0 0 1px rgba(26, 188, 156, 0.24);
+}
+
+.preview-page--messenger .preview-block-badge.is-locked,
+.preview-page--messenger .preview-block-meta strong,
+.preview-page--messenger .preview-block-overall-button strong {
+  background: rgba(163, 228, 215, 0.32);
+  color: var(--preview-mint-800);
+}
+
+.preview-page--messenger .preview-block-selection,
+.preview-page--messenger .preview-block-selection-option,
+.preview-page--messenger .preview-block-card,
+.preview-page--messenger .preview-course-metrics-panel,
+.preview-page--messenger .preview-booking-option-card,
+.preview-page--messenger .preview-validation-history-item,
+.preview-page--messenger .preview-written-answer-panel,
+.preview-page--messenger .preview-written-answer-alignment,
+.preview-page--messenger .preview-flag-sheet-panel,
+.preview-page--messenger .preview-objective-sheet-panel,
+.preview-page--messenger .preview-quiz-menu-panel {
+  border-color: rgba(22, 160, 133, 0.14);
+}
+
+.preview-page--messenger .preview-answer-chip,
+.preview-page--messenger .preview-answer-chip--review,
+.preview-page--messenger .preview-answer-chip-indicator,
+.preview-page--messenger .preview-answer-chip-badge,
+.preview-page--messenger .preview-quiz-menu-item,
+.preview-page--messenger .preview-block-metric,
+.preview-page--messenger .preview-calculator-key.is-number,
+.preview-page--messenger .preview-calculator-key.is-function,
+.preview-page--messenger .preview-calculator-key.is-action {
+  background: rgba(248, 254, 251, 0.98);
+  border-color: rgba(22, 160, 133, 0.14);
+  color: var(--preview-mint-ink);
+}
+
+.preview-page--messenger .preview-answer-chip--review.is-correct,
+.preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-indicator,
+.preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-badge,
+.preview-page--messenger .preview-written-answer-alignment.is-aligned .preview-written-answer-alignment-track span {
+  background: linear-gradient(135deg, rgba(118, 215, 196, 0.34), rgba(72, 201, 176, 0.34));
+  border-color: rgba(26, 188, 156, 0.42);
+  color: var(--preview-mint-800);
+}
+
+.preview-page--messenger .preview-answer-chip--review.is-incorrect,
+.preview-page--messenger .preview-answer-chip--review.is-incorrect .preview-answer-chip-indicator,
+.preview-page--messenger .preview-answer-chip--review.is-incorrect .preview-answer-chip-badge {
+  background: rgba(163, 228, 215, 0.38);
+  border-color: rgba(22, 160, 133, 0.42);
+  color: var(--preview-mint-900);
+}
+
+.preview-page--messenger .preview-answer-chip--review.is-missed,
+.preview-page--messenger .preview-answer-chip--review.is-missed .preview-answer-chip-indicator,
+.preview-page--messenger .preview-answer-chip--review.is-missed .preview-answer-chip-badge,
+.preview-page--messenger .preview-written-answer-alignment.is-close .preview-written-answer-alignment-track span {
+  background: rgba(118, 215, 196, 0.26);
+  border-color: rgba(72, 201, 176, 0.42);
+  color: var(--preview-mint-800);
+}
+
+.preview-page--messenger .preview-written-answer-alignment-track {
+  background: rgba(163, 228, 215, 0.32);
+}
+
+.preview-page--messenger .preview-written-answer-alignment-track span,
+.preview-page--messenger .preview-stats-breakdown-track span {
+  background: linear-gradient(90deg, var(--preview-mint-500), var(--preview-mint-700));
+  box-shadow: 0 0 14px rgba(26, 188, 156, 0.24);
+}
+
+.preview-page--messenger .preview-stats-legend-swatch--mastery,
+.preview-page--messenger .preview-stats-chart-line--mastery,
+.preview-page--messenger .preview-stats-chart-dot--mastery {
+  background: var(--preview-mint-700);
+  stroke: var(--preview-mint-700);
+  fill: var(--preview-mint-700);
+}
+
+.preview-page--messenger .preview-stats-legend-swatch--coverage,
+.preview-page--messenger .preview-stats-chart-line--coverage,
+.preview-page--messenger .preview-stats-chart-dot--coverage {
+  background: var(--preview-mint-400);
+  stroke: var(--preview-mint-400);
+  fill: var(--preview-mint-400);
+}
+
+.preview-page--messenger .preview-stats-chart-grid {
+  stroke: rgba(22, 160, 133, 0.12);
+}
+
+.preview-page--messenger .preview-stats-chart-axis-label,
+.preview-page--messenger .preview-stats-summary-label,
+.preview-page--messenger .preview-stats-legend-item,
+.preview-page--messenger .preview-quiz-menu-item-copy {
+  color: var(--preview-mint-muted);
+  fill: var(--preview-mint-muted);
+}
+
+.preview-page--messenger .preview-messenger-search-input,
+.preview-page--messenger .preview-chat-composer textarea,
+.preview-page--messenger textarea,
+.preview-page--messenger select,
+.preview-page--messenger input[type="text"],
+.preview-page--messenger input[type="search"] {
+  color: var(--preview-mint-ink);
+  caret-color: var(--preview-mint-700);
+}
+
+.preview-page--messenger .preview-messenger-search-input::placeholder,
+.preview-page--messenger .preview-chat-composer textarea::placeholder,
+.preview-page--messenger textarea::placeholder {
+  color: #70968b;
+}
+
+.preview-page--messenger .preview-block-selection-option input[type="checkbox"] {
+  accent-color: var(--preview-mint-700);
+}
+
+.preview-page--messenger .preview-chat-composer textarea::-webkit-scrollbar-track {
+  background: rgba(72, 201, 176, 0.12);
+}
+
+.preview-page--messenger .preview-chat-composer textarea::-webkit-scrollbar-thumb {
+  background: rgba(22, 160, 133, 0.5);
+}
+
+.preview-page--messenger .preview-chat-composer textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(22, 160, 133, 0.72);
+}
+
+.preview-page--messenger .preview-chat-form.is-waq-mode .preview-chat-composer textarea::-webkit-scrollbar-track {
+  background: rgba(72, 201, 176, 0.12);
+}
+
+.preview-page--messenger .preview-chat-form.is-waq-mode .preview-chat-composer textarea::-webkit-scrollbar-thumb {
+  background: rgba(22, 160, 133, 0.5);
+}
+
+.preview-page--messenger .preview-chat-form.is-waq-mode .preview-chat-composer textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(22, 160, 133, 0.72);
+}
+
+@media (max-width: 980px) {
+  .preview-page--messenger,
+  :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger {
+    background:
+      linear-gradient(180deg, rgba(214, 244, 235, 0.98), rgba(242, 251, 248, 0.98)) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .preview-page--messenger,
+  :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger {
+    background:
+      linear-gradient(180deg, rgba(214, 244, 235, 0.98), rgba(242, 251, 248, 0.98)) !important;
+  }
+}
+
+/* Final mint overrides for quiz review states and coverage */
+.preview-page--messenger .preview-chat-header-coverage,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-header-coverage {
+  height: 0.44rem;
+  background: rgba(72, 201, 176, 0.16) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.preview-page--messenger .preview-chat-header-coverage-fill,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-header-coverage-fill {
+  background: linear-gradient(90deg, #76d7c4 0%, #48c9b0 42%, #1abc9c 74%, #16a085 100%) !important;
+  box-shadow: 0 0 18px rgba(26, 188, 156, 0.34) !important;
+}
+
+.preview-page--messenger .preview-answer-chip-label,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip-label {
+  background: rgba(163, 228, 215, 0.34) !important;
+  border-color: rgba(22, 160, 133, 0.26) !important;
+  color: #12816b !important;
+}
+
+.preview-page--messenger .preview-answer-chip-checkbox,
+.preview-page--messenger .preview-answer-chip-indicator,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip-checkbox,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip-indicator {
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-color: rgba(72, 201, 176, 0.42) !important;
+  color: #16a085 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88);
+}
+
+.preview-page--messenger .preview-answer-chip--maq.is-selected .preview-answer-chip-checkbox,
+.preview-page--messenger .preview-answer-chip[aria-pressed="true"] .preview-answer-chip-checkbox,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip--maq.is-selected .preview-answer-chip-checkbox,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip[aria-pressed="true"] .preview-answer-chip-checkbox {
+  background: linear-gradient(135deg, #48c9b0 0%, #16a085 100%) !important;
+  border-color: rgba(15, 95, 80, 0.28) !important;
+  color: #ffffff !important;
+  box-shadow: 0 8px 18px rgba(22, 160, 133, 0.18) !important;
+}
+
+.preview-page--messenger .preview-answer-chip--review.is-correct,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip--review.is-correct {
+  border-color: rgba(26, 188, 156, 0.42) !important;
+  background: linear-gradient(180deg, rgba(236, 250, 246, 0.98) 0%, rgba(220, 246, 238, 0.98) 100%) !important;
+}
+
+.preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-indicator,
+.preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-badge,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-indicator,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip--review.is-correct .preview-answer-chip-badge {
+  background: rgba(163, 228, 215, 0.4) !important;
+  border-color: rgba(26, 188, 156, 0.34) !important;
+  color: #12816b !important;
+}
+
+.preview-page--messenger .preview-answer-chip-badge,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-answer-chip-badge {
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.preview-page--messenger .preview-message-pill,
+.preview-page--messenger .preview-question-grade,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-message-pill,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-question-grade {
+  border-width: 1px;
+  font-weight: 700;
+}
+
+.preview-page--messenger .preview-question-grade,
+.preview-page--messenger .preview-question-grade.is-correct,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-question-grade,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-question-grade.is-correct {
+  background: rgba(163, 228, 215, 0.42) !important;
+  border-color: rgba(26, 188, 156, 0.34) !important;
+  color: #12816b !important;
+}
+
+.preview-page--messenger .preview-feedback--correct,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-feedback--correct {
+  background: linear-gradient(180deg, rgba(239, 252, 247, 0.98) 0%, rgba(223, 247, 240, 0.98) 100%) !important;
+  border-color: rgba(26, 188, 156, 0.34) !important;
+  color: #17382e !important;
+  box-shadow: 0 12px 28px rgba(18, 129, 107, 0.1) !important;
+}
+
+.preview-page--messenger .preview-feedback--correct *,
+.preview-page--messenger .preview-feedback--correct .preview-message-pill,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-feedback--correct *,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-feedback--correct .preview-message-pill {
+  color: #17382e !important;
+}
+
+.preview-page--messenger .preview-feedback--correct .preview-question-grade,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-feedback--correct .preview-question-grade {
+  background: rgba(163, 228, 215, 0.48) !important;
+  border-color: rgba(26, 188, 156, 0.36) !important;
+  color: #12816b !important;
+}
+
+.preview-page--messenger .preview-feedback--correct .preview-message-pill,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-feedback--correct .preview-message-pill {
+  background: rgba(255, 255, 255, 0.68) !important;
+  border-color: rgba(26, 188, 156, 0.24) !important;
+}
+
+.preview-page--messenger .preview-written-answer-alignment-track,
+.preview-page--messenger .preview-waq-alignment-track,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-written-answer-alignment-track,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment-track {
+  background: rgba(163, 228, 215, 0.34) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.preview-page--messenger .preview-waq-alignment-head strong,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment-head strong {
+  color: #16a085 !important;
+}
+
+.preview-page--messenger .preview-waq-alignment,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment {
+  margin-bottom: 0.45rem !important;
+}
+
+.preview-page--messenger .preview-written-answer-alignment-track span,
+.preview-page--messenger .preview-waq-alignment-track span,
+.preview-page--messenger .preview-written-answer-alignment.is-close .preview-written-answer-alignment-track span,
+.preview-page--messenger .preview-waq-alignment[data-state="close"] .preview-waq-alignment-track span,
+.preview-page--messenger .preview-written-answer-alignment.is-aligned .preview-written-answer-alignment-track span,
+.preview-page--messenger .preview-waq-alignment[data-state="aligned"] .preview-waq-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-written-answer-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-written-answer-alignment.is-close .preview-written-answer-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment[data-state="close"] .preview-waq-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-written-answer-alignment.is-aligned .preview-written-answer-alignment-track span,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-waq-alignment[data-state="aligned"] .preview-waq-alignment-track span {
+  background: linear-gradient(90deg, #76d7c4 0%, #48c9b0 46%, #1abc9c 76%, #16a085 100%) !important;
+  box-shadow: 0 0 14px rgba(26, 188, 156, 0.22) !important;
+}
+
+.preview-page--messenger :is(
+  .preview-messenger-menu-trigger,
+  .preview-sidebar-utility-link,
+  .preview-conversation-switcher-button,
+  .preview-conversation-row,
+  .preview-block-card-toggle,
+  .preview-block-overall-button,
+  .preview-block-metric,
+  .preview-header-action,
+  .preview-chat-header-menu-trigger,
+  .preview-chat-header-menu-item,
+  .preview-quiz-menu-item,
+  .preview-quiz-controls .button,
+  .preview-quiz-menu-trigger,
+  .preview-calculator-trigger,
+  .preview-calculator-key,
+  .preview-answer-chip,
+  .preview-further-study-button,
+  .preview-further-study-question,
+  .preview-flag-button,
+  .preview-sidebar-summary-toggle,
+  .preview-objective-menu-trigger,
+  .preview-objective-menu-item,
+  .preview-objective-sheet-close,
+  .preview-objective-sheet-save,
+  .preview-sidebar-toggle,
+  .preview-chat-scroll-bottom,
+  .preview-chat-composer textarea,
+  .preview-messenger-search-input,
+  .preview-validation-reminder-link,
+  .preview-project-answer-input,
+  .preview-project-answer-submit
+):focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger :is(
+  .preview-messenger-menu-trigger,
+  .preview-sidebar-utility-link,
+  .preview-conversation-switcher-button,
+  .preview-conversation-row,
+  .preview-block-card-toggle,
+  .preview-block-overall-button,
+  .preview-block-metric,
+  .preview-header-action,
+  .preview-chat-header-menu-trigger,
+  .preview-chat-header-menu-item,
+  .preview-quiz-menu-item,
+  .preview-quiz-controls .button,
+  .preview-quiz-menu-trigger,
+  .preview-calculator-trigger,
+  .preview-calculator-key,
+  .preview-answer-chip,
+  .preview-further-study-button,
+  .preview-further-study-question,
+  .preview-flag-button,
+  .preview-sidebar-summary-toggle,
+  .preview-objective-menu-trigger,
+  .preview-objective-menu-item,
+  .preview-objective-sheet-close,
+  .preview-objective-sheet-save,
+  .preview-sidebar-toggle,
+  .preview-chat-scroll-bottom,
+  .preview-chat-composer textarea,
+  .preview-messenger-search-input,
+  .preview-validation-reminder-link,
+  .preview-project-answer-input,
+  .preview-project-answer-submit
+):focus-visible {
+  outline: 3px solid #0f5f50 !important;
+  outline-offset: 3px !important;
+  box-shadow:
+    0 0 0 3px rgba(255, 255, 255, 0.96),
+    0 0 0 6px rgba(15, 95, 80, 0.42) !important;
+}
+
+.preview-page--messenger .preview-chat-composer textarea:focus-visible,
+.preview-page--messenger .preview-messenger-search-input:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-composer textarea:focus-visible,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-messenger-search-input:focus-visible {
+  border-color: rgba(15, 95, 80, 0.28) !important;
+  background: rgba(255, 255, 255, 0.99) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-page--messenger *,
+  .preview-page--messenger *::before,
+  .preview-page--messenger *::after,
+  :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger *,
+  :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger *::before,
+  :is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* BioBoost wallpaper for messenger transcript */
+.preview-page--messenger .preview-chat-transcript,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-chat-transcript {
+  background-color: #e7f8f3 !important;
+  background-image:
+    linear-gradient(180deg, rgba(242, 251, 248, 0.34), rgba(231, 248, 243, 0.4)),
+    url("../img/bioboost_background.png") !important;
+  background-position: center center !important;
+  background-repeat: no-repeat !important;
+  background-size: cover !important;
+}
+
+.preview-page--messenger .preview-sidebar-powered-by,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  width: fit-content;
+  max-width: calc(100% - 2rem);
+  margin: 0 1rem 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(22, 160, 133, 0.12);
+  color: var(--preview-mint-700);
+  text-decoration: none;
+}
+
+.preview-page--messenger .preview-sidebar-powered-by-label,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by-label {
+  color: #3f6158;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.preview-page--messenger .preview-sidebar-powered-by-logo,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by-logo {
+  display: block;
+  width: clamp(4.5rem, 18vw, 6.5rem);
+  max-width: 100%;
+  height: auto;
+  border-radius: 1rem;
+  border: 1px solid rgba(22, 160, 133, 0.14);
+  box-shadow: 0 10px 24px rgba(18, 129, 107, 0.12);
+}
+
+.preview-page--messenger .preview-sidebar-powered-by:hover .preview-sidebar-powered-by-label,
+.preview-page--messenger .preview-sidebar-powered-by:focus-visible .preview-sidebar-powered-by-label,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by:hover .preview-sidebar-powered-by-label,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by:focus-visible .preview-sidebar-powered-by-label {
+  color: var(--preview-mint-900);
+}
+
+.preview-page--messenger .preview-sidebar-powered-by:hover .preview-sidebar-powered-by-logo,
+.preview-page--messenger .preview-sidebar-powered-by:focus-visible .preview-sidebar-powered-by-logo,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by:hover .preview-sidebar-powered-by-logo,
+:is(.app-body--embed, .app-body--canvas-theme) .preview-page--messenger .preview-sidebar-powered-by:focus-visible .preview-sidebar-powered-by-logo {
+  border-color: rgba(26, 188, 156, 0.32);
+  box-shadow: 0 14px 28px rgba(18, 129, 107, 0.18);
 }

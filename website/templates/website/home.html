@@ -11,143 +11,73 @@
   <main class="landing-shell">
     <section
       class="landing-hero"
-      style="background-image: url('{% static "standalone/img/bioboostbackground.png" %}');"
+      style="background-image: url('{% static "standalone/img/bioboost_background.png" %}');"
+      aria-label="BioBoost demo landing page"
     >
-      <div class="landing-hero__content">
-        <h1 class="landing-title" data-home-title>BioBoost</h1>
+      <div class="landing-backdrop"></div>
+      <section class="landing-card">
+        <p class="landing-kicker">Live Demo</p>
+        <h1 class="landing-title">BioBoost</h1>
+        <p class="landing-subtitle">AI Skills for Bioscientists</p>
+        <div class="landing-course-pill">Demo course: {{ course.title }}</div>
+        <p class="landing-copy">
+          Launching the Foundations course demo now. You&apos;ll enter the BioBoost Foundations demo automatically once the loader completes.
+        </p>
+
         <section
           class="landing-loader"
           data-home-loader
           data-redirect-url="{{ cta_url }}"
           data-delay-ms="{{ redirect_delay_ms }}"
           style="--landing-loader-duration: {{ redirect_delay_ms }}ms;"
-          aria-label="Loading OCR Physics demo"
+          aria-label="Loading BioBoost Foundations demo"
         >
-          <p class="landing-loader__label">
-            Opening OCR Physics demo
-          </p>
+          <div class="landing-loader__head">
+            <p class="landing-loader__label">Opening {{ course.title }} demo</p>
+          </div>
           <div class="landing-loader__track" aria-hidden="true">
             <span class="landing-loader__fill"></span>
           </div>
-          <section class="landing-features" data-feature-rotator aria-label="Platform highlights">
-            {% for feature in landing_features %}
-              <p
-                class="landing-features__item"
-                {% if forloop.first %}data-active="true"{% endif %}
-                data-feature-item
-              >
-                {{ feature }}
-              </p>
-            {% endfor %}
-          </section>
+          <p class="landing-loader__detail">Preparing the full-screen chat demo workspace.</p>
           <noscript>
-            <p class="landing-loader__fallback"><a href="{{ cta_url }}">Continue to the OCR Physics demo</a></p>
+            <p class="landing-loader__fallback"><a href="{{ cta_url }}">Continue to {{ course.title }}</a></p>
           </noscript>
         </section>
-      </div>
+
+        <section class="landing-powered-by" aria-label="Powered by KnowHow">
+          <p class="landing-powered-by__label">Powered by</p>
+          <a
+            class="landing-powered-by__link"
+            href="https://libguides.liverpool.ac.uk/knowhow"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <img
+              class="landing-powered-by__image"
+              src="{% static 'website/img/knowhow_pink_square.png' %}"
+              alt="KnowHow improve your academic skills"
+            />
+          </a>
+        </section>
+      </section>
     </section>
   </main>
   <script>
     (() => {
       const loader = document.querySelector("[data-home-loader]");
-      const rotator = document.querySelector("[data-feature-rotator]");
-      const featureItems = Array.from(document.querySelectorAll("[data-feature-item]"));
-      const homeTitle = document.querySelector("[data-home-title]");
       if (!loader) {
         return;
       }
 
       const redirectUrl = loader.dataset.redirectUrl;
-      const delayMs = Number(loader.dataset.delayMs || 15000);
+      const delayMs = Number(loader.dataset.delayMs || 5000);
       if (!redirectUrl) {
         return;
       }
 
-      let redirectTimeoutId = 0;
-      let featureAdvanceTimeoutId = 0;
-      let featureExitTimeoutId = 0;
-      let activeIndex = Math.max(0, featureItems.findIndex((item) => item.hasAttribute("data-active")));
-      const featureIntervalMs = featureItems.length > 1 ? Math.max(2400, Math.floor(delayMs / featureItems.length)) : 0;
-      const featureTransitionMs = featureItems.length > 1
-        ? Math.min(1100, Math.max(850, Math.floor(featureIntervalMs * 0.3)))
-        : 0;
-      const featureHoldMs = featureItems.length > 1 ? Math.max(900, featureIntervalMs - featureTransitionMs) : 0;
-
-      const queueRedirect = (timeoutMs) => {
-        window.clearTimeout(redirectTimeoutId);
-        redirectTimeoutId = window.setTimeout(() => {
-          window.location.assign(redirectUrl);
-        }, Math.max(0, timeoutMs));
-      };
-
-      const advanceFeature = () => {
-        if (featureItems.length <= 1) {
-          return;
-        }
-        const currentItem = featureItems[activeIndex];
-        currentItem?.removeAttribute("data-active");
-        currentItem?.setAttribute("data-exiting", "true");
-
-        featureExitTimeoutId = window.setTimeout(() => {
-          currentItem?.removeAttribute("data-exiting");
-          activeIndex = (activeIndex + 1) % featureItems.length;
-          featureItems[activeIndex]?.setAttribute("data-active", "true");
-          scheduleNextFeature(featureHoldMs);
-        }, featureTransitionMs);
-      };
-
-      const scheduleNextFeature = (timeoutMs) => {
-        if (featureItems.length <= 1) {
-          return;
-        }
-        window.clearTimeout(featureAdvanceTimeoutId);
-        featureAdvanceTimeoutId = window.setTimeout(advanceFeature, timeoutMs);
-      };
-
-      if (featureItems.length > 1) {
-        if (rotator) {
-          rotator.style.setProperty("--landing-feature-transition-duration", `${featureTransitionMs}ms`);
-        }
-        featureItems.forEach((item, index) => {
-          if (index !== activeIndex) {
-            item.removeAttribute("data-active");
-          }
-          item.removeAttribute("data-exiting");
-        });
-        featureItems[activeIndex]?.setAttribute("data-active", "true");
-        scheduleNextFeature(featureHoldMs);
-      }
-
-      const fitHomeTitle = () => {
-        if (!homeTitle) {
-          return;
-        }
-
-        homeTitle.style.removeProperty("--landing-title-size");
-        homeTitle.style.removeProperty("--landing-title-scale");
-
-        if (!window.matchMedia("(min-width: 641px)").matches) {
-          return;
-        }
-
-        const titleStyles = window.getComputedStyle(homeTitle);
-        const baseSize = Number.parseFloat(titleStyles.fontSize) || 0;
-        const minSize = Math.max(40, baseSize * 0.6);
-        const availableWidth = homeTitle.clientWidth;
-        if (!availableWidth || !baseSize) {
-          return;
-        }
-
-        let nextSize = baseSize;
-        while (homeTitle.scrollWidth > availableWidth && nextSize > minSize) {
-          nextSize -= 1;
-          homeTitle.style.setProperty("--landing-title-size", `${nextSize}px`);
-        }
-      };
-
-      fitHomeTitle();
-      window.addEventListener("resize", fitHomeTitle, { passive: true });
-      queueRedirect(delayMs);
+      window.setTimeout(() => {
+        window.location.assign(redirectUrl);
+      }, Math.max(0, delayMs));
     })();
   </script>
 </body>

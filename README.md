@@ -92,6 +92,12 @@ Uploaded files default to the local `media/` directory. Set `MEDIA_ROOT` only if
 python manage.py runserver
 ```
 
+If you are exposing the app through Cloudflare Tunnel or another proxy on `bioboost.uniwebdev.co.uk`, start the app with Gunicorn instead of Django's development server so chunked JSON POST requests work correctly:
+
+```bash
+bin/tunnel-start.sh
+```
+
 For low-CPU local or single-container deployments, heavy background jobs are paced through a single in-process queue when Celery is not configured. Increase `LOCAL_BACKGROUND_JOB_PAUSE_SECONDS` if PDF import or block creation still makes the app feel too busy. If a platform still struggles because the web process and background thread share the same tiny container, switch `LOCAL_BACKGROUND_JOB_STRATEGY=subprocess` so uploads dispatch detached management-command workers instead of running inside Gunicorn. Course-import block creation is chained one selected chapter at a time so larger selections can be accepted more safely on small instances.
 
 8. If you want background processing for content ingestion and learning-objective generation, start a Celery worker and set a broker URL such as Redis in `.env`:

@@ -113,6 +113,7 @@ class CourseConfig(TimeStampedModel):
     self_enrol_enabled = models.BooleanField(default=True)
     self_enrol_domain = models.CharField(max_length=255, blank=True)
     demo_enabled = models.BooleanField(default=False)
+    calculator_enabled = models.BooleanField(default=True)
     demo_iframe_allowed_origins = models.TextField(blank=True)
     assistant_guidance = models.TextField(blank=True)
     practice_weight = models.PositiveSmallIntegerField(default=80, validators=[MinValueValidator(0), MaxValueValidator(100)])
@@ -506,6 +507,18 @@ class LearningObjective(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.text[:60]}"
+
+
+class BlockResource(TimeStampedModel):
+    block = models.ForeignKey(CourseBlock, on_delete=models.CASCADE, related_name="resources")
+    citation = models.CharField(max_length=500)
+    hyperlink = models.URLField(max_length=1000)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+
+    def __str__(self) -> str:
+        return self.citation
 
 
 class LearningObjectiveCorrection(TimeStampedModel):
