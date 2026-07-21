@@ -1,14 +1,17 @@
 import base64
 from datetime import timedelta
 import hashlib
+import hmac
 import io
 import json
 import math
 import re
 import tempfile
 from types import SimpleNamespace
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from bs4 import BeautifulSoup
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.management import call_command
@@ -27,6 +30,12 @@ from standalone.models import (
     BlockConfig,
     BlockProject,
     BlockResource,
+    CanvasEmbedLaunchCode,
+    CanvasEmbedSession,
+    CanvasCourseLink,
+    CanvasCourseMembership,
+    CanvasMagicLink,
+    CanvasUserIdentity,
     ContentAsset,
     ContentChunk,
     Course,
@@ -88,6 +97,7 @@ from standalone.services.question_builder import (
     practice_validation_readiness,
     run_course_question_bank_builder_pass,
 )
+from standalone.services.canvas import sync_canvas_course_link_with_error_state
 from standalone.services.questions import _payload_for_generation_attempt
 from standalone.services.structured_maths import sync_structured_maths_specs_for_block
 from standalone.services.numeric_questions import (
@@ -18765,6 +18775,1300 @@ print(result)""",
 
         self.assertEqual(validation_response.status_code, 200)
         self.assertContains(validation_response, "Practice validation")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.services.canvas.fetch_canvas_course_enrollments")
+    @patch("standalone.services.canvas.fetch_canvas_course")
+    def test_canvas_course_sync_updates_memberships_and_removes_stale_entries(self, fetch_course, fetch_enrollments):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+        )
+        stale_identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=999,
+            login_id_hash="stale",
+            sortable_name="Old, Student",
+            display_name="Old Student",
+            search_text="old student",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=stale_identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        fetch_course.return_value = {"name": "Canvas Biology"}
+        fetch_enrollments.return_value = [
+            {
+                "type": "StudentEnrollment",
+                "enrollment_state": "active",
+                "user_id": 101,
+                "user": {
+                    "id": 101,
+                    "name": "Ada Lovelace",
+                    "short_name": "Ada Lovelace",
+                    "sortable_name": "Lovelace, Ada",
+                    "login_id": "ada@example.com",
+                },
+            },
+            {
+                "type": "TeacherEnrollment",
+                "enrollment_state": "active",
+                "user_id": 202,
+                "user": {
+                    "id": 202,
+                    "name": "Grace Hopper",
+                    "short_name": "Grace Hopper",
+                    "sortable_name": "Hopper, Grace",
+                    "login_id": "grace@example.com",
+                },
+            },
+            {
+                "type": "ObserverEnrollment",
+                "enrollment_state": "active",
+                "user_id": 303,
+                "user": {
+                    "id": 303,
+                    "name": "Ignored Observer",
+                    "short_name": "Ignored Observer",
+                    "sortable_name": "Observer, Ignored",
+                    "login_id": "observer@example.com",
+                },
+            },
+        ]
+
+        result = sync_canvas_course_link_with_error_state(link)
+        link.refresh_from_db()
+
+        self.assertEqual(result.membership_count, 2)
+        self.assertEqual(link.canvas_course_name, "Canvas Biology")
+        self.assertEqual(link.last_sync_error, "")
+        self.assertEqual(CanvasCourseMembership.objects.filter(canvas_course_link=link).count(), 2)
+        self.assertFalse(CanvasCourseMembership.objects.filter(canvas_course_link=link, canvas_user=stale_identity).exists())
+        ada_identity = CanvasUserIdentity.objects.get(canvas_user_id=101)
+        self.assertEqual(ada_identity.display_name, "Ada Lovelace")
+        self.assertIn("lovelace", ada_identity.search_text)
+
+    def test_canvas_links_dashboard_shows_updated_iframe_snippet_with_canvas_page_url(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=85747,
+            allowed_iframe_origin="https://canvas.liverpool.ac.uk",
+            canvas_page_url="https://canvas.liverpool.ac.uk/courses/85747/pages/bioboost",
+        )
+        self.client.force_login(self.internal)
+
+        response = self.client.get(reverse("standalone:course_canvas_links", args=[course.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        page = BeautifulSoup(response.content, "html.parser")
+        snippet = page.find("textarea", {"id": f"canvas-link-snippet-{link.pk}"}).text
+        self.assertIn("<p><iframe", snippet)
+        self.assertIn('title="Cell Biology Canvas launch"', snippet)
+        self.assertIn("canvas_course_id=85747", snippet)
+        self.assertIn("embed=1", snippet)
+        self.assertIn('referrerpolicy="unsafe-url"', snippet)
+        self.assertIn(
+            "canvas_page_url=https%3A%2F%2Fcanvas.liverpool.ac.uk%2Fcourses%2F85747%2Fpages%2Fbioboost",
+            snippet,
+        )
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_marks_password_availability(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        no_password_identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        password_identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=202,
+            login_id_hash="grace",
+            sortable_name="Hopper, Grace",
+            display_name="Grace Hopper",
+            search_text="grace hopper hopper grace",
+        )
+        password_identity.set_canvas_password("CanvasPass123!")
+        password_identity.save(update_fields=["password_hash", "password_set_at", "password_updated_at", "updated_at"])
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=no_password_identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=password_identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.TEACHER,
+        )
+
+        response = self.client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "a",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Grace",
+            },
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["matches"][0]["has_password"])
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_password_login_in_embed_returns_retired_message(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url="https://canvas.example.com/courses/42/pages/bioboost",
+            last_synced_at=timezone.now(),
+        )
+        self.create_preview_content_block(course)
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        identity.set_canvas_password("CanvasPass123!")
+        identity.save(update_fields=["password_hash", "password_set_at", "password_updated_at", "updated_at"])
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1&canvas_page_url={quote(link.canvas_page_url)}",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        response = self.client.post(
+            reverse("standalone:canvas_password_login"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "password": "CanvasPass123!",
+                "embed": "1",
+                "canvas_page_url": link.canvas_page_url,
+            },
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+
+        self.assertEqual(response.status_code, 410)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertIn("retired", payload["error"])
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_embed_launch_code_exchange_opens_canvas_app_without_session_cookie(self):
+        course = self.create_course()
+        canvas_page_url = "https://canvas.example.com/courses/42/pages/bioboost"
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url=canvas_page_url,
+            last_synced_at=timezone.now(),
+        )
+        self.create_preview_content_block(course)
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        launch_code = CanvasEmbedLaunchCode.objects.create(
+            membership=membership,
+            canvas_course_link=link,
+            canvas_page_url=canvas_page_url,
+            expires_at=timezone.now() + timedelta(minutes=30),
+        )
+
+        launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1&canvas_page_url={quote(canvas_page_url)}",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(launch_response.status_code, 200)
+
+        fresh_client = self.client_class()
+        exchange_response = fresh_client.post(
+            reverse("standalone:canvas_exchange_launch_code"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "launch_code": str(launch_code.token),
+                "embed": "1",
+                "canvas_page_url": canvas_page_url,
+                "parent_origin": "https://canvas.example.com",
+                "launch_token": re.search(r'data-launch-token="([^"]+)"', launch_response.content.decode("utf-8")).group(1),
+            },
+            HTTP_REFERER=f"http://testserver{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+        )
+
+        self.assertEqual(exchange_response.status_code, 200)
+        payload = exchange_response.json()
+        self.assertTrue(payload["embed_session_token"])
+        self.assertIn("embed_session=", payload["app_url"])
+        launch_code.refresh_from_db()
+        self.assertIsNotNone(launch_code.used_at)
+
+        app_client = self.client_class()
+        app_response = app_client.get(payload["app_url"], HTTP_ORIGIN="https://canvas.example.com")
+        self.assertEqual(app_response.status_code, 200)
+        self.assertContains(app_response, "canvas-practice", html=False)
+
+        session = CanvasEmbedSession.objects.get(membership=membership, canvas_course_link=link)
+        self.assertIsNotNone(session.last_used_at)
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_embed_session_refresh_rotates_token(self):
+        course = self.create_course()
+        canvas_page_url = "https://canvas.example.com/courses/42/pages/bioboost"
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url=canvas_page_url,
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        embed_session = CanvasEmbedSession.objects.create(
+            membership=membership,
+            canvas_course_link=link,
+            token_hash=hashlib.sha256(b"unused").hexdigest(),
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        raw_token = "refresh-token"
+        embed_session.token_hash = hmac.new(
+            settings.SECRET_KEY.encode("utf-8"),
+            raw_token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        embed_session.save(update_fields=["token_hash", "updated_at"])
+
+        launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1&canvas_page_url={quote(canvas_page_url)}",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(launch_response.status_code, 200)
+        launch_token = re.search(r'data-launch-token="([^"]+)"', launch_response.content.decode("utf-8")).group(1)
+
+        refresh_response = self.client.post(
+            reverse("standalone:canvas_embed_session_refresh"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "embed": "1",
+                "canvas_page_url": canvas_page_url,
+                "parent_origin": "https://canvas.example.com",
+                "launch_token": launch_token,
+            },
+            HTTP_X_CANVAS_EMBED_SESSION=raw_token,
+        )
+        self.assertEqual(refresh_response.status_code, 200)
+        payload = refresh_response.json()
+        self.assertTrue(payload["embed_session_token"])
+        self.assertNotEqual(payload["embed_session_token"], raw_token)
+        self.assertIn("embed_session=", payload["app_url"])
+        embed_session.refresh_from_db()
+        self.assertIsNotNone(embed_session.revoked_at)
+        self.assertEqual(CanvasEmbedSession.objects.filter(membership=membership, canvas_course_link=link).count(), 2)
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_app_action_accepts_embed_session_header_without_cookie(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url="https://canvas.example.com/courses/42/pages/bioboost",
+            last_synced_at=timezone.now(),
+        )
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Header-auth question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="header-auth-question",
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        raw_token = "action-token"
+        CanvasEmbedSession.objects.create(
+            membership=membership,
+            canvas_course_link=link,
+            token_hash=hmac.new(
+                settings.SECRET_KEY.encode("utf-8"),
+                raw_token.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest(),
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1&canvas_page_url={quote(link.canvas_page_url)}",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(launch_response.status_code, 200)
+        origin_token = re.search(r'data-origin-token="([^"]*)"', launch_response.content.decode("utf-8")).group(1)
+        self.assertTrue(origin_token)
+
+        fresh_client = self.client_class()
+        action_response = fresh_client.post(
+            reverse("standalone:canvas_app_action", args=[link.pk, block.pk, "quiz"]),
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_X_CANVAS_EMBED_SESSION=raw_token,
+            HTTP_X_CANVAS_EMBED_ORIGIN_TOKEN=origin_token,
+            HTTP_ORIGIN="https://bioboost.uniwebdev.co.uk",
+        )
+
+        self.assertEqual(action_response.status_code, 200)
+        payload = action_response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["preview"]["blocks"][0]["transcript"][-1]["kind"], "question")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_send_link_requires_canvas_page_url(self, send_magic_link_message):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        send_response = self.client.post(
+            reverse("standalone:canvas_send_link"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "embed": "1",
+            },
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(send_response.status_code, 400)
+        self.assertIn(f"/courses/{link.canvas_course_id}/", send_response.json()["error"])
+        self.assertFalse(CanvasMagicLink.objects.filter(membership=membership).exists())
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_password_manage_returns_retired_message(self, send_magic_link_message):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url="https://canvas.example.com/courses/42/pages/bioboost",
+            last_synced_at=timezone.now(),
+        )
+        self.create_preview_content_block(course)
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        identity.set_canvas_password("CanvasPass123!")
+        identity.save(update_fields=["password_hash", "password_set_at", "password_updated_at", "updated_at"])
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        change_response = self.client.post(
+            reverse("standalone:canvas_password_manage", args=[link.pk]),
+            {"embed": "1", "canvas_page_url": link.canvas_page_url},
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(change_response.status_code, 410)
+        self.assertContains(change_response, "retired", status_code=410)
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_progress_is_shared_across_links_for_same_course_and_identity(self):
+        course = self.create_course()
+        block, _asset, objective, chunk = self.create_preview_content_block(course)
+        practice_question = QuestionBankItem.objects.create(
+            course=course,
+            block=block,
+            learning_objective=objective,
+            source_chunk=chunk,
+            bank_type=QuestionBankItem.BankType.PRACTICE,
+            status=QuestionBankItem.Status.APPROVED,
+            stem="Shared Canvas progress question?",
+            correct_answer="A",
+            distractors=["B", "C", "D"],
+            explanation="A.",
+            question_hash="shared-canvas-progress-question",
+        )
+        primary_link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        secondary_link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=84,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        primary_membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=primary_link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        secondary_membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=secondary_link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        primary_client = self.client_class()
+        primary_session = primary_client.session
+        primary_session["standalone:canvas-auth"] = {
+            str(primary_link.pk): {
+                "membership_id": str(primary_membership.pk),
+                "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+            }
+        }
+        primary_session.save()
+
+        quiz_response = primary_client.post(
+            reverse("standalone:canvas_app_action", args=[primary_link.pk, block.pk, "quiz"]),
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(quiz_response.status_code, 200)
+        served_question_id = quiz_response.json()["preview"]["blocks"][0]["transcript"][-1]["question_id"]
+        self.assertEqual(served_question_id, practice_question.pk)
+
+        answer_response = primary_client.post(
+            reverse("standalone:canvas_app_action", args=[primary_link.pk, block.pk, "answer"]),
+            data=json.dumps({"question_id": served_question_id, "answer": "A"}),
+            content_type="application/json",
+        )
+        self.assertEqual(answer_response.status_code, 200)
+
+        primary_membership.refresh_from_db()
+        secondary_membership.refresh_from_db()
+        self.assertEqual(primary_membership.practice_state, secondary_membership.practice_state)
+
+        secondary_client = self.client_class()
+        secondary_session = secondary_client.session
+        secondary_session["standalone:canvas-auth"] = {
+            str(secondary_link.pk): {
+                "membership_id": str(secondary_membership.pk),
+                "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+            }
+        }
+        secondary_session.save()
+
+        app_response = secondary_client.get(reverse("standalone:canvas_app", args=[secondary_link.pk]))
+        self.assertEqual(app_response.status_code, 200)
+        transcript = app_response.context["preview_state"]["blocks"][0]["transcript"]
+        self.assertTrue(
+            any(message["kind"] == "feedback" and message.get("question_id") == practice_question.pk for message in transcript)
+        )
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_launch_embed_blocks_unapproved_origin(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://evil.example.com",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertContains(response, "not allowed", status_code=403)
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_launch_embed_allows_missing_origin_headers_for_bootstrap(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("standalone:canvas_embed_origin_token"))
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_returns_only_matches_for_current_link(self):
+        course = self.create_course()
+        primary_link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        other_link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=84,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        ada = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        other = CanvasUserIdentity.objects.create(
+            canvas_user_id=202,
+            login_id_hash="other",
+            sortable_name="Lovelace, Alex",
+            display_name="Alex Lovelace",
+            search_text="alex lovelace lovelace alex",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=primary_link,
+            canvas_user=ada,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=other_link,
+            canvas_user=other,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={primary_link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        response = self.client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": primary_link.canvas_course_id,
+                "query": "Lovelace",
+                "embed": "1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_embed_origin_token_endpoint_bootstraps_lookup_without_initial_origin_headers(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_url = f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1"
+        launch_response = self.client.get(launch_url)
+
+        self.assertEqual(launch_response.status_code, 200)
+        self.assertIn('data-origin-token=""', launch_response.content.decode("utf-8"))
+
+        origin_token_response = self.client.get(
+            (
+                f"{reverse('standalone:canvas_embed_origin_token')}"
+                f"?canvas_course_id={link.canvas_course_id}&embed=1&parent_origin=https%3A%2F%2Fcanvas.example.com"
+            ),
+            HTTP_REFERER=f"http://testserver{launch_url}",
+        )
+
+        self.assertEqual(origin_token_response.status_code, 200)
+        origin_token_payload = origin_token_response.json()
+        self.assertTrue(origin_token_payload["ok"])
+        self.assertTrue(origin_token_payload["origin_token"])
+
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "origin_token": origin_token_payload["origin_token"],
+            },
+            HTTP_ORIGIN="null",
+            HTTP_REFERER=f"http://testserver{launch_url}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_embed_origin_token_endpoint_allows_launch_token_without_origin_headers(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+
+        launch_url = f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1"
+        launch_response = self.client.get(launch_url)
+
+        self.assertEqual(launch_response.status_code, 200)
+        page_html = launch_response.content.decode("utf-8")
+        launch_token_match = re.search(r'data-launch-token="([^"]+)"', page_html)
+        self.assertIsNotNone(launch_token_match)
+        launch_token = launch_token_match.group(1)
+
+        origin_token_response = self.client.get(
+            (
+                f"{reverse('standalone:canvas_embed_origin_token')}"
+                f"?canvas_course_id={link.canvas_course_id}&embed=1"
+                f"&parent_origin=https%3A%2F%2Fcanvas.example.com"
+                f"&launch_token={quote(launch_token)}"
+            ),
+        )
+
+        self.assertEqual(origin_token_response.status_code, 200)
+        origin_token_payload = origin_token_response.json()
+        self.assertTrue(origin_token_payload["ok"])
+        self.assertTrue(origin_token_payload["origin_token"])
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_allows_parent_origin_hint_from_embedded_launch_page(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_url = f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1"
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "parent_origin": "https://canvas.example.com",
+            },
+            HTTP_REFERER=f"http://testserver{launch_url}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_allows_launch_token_without_origin_headers(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_url = f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1"
+        launch_response = self.client.get(launch_url)
+
+        self.assertEqual(launch_response.status_code, 200)
+        page_html = launch_response.content.decode("utf-8")
+        launch_token_match = re.search(r'data-launch-token="([^"]+)"', page_html)
+        self.assertIsNotNone(launch_token_match)
+        launch_token = launch_token_match.group(1)
+
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "parent_origin": "https://canvas.example.com",
+                "launch_token": launch_token,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_allows_launch_token_with_proxy_style_request_origin(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_url = f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1"
+        launch_response = self.client.get(launch_url)
+
+        self.assertEqual(launch_response.status_code, 200)
+        page_html = launch_response.content.decode("utf-8")
+        launch_token_match = re.search(r'data-launch-token="([^"]+)"', page_html)
+        self.assertIsNotNone(launch_token_match)
+        launch_token = launch_token_match.group(1)
+
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "parent_origin": "https://canvas.example.com",
+                "launch_token": launch_token,
+            },
+            HTTP_ORIGIN="https://bioboost.uniwebdev.co.uk",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_allows_signed_origin_token_without_csrf_cookie(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(launch_response.status_code, 200)
+        page_html = launch_response.content.decode("utf-8")
+        token_match = re.search(r'data-origin-token="([^"]+)"', page_html)
+        self.assertIsNotNone(token_match)
+        origin_token = token_match.group(1)
+
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "origin_token": origin_token,
+            },
+            HTTP_ORIGIN="http://testserver",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_lookup_allows_signed_origin_token_with_proxy_style_request_origin(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+
+        launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(launch_response.status_code, 200)
+        page_html = launch_response.content.decode("utf-8")
+        token_match = re.search(r'data-origin-token="([^"]+)"', page_html)
+        self.assertIsNotNone(token_match)
+        origin_token = token_match.group(1)
+
+        fresh_client = self.client_class()
+        response = fresh_client.post(
+            reverse("standalone:canvas_lookup"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "query": "Ada",
+                "embed": "1",
+                "origin_token": origin_token,
+            },
+            HTTP_ORIGIN="https://bioboost.uniwebdev.co.uk",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["matches"]), 1)
+        self.assertEqual(payload["matches"][0]["display_name"], "Ada Lovelace")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.create_canvas_embed_launch_page")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_send_link_sends_canvas_page_url_with_launch_code(self, send_magic_link_message, create_canvas_embed_launch_page):
+        course = self.create_course()
+        canvas_page_url = "https://canvas.example.com/courses/42/pages/bioboost"
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url=canvas_page_url,
+            last_synced_at=timezone.now(),
+        )
+        self.create_preview_content_block(course)
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        sent_urls = []
+        create_canvas_embed_launch_page.return_value = "https://canvas.example.com/courses/42/pages/bioboost-launch-abc123"
+
+        def capture_send(magic_link, absolute_magic_url):
+            sent_urls.append(absolute_magic_url)
+            return magic_link
+
+        send_magic_link_message.side_effect = capture_send
+
+        self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        send_response = self.client.post(
+            reverse("standalone:canvas_send_link"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "embed": "1",
+            },
+        )
+
+        self.assertEqual(send_response.status_code, 200)
+        magic_link = CanvasMagicLink.objects.get(membership=membership)
+        self.assertEqual(magic_link.return_to_url, canvas_page_url)
+        self.assertEqual(len(sent_urls), 1)
+        self.assertEqual(sent_urls[0], create_canvas_embed_launch_page.return_value)
+        self.assertEqual(create_canvas_embed_launch_page.call_count, 1)
+        _, launch_kwargs = create_canvas_embed_launch_page.call_args
+        parsed_launch_url = urlsplit(launch_kwargs["launch_url"])
+        launch_params = dict(parse_qsl(parsed_launch_url.query, keep_blank_values=True))
+        self.assertTrue(launch_params.get("launch_code"))
+        self.assertEqual(launch_params.get("canvas_page_url"), canvas_page_url)
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.create_canvas_embed_launch_page")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_magic_with_canvas_page_url_redirects_back_to_canvas_page(self, send_magic_link_message, create_canvas_embed_launch_page):
+        course = self.create_course()
+        canvas_page_url = "https://canvas.example.com/courses/42/pages/bioboost"
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url=canvas_page_url,
+            last_synced_at=timezone.now(),
+        )
+        self.create_preview_content_block(course)
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        create_canvas_embed_launch_page.return_value = "https://canvas.example.com/courses/42/pages/bioboost-launch-abc123"
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        send_response = self.client.post(
+            reverse("standalone:canvas_send_link"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "embed": "1",
+                "canvas_page_url": canvas_page_url,
+            },
+        )
+
+        self.assertEqual(send_response.status_code, 200)
+        magic_link = CanvasMagicLink.objects.get(membership=membership)
+        self.assertEqual(magic_link.return_to_url, canvas_page_url)
+
+        magic_response = self.client.get(reverse("standalone:canvas_magic", args=[magic_link.token]))
+        self.assertEqual(magic_response.status_code, 303)
+        self.assertTrue(magic_response["Location"].startswith(canvas_page_url))
+        self.assertIn("bioboost_launch=", magic_response["Location"])
+        self.assertEqual(magic_response["Cache-Control"], "no-store")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.create_canvas_embed_launch_page")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_launch_embed_does_not_redirect_back_into_iframe_after_login(self, send_magic_link_message, create_canvas_embed_launch_page):
+        course = self.create_course()
+        canvas_page_url = "https://canvas.example.com/courses/42/pages/bioboost"
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url=canvas_page_url,
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        create_canvas_embed_launch_page.return_value = "https://canvas.example.com/courses/42/pages/bioboost-launch-abc123"
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        self.client.post(
+            reverse("standalone:canvas_send_link"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "embed": "1",
+            },
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        magic_link = CanvasMagicLink.objects.get(membership=membership)
+        legacy_redirect = self.client.get(reverse("standalone:canvas_magic", args=[magic_link.token]))
+        self.assertTrue(legacy_redirect["Location"].startswith(canvas_page_url))
+        self.assertIn("bioboost_launch=", legacy_redirect["Location"])
+
+        embed_launch_response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(embed_launch_response.status_code, 200)
+        self.assertContains(embed_launch_response, "Open Canvas inbox")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_app_without_session_shows_reauth_page_with_no_store_headers(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url="https://canvas.example.com/courses/42/pages/bioboost",
+            last_synced_at=timezone.now(),
+        )
+
+        response = self.client.get(reverse("standalone:canvas_app", args=[link.pk]))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertContains(response, "Re-authentication required", status_code=403)
+        self.assertContains(response, "https://canvas.example.com/courses/42/pages/bioboost", status_code=403)
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_canvas_send_link_rejects_unsafe_return_url_without_configured_canvas_page(self, send_magic_link_message):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        send_response = self.client.post(
+            reverse("standalone:canvas_send_link"),
+            {
+                "canvas_course_id": link.canvas_course_id,
+                "membership_id": membership.pk,
+                "embed": "1",
+                "canvas_page_url": "https://evil.example.com/steal",
+            },
+            HTTP_ORIGIN="https://canvas.example.com",
+        )
+        self.assertEqual(send_response.status_code, 400)
+        self.assertIn(f"/courses/{link.canvas_course_id}/", send_response.json()["error"])
+        self.assertFalse(CanvasMagicLink.objects.filter(membership=membership).exists())
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_launch_remembers_valid_course_referrer_as_canvas_page_url(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_REFERER="https://canvas.example.com/courses/42/pages/bioboost",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        link.refresh_from_db()
+        self.assertEqual(link.canvas_page_url, "https://canvas.example.com/courses/42/pages/bioboost")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    def test_canvas_launch_does_not_remember_dashboard_referrer_as_canvas_page_url(self):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            last_synced_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            f"{reverse('standalone:canvas_launch')}?canvas_course_id={link.canvas_course_id}&embed=1",
+            HTTP_REFERER="https://canvas.example.com/",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        link.refresh_from_db()
+        self.assertEqual(link.canvas_page_url, "")
+
+    @override_settings(CANVAS_API_URL="https://canvas.example.com/api/v1", CANVAS_API_TOKEN="test-token")
+    @patch("standalone.views.create_canvas_embed_launch_page")
+    @patch("standalone.views.send_canvas_magic_link_message")
+    def test_expired_canvas_magic_link_can_resend_new_link(self, send_magic_link_message, create_canvas_embed_launch_page):
+        course = self.create_course()
+        link = CanvasCourseLink.objects.create(
+            course=course,
+            canvas_course_id=42,
+            allowed_iframe_origin="https://canvas.example.com",
+            canvas_page_url="https://canvas.example.com/courses/42/pages/bioboost",
+            last_synced_at=timezone.now(),
+        )
+        identity = CanvasUserIdentity.objects.create(
+            canvas_user_id=101,
+            login_id_hash="ada",
+            sortable_name="Lovelace, Ada",
+            display_name="Ada Lovelace",
+            search_text="ada lovelace lovelace ada",
+        )
+        membership = CanvasCourseMembership.objects.create(
+            canvas_course_link=link,
+            canvas_user=identity,
+            canvas_role=CanvasCourseMembership.CanvasRole.STUDENT,
+        )
+        expired_link = CanvasMagicLink.objects.create(
+            membership=membership,
+            expires_at=timezone.now() - timedelta(hours=1),
+        )
+        create_canvas_embed_launch_page.return_value = "https://canvas.example.com/courses/42/pages/bioboost-launch-abc123"
+        send_magic_link_message.side_effect = lambda magic_link, absolute_magic_url: magic_link
+
+        response = self.client.post(reverse("standalone:canvas_magic_resend", args=[expired_link.token]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "new one-time launch link has been sent", html=False)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertEqual(CanvasMagicLink.objects.filter(membership=membership).count(), 2)
+        latest_link = CanvasMagicLink.objects.exclude(pk=expired_link.pk).get(membership=membership)
+        self.assertIsNone(latest_link.superseded_at)
 
 
 class SqliteHardeningTests(TestCase):

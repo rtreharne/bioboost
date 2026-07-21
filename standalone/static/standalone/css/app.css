@@ -35,6 +35,202 @@ body {
   width: min(100%, calc(100vw - 2rem));
 }
 
+.app-body--canvas-launch {
+  background: #dff5ef;
+}
+
+.app-body--canvas-launch .app-shell.canvas-launch-app-shell {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+}
+
+.app-body--canvas-launch.app-body--embed .app-shell.canvas-launch-app-shell {
+  width: 100%;
+}
+
+.canvas-launch-shell {
+  min-height: 100dvh;
+}
+
+.canvas-launch-hero {
+  min-height: 100dvh;
+  align-items: center;
+  justify-items: center;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  background-position: center center;
+}
+
+.canvas-launch-card {
+  width: min(100%, 42rem);
+  gap: 0.9rem;
+}
+
+.canvas-launch-title {
+  color: #0f5b4d !important;
+  font-size: clamp(2rem, 4.8vw, 3.1rem);
+  line-height: 0.98;
+  letter-spacing: -0.03em;
+}
+
+.canvas-launch-description {
+  margin-top: -0.15rem;
+  color: rgba(22, 63, 57, 0.8);
+}
+
+.canvas-launch-panel {
+  gap: 0.75rem;
+}
+
+.canvas-launch-search-ui {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.canvas-launch-search-ui[hidden] {
+  display: none !important;
+}
+
+.canvas-launch-panel--sent {
+  justify-items: center;
+  padding-block: 1.35rem;
+}
+
+.canvas-launch-panel-head {
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+.canvas-launch-label {
+  color: #0f5b4d;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.canvas-launch-input {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  border: 1px solid rgba(22, 160, 133, 0.22);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--landing-ink, #163f39);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.48);
+}
+
+.canvas-launch-input::placeholder {
+  color: rgba(22, 63, 57, 0.52);
+}
+
+.canvas-launch-input:focus {
+  outline: none;
+  border-color: rgba(22, 160, 133, 0.36);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.48), 0 0 0 4px rgba(26, 188, 156, 0.16);
+}
+
+.canvas-launch-status {
+  min-height: 1.45rem;
+  color: rgba(22, 63, 57, 0.84);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.canvas-launch-status--error {
+  color: #9d3e4f;
+}
+
+.canvas-launch-results {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.canvas-launch-result {
+  display: grid;
+  gap: 0.22rem;
+  width: 100%;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(22, 160, 133, 0.18);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.8);
+  color: #0f5b4d;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(18, 67, 60, 0.08);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.canvas-launch-result:hover,
+.canvas-launch-result:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(22, 160, 133, 0.36);
+  box-shadow: 0 14px 30px rgba(18, 67, 60, 0.12);
+  outline: none;
+}
+
+.canvas-launch-result__name {
+  font-size: 0.98rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.canvas-launch-result__meta {
+  color: rgba(22, 63, 57, 0.72);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.canvas-launch-next-steps {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: center;
+  width: 100%;
+}
+
+.canvas-launch-next-steps[hidden] {
+  display: none;
+}
+
+.canvas-launch-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 2.75rem;
+  padding: 0.7rem 1rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(163, 228, 215, 0.96) 0%, rgba(26, 188, 156, 0.98) 54%, rgba(22, 160, 133, 1) 100%);
+  color: #0f5b4d;
+  font-size: 0.94rem;
+  font-weight: 800;
+  text-decoration: none;
+  box-shadow: 0 12px 26px rgba(18, 67, 60, 0.14);
+}
+
+.canvas-launch-link-button:hover,
+.canvas-launch-link-button:focus-visible {
+  text-decoration: none;
+  transform: translateY(-1px);
+  outline: none;
+}
+
+@media (max-width: 640px) {
+  .canvas-launch-hero {
+    align-items: end;
+    padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom));
+  }
+
+  .canvas-launch-card {
+    width: 100%;
+  }
+
+  .canvas-launch-title {
+    font-size: clamp(1.8rem, 8vw, 2.45rem);
+  }
+
+  .canvas-launch-link-button {
+    width: 100%;
+  }
+}
+
 a {
   color: #b03030;
 }

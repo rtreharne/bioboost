@@ -1,8 +1,11 @@
 from datetime import timedelta
 import json
+from urllib.parse import urlsplit
 
 from django import forms
 from django.conf import settings
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -10,6 +13,7 @@ from standalone.models import (
     BlockConfig,
     BlockProject,
     BlockResource,
+    CanvasCourseLink,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -364,6 +368,117 @@ class CourseAllowedEmailForm(forms.ModelForm):
 
     def clean_email(self):
         return self.cleaned_data["email"].strip().lower()
+
+
+class CanvasCourseLinkForm(forms.ModelForm):
+    class Meta:
+        model = CanvasCourseLink
+        fields = ["canvas_course_id", "allowed_iframe_origin", "canvas_page_url", "is_active"]
+
+    def __init__(self, *args, include_is_active: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["canvas_course_id"].label = "Canvas course ID"
+        self.fields["canvas_course_id"].help_text = "Enter the numeric Canvas course_id from the iframe launch URL."
+        self.fields["allowed_iframe_origin"].label = "Allowed Canvas iframe origin"
+        self.fields["allowed_iframe_origin"].help_text = "Enter the exact Canvas origin, for example https://yourinstitution.instructure.com."
+        self.fields["allowed_iframe_origin"].widget.attrs.setdefault("placeholder", "https://yourinstitution.instructure.com")
+        self.fields["canvas_page_url"].label = "Canvas page URL"
+        self.fields["canvas_page_url"].help_text = (
+            "Optional but recommended. Enter the full Canvas page URL where this iframe will be embedded "
+            "so the dashboard can generate the updated launch snippet."
+        )
+        self.fields["canvas_page_url"].widget.attrs.setdefault(
+            "placeholder",
+            "https://yourinstitution.instructure.com/courses/12345/pages/bioboost",
+        )
+        self.fields["is_active"].label = "Active"
+        self.fields["is_active"].help_text = "Inactive links are ignored by the Canvas launcher."
+        if not include_is_active:
+            self.fields.pop("is_active", None)
+
+    def clean_allowed_iframe_origin(self):
+        raw_value = self.cleaned_data.get("allowed_iframe_origin", "")
+        normalized = normalize_demo_iframe_origins(raw_value)
+        origins = [item for item in normalized.splitlines() if item]
+        if len(origins) != 1:
+            raise forms.ValidationError("Enter exactly one valid origin.")
+        return origins[0]
+
+    def clean_canvas_page_url(self):
+        candidate = str(self.cleaned_data.get("canvas_page_url") or "").strip()
+        is_active = self.cleaned_data.get("is_active")
+        if is_active is None:
+            is_active = getattr(self.instance, "is_active", True)
+        if is_active and not candidate:
+            raise forms.ValidationError("Active Canvas links require the full Canvas page URL for in-Canvas sign-in.")
+        if not candidate:
+            return ""
+        parts = urlsplit(candidate)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise forms.ValidationError("Enter a complete Canvas page URL.")
+        allowed_origin = str(self.cleaned_data.get("allowed_iframe_origin") or "").strip()
+        page_origin = f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+        if allowed_origin and page_origin != allowed_origin:
+            raise forms.ValidationError("Canvas page URL must use the same origin as the allowed Canvas iframe origin.")
+        return candidate
+
+
+class CanvasIdentityPasswordSetForm(forms.Form):
+    new_password1 = forms.CharField(
+        label="New password",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+    new_password2 = forms.CharField(
+        label="Confirm new password",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        password1 = str(cleaned_data.get("new_password1") or "")
+        password2 = str(cleaned_data.get("new_password2") or "")
+        if password1 and password2 and password1 != password2:
+            self.add_error("new_password2", "Enter the same password twice.")
+        if password1:
+            try:
+                validate_password(password1)
+            except ValidationError as error:
+                self.add_error("new_password1", error)
+        return cleaned_data
+
+
+class CanvasIdentityPasswordChangeForm(CanvasIdentityPasswordSetForm):
+    current_password = forms.CharField(
+        label="Current password",
+        strip=False,
+        required=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
+    )
+
+    def __init__(self, *args, require_current_password: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.require_current_password = require_current_password
+        self.fields["current_password"].required = require_current_password
+        if not require_current_password:
+            self.fields["current_password"].help_text = "You recently verified your identity with a Canvas magic link."
+
+
+class CanvasIdentityPasswordRemoveForm(forms.Form):
+    current_password = forms.CharField(
+        label="Current password",
+        strip=False,
+        required=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
+    )
+
+    def __init__(self, *args, require_current_password: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.require_current_password = require_current_password
+        self.fields["current_password"].required = require_current_password
+        if not require_current_password:
+            self.fields["current_password"].help_text = "You recently verified your identity with a Canvas magic link."
 
 
 class StudentInvitationForm(forms.ModelForm):

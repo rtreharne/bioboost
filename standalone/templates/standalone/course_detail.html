@@ -88,6 +88,9 @@
         <div class="workspace-actions course-primary-actions">
           <a class="button" href="{% url 'standalone:student_preview' course.pk %}">Student preview</a>
           <a class="button secondary" href="#course-settings-content" data-open-block-target="course-settings-content">Settings</a>
+          {% if user.role == "internal" or user.is_superuser %}
+            <a class="button secondary" href="{% url 'standalone:course_canvas_links' course.pk %}">Canvas links</a>
+          {% endif %}
         </div>
       </div>
     </div>

@@ -82,12 +82,16 @@ if (previewRoot && previewDataNode) {
   const objectiveSheetError = previewRoot.querySelector("[data-preview-objective-sheet-error]");
   const objectiveSheetSaveButton = previewRoot.querySelector("[data-preview-objective-sheet-save]");
   const isTeacherPreview = previewRoot.dataset.previewMode === "student-preview";
-  const isMessengerPreview = previewRoot.dataset.previewMode === "student-preview" || previewRoot.dataset.previewMode === "student-demo";
+  const isMessengerPreview = ["student-preview", "student-demo", "canvas-practice"].includes(previewRoot.dataset.previewMode || "");
   const isDemoMode = previewRoot.dataset.demoMode === "true";
+  const isCanvasMode = previewRoot.dataset.previewMode === "canvas-practice";
   const demoEmbedOriginTokenUrl = String(previewRoot.dataset.demoEmbedOriginTokenUrl || "").trim();
   const hideFlagActions = previewRoot.dataset.hideFlagActions === "true";
   const practiceValidationUrl = String(previewRoot.dataset.practiceValidationUrl || "").trim();
   const statsIconUrl = String(previewRoot.dataset.statsIconUrl || "").trim();
+  const canvasLaunchUrl = String(previewRoot.dataset.canvasLaunchUrl || "").trim();
+  let canvasEmbedOriginToken = String(previewRoot.dataset.canvasEmbedOriginToken || "").trim();
+  let canvasEmbedSessionToken = String(previewRoot.dataset.canvasEmbedSessionToken || "").trim();
 
   let previewState = JSON.parse(previewDataNode.textContent || "{}");
   let activeBlockId = "";
@@ -280,6 +284,97 @@ if (previewRoot && previewDataNode) {
     const mode = previewRoot.dataset.previewMode || "preview";
     return courseId ? `quizanchor:${mode}:course:${courseId}:active-block` : "";
   }
+
+  function canvasEmbedSessionStorageKey() {
+    const courseId = String(previewState?.course?.id || previewRoot.dataset.courseId || "");
+    return courseId ? `quizanchor:canvas-embed-session:${courseId}` : "";
+  }
+
+  function storeCanvasEmbedSessionToken(token) {
+    canvasEmbedSessionToken = String(token || "").trim();
+    const storageKey = canvasEmbedSessionStorageKey();
+    if (!storageKey) {
+      return;
+    }
+    try {
+      if (canvasEmbedSessionToken) {
+        window.localStorage.setItem(storageKey, canvasEmbedSessionToken);
+      } else {
+        window.localStorage.removeItem(storageKey);
+      }
+    } catch (_error) {
+      return;
+    }
+  }
+
+  function restoreCanvasEmbedSessionToken() {
+    const storageKey = canvasEmbedSessionStorageKey();
+    if (!storageKey) {
+      return;
+    }
+    try {
+      const storedToken = window.localStorage.getItem(storageKey) || "";
+      if (storedToken && !canvasEmbedSessionToken) {
+        canvasEmbedSessionToken = storedToken;
+      } else if (canvasEmbedSessionToken) {
+        window.localStorage.setItem(storageKey, canvasEmbedSessionToken);
+      }
+    } catch (_error) {
+      return;
+    }
+  }
+
+  function scrubCanvasAuthParamsFromUrl() {
+    if (!isCanvasMode) {
+      return;
+    }
+    try {
+      const url = new URL(window.location.href);
+      let changed = false;
+      ["embed_session", "origin_token", "launch_token", "parent_origin"].forEach((key) => {
+        if (url.searchParams.has(key)) {
+          url.searchParams.delete(key);
+          changed = true;
+        }
+      });
+      if (changed) {
+        window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+      }
+    } catch (_error) {
+      return;
+    }
+  }
+
+  function canvasRequestHeaders(extraHeaders = {}) {
+    const headers = { ...extraHeaders };
+    if (isCanvasMode) {
+      if (canvasEmbedSessionToken) {
+        headers["X-Canvas-Embed-Session"] = canvasEmbedSessionToken;
+      }
+      if (canvasEmbedOriginToken) {
+        headers["X-Canvas-Embed-Origin-Token"] = canvasEmbedOriginToken;
+      }
+    }
+    return headers;
+  }
+
+  function handleCanvasReauthResponse(response, data) {
+    if (!isCanvasMode || response.status !== 403) {
+      return false;
+    }
+    const nextUrl = String(data?.reauth_url || canvasLaunchUrl || "").trim();
+    if (!nextUrl) {
+      return false;
+    }
+    storeCanvasEmbedSessionToken("");
+    window.setTimeout(() => {
+      window.location.assign(nextUrl);
+    }, 150);
+    return true;
+  }
+
+  restoreCanvasEmbedSessionToken();
+  scrubCanvasAuthParamsFromUrl();
 
   function collectionThreadKey(collectionId) {
     return collectionId ? `collection:${collectionId}` : "";
@@ -5156,11 +5251,11 @@ if (previewRoot && previewDataNode) {
     waqDraftAbortController = controller;
     const response = await fetch(actionUrl(block.id, "draft_answer"), {
       method: "POST",
-      headers: {
+      headers: canvasRequestHeaders({
         "Content-Type": "application/json",
         "X-CSRFToken": getCsrfToken(),
         "X-Requested-With": "XMLHttpRequest",
-      },
+      }),
       body: JSON.stringify({
         question_id: questionId,
         answer_text: answerText,
@@ -5174,6 +5269,9 @@ if (previewRoot && previewDataNode) {
       waqDraftAbortController = null;
     }
     const data = await response.json();
+    if (handleCanvasReauthResponse(response, data)) {
+      throw new Error(data.error || "Your Canvas BioBoost session has expired.");
+    }
     if (!response.ok || !data.ok) {
       throw new Error(data.error || "Unable to update alignment right now.");
     }
@@ -5216,11 +5314,11 @@ if (previewRoot && previewDataNode) {
       }
       const responsePromise = fetch(actionUrl(block.id, action), {
         method: "POST",
-        headers: {
+        headers: canvasRequestHeaders({
           "Content-Type": "application/json",
           "X-CSRFToken": getCsrfToken(),
           "X-Requested-With": "XMLHttpRequest",
-        },
+        }),
         body: JSON.stringify(requestPayload),
         credentials: "same-origin",
       });
@@ -5229,6 +5327,9 @@ if (previewRoot && previewDataNode) {
         : Promise.resolve();
       const [response] = await Promise.all([responsePromise, minimumDelayPromise]);
       const data = await response.json();
+      if (handleCanvasReauthResponse(response, data)) {
+        throw new Error(data.error || "Your Canvas BioBoost session has expired.");
+      }
       if (!response.ok || !data.ok) {
         throw new Error(data.error || "Unable to update right now.");
       }

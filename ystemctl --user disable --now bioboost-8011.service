@@ -1,0 +1,15 @@
+[0;1;34m# ]8;;file://freddie/home/freddie/.config/systemd/user/bioboost-8011.service/home/freddie/.config/systemd/user/bioboost-8011.service]8;;[0m
+[0;1;36m[Unit][0m
+Description=BioBoost Gunicorn server on port 8011
+After=network-online.target
+[0;1;38;5;245m[0m
+[0;1;36m[Service][0m
+Type=simple
+WorkingDirectory=/home/freddie/bioboost
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/freddie/bioboost/.venv/bin/gunicorn --bind 127.0.0.1:8011 --workers 1 --timeout 120 --access-logfile - --error-logfile - config.wsgi:application
+Restart=always
+RestartSec=5
+[0;1;38;5;245m[0m
+[0;1;36m[Install][0m
+WantedBy=default.target

@@ -6,7 +6,9 @@
   <link rel="stylesheet" href="{% static 'standalone/vendor/katex/dist/katex.min.css' %}?v={{ static_asset_version }}">
 {% endblock %}
 {% block app_nav_links %}
-  {% if is_demo_mode %}
+  {% if is_canvas_mode %}
+    <a href="{{ canvas_home_url }}">Re-authenticate</a>
+  {% elif is_demo_mode %}
   {% elif is_student_practice %}
     <a href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
   {% else %}
@@ -14,7 +16,9 @@
   {% endif %}
 {% endblock %}
 {% block app_nav_menu_actions %}
-  {% if is_demo_mode %}
+  {% if is_canvas_mode %}
+    <a class="button secondary app-nav-menu-action" href="{{ canvas_home_url }}">Re-authenticate</a>
+  {% elif is_demo_mode %}
   {% elif is_student_practice %}
     <a class="button secondary app-nav-menu-action" href="{% url 'standalone:student_dashboard' %}">Dashboard</a>
   {% else %}
@@ -31,13 +35,16 @@
   data-student-preview
   data-action-url-template="{{ action_url_template|default:'' }}"
   data-course-id="{{ course.pk }}"
-  data-preview-mode="{% if is_demo_mode %}student-demo{% elif is_student_practice %}student-practice{% else %}student-preview{% endif %}"
+  data-preview-mode="{% if is_canvas_mode %}canvas-practice{% elif is_demo_mode %}student-demo{% elif is_student_practice %}student-practice{% else %}student-preview{% endif %}"
   data-demo-mode="{% if is_demo_mode %}true{% else %}false{% endif %}"
   data-demo-course-key="{% if is_demo_mode %}{{ course.pk }}{% endif %}"
   data-demo-embed-origin-token-url="{{ demo_embed_origin_token_url|default:'' }}"
   data-hide-flag-actions="{% if hide_flag_actions %}true{% else %}false{% endif %}"
   data-practice-validation-url="{{ practice_validation_url|default:'' }}"
   data-stats-icon-url="{% static 'standalone/img/my-stats-icon.svg' %}"
+  data-canvas-embed-session-token="{{ canvas_embed_session_token|default:'' }}"
+  data-canvas-embed-origin-token="{{ canvas_embed_origin_token|default:'' }}"
+  data-canvas-launch-url="{{ canvas_home_url|default:'' }}"
 >
   <a class="preview-skip-link" href="#preview-conversation-list">Skip to conversation list</a>
   <a class="preview-skip-link" href="#preview-chat-composer">Skip to question input</a>
@@ -81,6 +88,7 @@
                 </button>
               </div>
             </div>
+          {% elif is_canvas_mode %}
           {% else %}
             <div class="preview-chat-header-menu" data-preview-sidebar-menu>
               <button
@@ -104,6 +112,18 @@
       {% else %}
         <div class="preview-sidebar-title-row">
           <h1>{{ course.title }}</h1>
+        </div>
+      {% endif %}
+      {% if is_canvas_mode %}
+        <div class="preview-sidebar-account-meta" aria-label="Current Canvas user">
+          <p class="preview-sidebar-account-label">Signed in as</p>
+          <p class="preview-sidebar-account-email">
+            {{ canvas_current_user_name }}
+            {% if canvas_current_user_role %}<span>· {{ canvas_current_user_role }}</span>{% endif %}
+          </p>
+        </div>
+        <div class="preview-sidebar-utility-links" aria-label="Canvas navigation">
+          <a class="preview-sidebar-utility-link" href="{{ canvas_home_url }}">Request a new link</a>
         </div>
       {% endif %}
       {% if not is_demo_mode and is_student_practice %}

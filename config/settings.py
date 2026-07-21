@@ -27,6 +27,15 @@ def env_str(name: str, default: str = "") -> str:
     return value or default
 
 
+def _is_local_host(value: str) -> bool:
+    candidate = str(value or "").strip().lower()
+    return candidate in {"127.0.0.1", "localhost", "[::1]"}
+
+
+def _has_public_host(values: list[str]) -> bool:
+    return any(not _is_local_host(value) for value in values if value and value != "*")
+
+
 def env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None:
@@ -59,6 +68,13 @@ CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS", "")
 render_external_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 if render_external_url and render_external_url not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(render_external_url)
+
+ENABLE_CROSS_SITE_EMBED_COOKIES = env_bool(
+    "DJANGO_ENABLE_CROSS_SITE_EMBED_COOKIES",
+    bool(render_external_hostname)
+    or bool(render_external_url)
+    or _has_public_host(ALLOWED_HOSTS),
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -128,7 +144,7 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATIC_ASSET_VERSION = env_str("STATIC_ASSET_VERSION", "20260711b")
+STATIC_ASSET_VERSION = env_str("STATIC_ASSET_VERSION", "20260720a")
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {
@@ -140,12 +156,18 @@ STORAGES = {
     },
 }
 
-if not DEBUG:
+if not DEBUG or ENABLE_CROSS_SITE_EMBED_COOKIES:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     USE_X_FORWARDED_HOST = True
+
+if not DEBUG:
     SECURE_SSL_REDIRECT = True
+
+if ENABLE_CROSS_SITE_EMBED_COOKIES:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SAMESITE = "None"
+    CSRF_COOKIE_SAMESITE = "None"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "standalone.User"
@@ -183,11 +205,17 @@ CHAT_MAX_HISTORY_MESSAGE_LENGTH = int(os.getenv("CHAT_MAX_HISTORY_MESSAGE_LENGTH
 
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@bioboost.local")
+CANVAS_API_URL = env_str("CANVAS_API_URL", "")
+CANVAS_API_TOKEN = env_str("CANVAS_API_TOKEN", "")
 
 STANDALONE_ENABLE_MAGIC_LINKS = env_bool("STANDALONE_ENABLE_MAGIC_LINKS", True)
 STANDALONE_ENABLE_SELF_ENROL = env_bool("STANDALONE_ENABLE_SELF_ENROL", True)
 STANDALONE_INVITE_EXPIRY_HOURS = int(os.getenv("STANDALONE_INVITE_EXPIRY_HOURS", "72"))
 STANDALONE_MAGIC_LINK_EXPIRY_HOURS = int(os.getenv("STANDALONE_MAGIC_LINK_EXPIRY_HOURS", "72"))
+CANVAS_MAGIC_LINK_EXPIRY_HOURS = env_int("CANVAS_MAGIC_LINK_EXPIRY_HOURS", 24)
+CANVAS_SESSION_EXPIRY_HOURS = env_int("CANVAS_SESSION_EXPIRY_HOURS", 12)
+CANVAS_AUTO_SYNC_MAX_AGE_HOURS = env_int("CANVAS_AUTO_SYNC_MAX_AGE_HOURS", 6)
+CANVAS_API_TIMEOUT_SECONDS = env_float("CANVAS_API_TIMEOUT_SECONDS", 15.0)
 QUESTION_BANK_BUILDER_LOOP_ENABLED = env_bool("QUESTION_BANK_BUILDER_LOOP_ENABLED", False)
 QUESTION_BANK_BUILDER_POLL_SECONDS = env_int("QUESTION_BANK_BUILDER_POLL_SECONDS", 60)
 QUESTION_BANK_BUILDER_LEASE_SECONDS = env_int("QUESTION_BANK_BUILDER_LEASE_SECONDS", 300)

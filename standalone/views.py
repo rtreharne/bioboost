@@ -1,24 +1,31 @@
+import csv
+import hashlib
+import html
+import hmac
 import json
 import logging
-import csv
+import secrets
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 import re
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login
+from django.contrib.auth.hashers import check_password
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LogoutView
 from django import forms
+from django.core.cache import cache
 from django.core import signing
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Avg, Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
@@ -28,6 +35,9 @@ logger = logging.getLogger(__name__)
 _JSON_REQUEST_MISSING = object()
 _JSON_REQUEST_INVALID = object()
 _JSON_REQUEST_CACHE_ATTR = "_cached_json_request_data"
+_CANVAS_SESSION_KEY = "standalone:canvas-auth"
+_CANVAS_PASSWORD_PROMPT_SESSION_KEY = "standalone:canvas-password-prompt"
+_CANVAS_PASSWORD_PROOF_SESSION_KEY = "standalone:canvas-password-proof"
 
 from standalone.forms import (
     BlockAvailableFromInlineForm,
@@ -37,6 +47,10 @@ from standalone.forms import (
     BlockResourceForm,
     BlockSummaryInlineForm,
     BlockTitleInlineForm,
+    CanvasCourseLinkForm,
+    CanvasIdentityPasswordChangeForm,
+    CanvasIdentityPasswordRemoveForm,
+    CanvasIdentityPasswordSetForm,
     ContentAssetForm,
     CourseAllowedEmailForm,
     CourseBlockForm,
@@ -63,6 +77,12 @@ from standalone.models import (
     BlockConfig,
     BlockProject,
     BlockResource,
+    CanvasEmbedLaunchCode,
+    CanvasEmbedSession,
+    CanvasCourseLink,
+    CanvasCourseMembership,
+    CanvasMagicLink,
+    CanvasUserIdentity,
     ContentAsset,
     Course,
     CourseAllowedEmail,
@@ -112,6 +132,26 @@ from standalone.services.course_imports import (
     queue_course_import_creation,
     resume_course_import,
     retry_failed_course_import_chapters,
+)
+from standalone.services.canvas import (
+    CanvasAPIError,
+    canvas_inbox_url,
+    canvas_link_is_stale,
+    canvas_magic_link_absolute_url,
+    create_canvas_embed_launch_page,
+    issue_canvas_magic_link,
+    normalized_canvas_search_text,
+    require_canvas_api_config,
+    send_canvas_magic_link_message,
+    sync_canvas_course_link_with_error_state,
+)
+from standalone.services.canvas_practice import (
+    draft_canvas_preview_written_answer,
+    request_canvas_preview_quiz,
+    reset_canvas_preview_state,
+    send_canvas_preview_chat_message,
+    serialize_canvas_preview_state,
+    submit_canvas_preview_answer,
 )
 from standalone.services.demo_mode import (
     cancel_demo_validation_practice,
@@ -268,6 +308,10 @@ def _is_student(user: User) -> bool:
     return user.is_authenticated and user.role == User.Role.STUDENT
 
 
+def _is_internal_admin(user: User) -> bool:
+    return user.is_authenticated and (user.role == User.Role.INTERNAL or user.is_superuser)
+
+
 def _celery_is_enabled() -> bool:
     return bool(settings.CELERY_BROKER_URL or settings.CELERY_TASK_ALWAYS_EAGER)
 
@@ -412,6 +456,12 @@ def _teacher_course_or_404(user: User, course_id: int) -> Course:
     return get_object_or_404(queryset.select_related("config", "teacher"), pk=course_id)
 
 
+def _internal_course_or_404(user: User, course_id: int) -> Course:
+    if not _is_internal_admin(user):
+        raise Http404
+    return get_object_or_404(Course.objects.select_related("config", "teacher"), pk=course_id)
+
+
 def _teacher_block_or_404(user: User, block_id: int) -> CourseBlock:
     block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id)
     _teacher_course_or_404(user, block.course_id)
@@ -428,6 +478,14 @@ def _teacher_resource_or_404(user: User, resource_id: int) -> BlockResource:
     resource = get_object_or_404(BlockResource.objects.select_related("block__course"), pk=resource_id)
     _teacher_course_or_404(user, resource.block.course_id)
     return resource
+
+
+def _internal_canvas_link_or_404(user: User, link_id: int) -> CanvasCourseLink:
+    if not _is_internal_admin(user):
+        raise Http404
+    link = get_object_or_404(CanvasCourseLink.objects.select_related("course", "course__config"), pk=link_id)
+    _internal_course_or_404(user, link.course_id)
+    return link
 
 
 def _student_enrollment_or_404(user: User, course_id: int) -> Enrollment:
@@ -1102,6 +1160,735 @@ def _demo_access_context(request: HttpRequest, access: CourseDemoAccess) -> dict
     }
 
 
+def _canvas_return_url_hint(request: HttpRequest) -> str:
+    return str(request.GET.get("canvas_page_url") or request.POST.get("canvas_page_url") or request.GET.get("return_url") or request.POST.get("return_url") or "").strip()
+
+
+def _canvas_launch_query_string(
+    *,
+    canvas_course_id: int,
+    embed: bool = False,
+    canvas_page_url: str = "",
+    launch_code: str = "",
+) -> str:
+    params = {"canvas_course_id": str(canvas_course_id)}
+    if embed:
+        params["embed"] = "1"
+    normalized_return_url = str(canvas_page_url or "").strip()
+    if normalized_return_url:
+        params["canvas_page_url"] = normalized_return_url
+    launch_code_value = str(launch_code or "").strip()
+    if launch_code_value:
+        params["launch_code"] = launch_code_value
+    return f"?{urlencode(params)}"
+
+
+def _canvas_launch_url(
+    link: CanvasCourseLink,
+    *,
+    embed: bool = False,
+    canvas_page_url: str = "",
+    launch_code: str = "",
+) -> str:
+    return (
+        f"{reverse('standalone:canvas_launch')}"
+        f"{_canvas_launch_query_string(canvas_course_id=link.canvas_course_id, embed=embed, canvas_page_url=canvas_page_url, launch_code=launch_code)}"
+    )
+
+
+def _canvas_app_query_string(
+    *,
+    embed: bool = False,
+    parent_origin: str = "",
+    launch_token: str = "",
+    origin_token: str = "",
+    embed_session_token: str = "",
+    block_id: int | None = None,
+    canvas_page_url: str = "",
+) -> str:
+    params: dict[str, str] = {}
+    if embed:
+        params["embed"] = "1"
+    normalized_parent_origin = _normalized_origin(parent_origin)
+    if normalized_parent_origin:
+        params["parent_origin"] = normalized_parent_origin
+    launch_token_value = str(launch_token or "").strip()
+    if launch_token_value:
+        params["launch_token"] = launch_token_value
+    origin_token_value = str(origin_token or "").strip()
+    if origin_token_value:
+        params["origin_token"] = origin_token_value
+    embed_session_token_value = str(embed_session_token or "").strip()
+    if embed_session_token_value:
+        params["embed_session"] = embed_session_token_value
+    normalized_return_url = str(canvas_page_url or "").strip()
+    if normalized_return_url:
+        params["canvas_page_url"] = normalized_return_url
+    if block_id:
+        params["block"] = str(int(block_id))
+    if not params:
+        return ""
+    return f"?{urlencode(params)}"
+
+
+def _canvas_app_url(
+    link: CanvasCourseLink,
+    *,
+    embed: bool = False,
+    parent_origin: str = "",
+    launch_token: str = "",
+    origin_token: str = "",
+    embed_session_token: str = "",
+    block_id: int | None = None,
+    canvas_page_url: str = "",
+) -> str:
+    return (
+        f"{reverse('standalone:canvas_app', args=[link.pk])}"
+        f"{_canvas_app_query_string(embed=embed, parent_origin=parent_origin, launch_token=launch_token, origin_token=origin_token, embed_session_token=embed_session_token, block_id=block_id, canvas_page_url=canvas_page_url)}"
+    )
+
+
+def _canvas_iframe_snippet(request: HttpRequest, link: CanvasCourseLink) -> str:
+    canvas_page_url = _validated_canvas_return_url(link, link.canvas_page_url)
+    src = request.build_absolute_uri(
+        _canvas_launch_url(link, embed=True, canvas_page_url=canvas_page_url)
+    )
+    escaped_src = html.escape(src, quote=True)
+    escaped_title = html.escape(f"{link.course.title} Canvas launch", quote=True)
+    return (
+        '<p><iframe style="overflow: hidden; background: #ffffff; border: 0px none currentcolor;" '
+        f'title="{escaped_title}" src="{escaped_src}" width="100%" height="900" loading="lazy" referrerpolicy="unsafe-url"></iframe></p>'
+    )
+
+
+def _canvas_link_context(request: HttpRequest, link: CanvasCourseLink) -> dict:
+    canvas_page_url = _validated_canvas_return_url(link, link.canvas_page_url)
+    return {
+        "launch_url": request.build_absolute_uri(_canvas_launch_url(link)),
+        "embed_url": request.build_absolute_uri(_canvas_launch_url(link, embed=True, canvas_page_url=canvas_page_url)),
+        "iframe_snippet": _canvas_iframe_snippet(request, link),
+        "inbox_url": canvas_inbox_url(),
+    }
+
+
+def _canvas_return_url_matches_course(link: CanvasCourseLink, path: str | None) -> bool:
+    candidate_path = f"/{str(path or '/').lstrip('/')}"
+    course_prefix = f"/courses/{int(link.canvas_course_id)}"
+    return candidate_path == course_prefix or candidate_path.startswith(f"{course_prefix}/")
+
+
+def _validated_canvas_return_url(link: CanvasCourseLink, raw_url: str | None) -> str:
+    candidate = str(raw_url or "").strip()
+    if not candidate:
+        return ""
+    parts = urlsplit(candidate)
+    normalized_origin = _normalized_origin(candidate)
+    if not normalized_origin or normalized_origin != link.allowed_iframe_origin:
+        return ""
+    path = parts.path or "/"
+    if not _canvas_return_url_matches_course(link, path):
+        return ""
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, parts.fragment))
+
+
+def _canvas_request_referer(request: HttpRequest) -> str:
+    return str(request.headers.get("Referer") or request.META.get("HTTP_REFERER") or "").strip()
+
+
+def _remember_canvas_page_url(request: HttpRequest, link: CanvasCourseLink) -> str:
+    candidate = _validated_canvas_return_url(link, _canvas_request_referer(request))
+    if not candidate:
+        return ""
+    if candidate != str(link.canvas_page_url or "").strip():
+        CanvasCourseLink.objects.filter(pk=link.pk).update(canvas_page_url=candidate, updated_at=timezone.now())
+        link.canvas_page_url = candidate
+    return candidate
+
+
+def _canvas_embed_mode(request: HttpRequest) -> bool:
+    if request.GET.get("embed") == "1":
+        return True
+    if request.POST.get("embed") in {"1", "true", "True", "on", "yes"}:
+        return True
+    return any(
+        str(request.headers.get(header) or "").strip()
+        for header in (
+            "X-Canvas-Embed-Origin-Token",
+            "X-Canvas-Embed-Parent-Origin",
+            "X-Canvas-Embed-Session",
+            "X-Canvas-Launch-Token",
+        )
+    )
+
+
+def _canvas_embed_origin_token(request: HttpRequest) -> str:
+    return (
+        str(request.GET.get("origin_token") or "").strip()
+        or str(request.POST.get("origin_token") or "").strip()
+        or str(request.headers.get("X-Canvas-Embed-Origin-Token") or "").strip()
+    )
+
+
+def _canvas_embed_parent_origin_hint(request: HttpRequest) -> str:
+    return (
+        _normalized_origin(request.GET.get("parent_origin"))
+        or _normalized_origin(request.POST.get("parent_origin"))
+        or _normalized_origin(request.headers.get("X-Canvas-Embed-Parent-Origin"))
+    )
+
+
+def _canvas_embed_launch_token(request: HttpRequest) -> str:
+    return (
+        str(request.GET.get("launch_token") or "").strip()
+        or str(request.POST.get("launch_token") or "").strip()
+        or str(request.headers.get("X-Canvas-Launch-Token") or "").strip()
+    )
+
+
+def _canvas_embed_origin_session_key(link: CanvasCourseLink) -> str:
+    return f"standalone:canvas-embed-origin:{link.pk}"
+
+
+def _cached_canvas_embed_origin(request: HttpRequest, link: CanvasCourseLink) -> str:
+    if not hasattr(request, "session"):
+        return ""
+    return str(request.session.get(_canvas_embed_origin_session_key(link), "")).strip()
+
+
+def _store_canvas_embed_origin(request: HttpRequest, link: CanvasCourseLink, origin: str) -> None:
+    if not hasattr(request, "session"):
+        return
+    request.session[_canvas_embed_origin_session_key(link)] = origin
+
+
+def _canvas_embed_parent_origin_authorized(
+    request: HttpRequest,
+    link: CanvasCourseLink,
+    *,
+    request_origin: str | None = None,
+) -> bool:
+    parent_origin = _canvas_embed_parent_origin_hint(request)
+    if parent_origin != link.allowed_iframe_origin:
+        return False
+    effective_request_origin = request_origin if request_origin is not None else _demo_embed_origin_from_request(request)
+    return _request_origin_matches_app_origin(request, effective_request_origin) or effective_request_origin == parent_origin
+
+
+def _signed_canvas_launch_token(link: CanvasCourseLink) -> str:
+    return signing.dumps(
+        {"link_id": link.pk},
+        salt="standalone.canvas-launch",
+        compress=True,
+    )
+
+
+def _canvas_launch_token_valid(link: CanvasCourseLink, token: str) -> bool:
+    candidate = str(token or "").strip()
+    if not candidate:
+        return False
+    try:
+        payload = signing.loads(
+            candidate,
+            salt="standalone.canvas-launch",
+            max_age=60 * 60 * 8,
+        )
+    except signing.BadSignature:
+        return False
+    return int(payload.get("link_id") or 0) == int(link.pk)
+
+
+def _canvas_embed_launch_token_authorized(
+    request: HttpRequest,
+    link: CanvasCourseLink,
+) -> bool:
+    if not _canvas_launch_token_valid(link, _canvas_embed_launch_token(request)):
+        return False
+    parent_origin = _canvas_embed_parent_origin_hint(request)
+    if parent_origin != link.allowed_iframe_origin:
+        return False
+    return True
+
+
+def _canvas_embed_request_authorized(request: HttpRequest, link: CanvasCourseLink) -> bool:
+    if not _canvas_embed_mode(request):
+        return True
+    request_origin = _demo_embed_origin_from_request(request)
+    if request_origin and request_origin == link.allowed_iframe_origin:
+        _store_canvas_embed_origin(request, link, request_origin)
+        return True
+    if _canvas_embed_parent_origin_authorized(request, link, request_origin=request_origin):
+        _store_canvas_embed_origin(request, link, link.allowed_iframe_origin)
+        return True
+    if _canvas_embed_launch_token_authorized(request, link):
+        _store_canvas_embed_origin(request, link, link.allowed_iframe_origin)
+        return True
+    token_origin = _canvas_embed_origin_from_token(link, _canvas_embed_origin_token(request))
+    if token_origin == link.allowed_iframe_origin:
+        _store_canvas_embed_origin(request, link, token_origin)
+        return True
+    cached_origin = _cached_canvas_embed_origin(request, link)
+    if cached_origin == link.allowed_iframe_origin:
+        if not request_origin or _request_origin_matches_app_origin(request, request_origin) or request_origin == cached_origin:
+            return True
+    return False
+
+
+def _log_canvas_embed_authorization_failure(request: HttpRequest, link: CanvasCourseLink, *, endpoint: str) -> None:
+    request_origin = _demo_embed_origin_from_request(request)
+    parent_origin = _canvas_embed_parent_origin_hint(request)
+    logger.warning(
+        "Canvas embed authorization failed for %s: course_id=%s link_id=%s request_origin=%r parent_origin=%r "
+        "allowed_iframe_origin=%r has_origin_token=%s has_launch_token=%s has_cached_origin=%s embed_mode=%s host=%r scheme=%r",
+        endpoint,
+        link.canvas_course_id,
+        link.pk,
+        request_origin,
+        parent_origin,
+        link.allowed_iframe_origin,
+        bool(_canvas_embed_origin_token(request)),
+        bool(_canvas_embed_launch_token(request)),
+        bool(_cached_canvas_embed_origin(request, link)),
+        _canvas_embed_mode(request),
+        request.get_host(),
+        request.scheme,
+    )
+
+
+def _blocked_canvas_embed_response_if_needed(request: HttpRequest, link: CanvasCourseLink) -> HttpResponse | None:
+    if not _canvas_embed_mode(request):
+        return None
+    request_origin = _demo_embed_origin_from_request(request)
+    if request_origin and request_origin == link.allowed_iframe_origin:
+        _store_canvas_embed_origin(request, link, request_origin)
+        return None
+    token_origin = _canvas_embed_origin_from_token(link, _canvas_embed_origin_token(request))
+    if token_origin == link.allowed_iframe_origin:
+        _store_canvas_embed_origin(request, link, token_origin)
+        if not request_origin or _request_origin_matches_app_origin(request, request_origin) or request_origin == token_origin:
+            return None
+    cached_origin = _cached_canvas_embed_origin(request, link)
+    if cached_origin == link.allowed_iframe_origin:
+        if not request_origin or _request_origin_matches_app_origin(request, request_origin) or request_origin == cached_origin:
+            return None
+    if request_origin:
+        return _canvas_embed_blocked_response(
+            request,
+            link,
+            reason="This Canvas embedding origin is not allowed for this BioBoost course.",
+        )
+    return None
+
+
+def _canvas_embed_blocked_response(request: HttpRequest, link: CanvasCourseLink, *, reason: str) -> HttpResponse:
+    response = render(
+        request,
+        "standalone/demo_embed_blocked.html",
+        {
+            "course": link.course,
+            "is_demo_mode": False,
+            "is_embed_mode": True,
+            "demo_mode_label": "Canvas launch",
+            "demo_home_url": "#",
+            "blocked_reason": reason,
+        },
+        status=403,
+    )
+    if link.allowed_iframe_origin:
+        response["Content-Security-Policy"] = f"frame-ancestors 'self' {link.allowed_iframe_origin}"
+    return response
+
+
+def _canvas_link_by_course_id_or_404(course_id: int) -> CanvasCourseLink:
+    return get_object_or_404(
+        CanvasCourseLink.objects.select_related("course", "course__config"),
+        canvas_course_id=course_id,
+        is_active=True,
+        course__is_active=True,
+    )
+
+
+def _signed_canvas_embed_origin(link: CanvasCourseLink, origin: str) -> str:
+    normalized_origin = str(origin or "").strip()
+    if normalized_origin != link.allowed_iframe_origin:
+        return ""
+    return signing.dumps(
+        {"link_id": link.pk, "origin": normalized_origin},
+        salt="standalone.canvas-embed-origin",
+        compress=True,
+    )
+
+
+def _canvas_embed_origin_from_token(link: CanvasCourseLink, token: str) -> str:
+    candidate = str(token or "").strip()
+    if not candidate:
+        return ""
+    try:
+        payload = signing.loads(
+            candidate,
+            salt="standalone.canvas-embed-origin",
+            max_age=60 * 60 * 24 * 30,
+        )
+    except signing.BadSignature:
+        return ""
+    if int(payload.get("link_id") or 0) != int(link.pk):
+        return ""
+    origin = str(payload.get("origin") or "").strip()
+    if origin != link.allowed_iframe_origin:
+        return ""
+    return origin
+
+
+def _canvas_embed_origin_token_for_request(request: HttpRequest, link: CanvasCourseLink) -> str:
+    request_origin = _demo_embed_origin_from_request(request)
+    if request_origin == link.allowed_iframe_origin:
+        return _signed_canvas_embed_origin(link, request_origin)
+    if _canvas_embed_launch_token_authorized(request, link):
+        return _signed_canvas_embed_origin(link, link.allowed_iframe_origin)
+    token_origin = _canvas_embed_origin_from_token(link, _canvas_embed_origin_token(request))
+    if token_origin == link.allowed_iframe_origin:
+        return _signed_canvas_embed_origin(link, token_origin)
+    cached_origin = _cached_canvas_embed_origin(request, link)
+    if cached_origin == link.allowed_iframe_origin:
+        return _signed_canvas_embed_origin(link, cached_origin)
+    return ""
+
+
+def _canvas_embed_origin_token_url(link: CanvasCourseLink, *, embed: bool = False) -> str:
+    url = reverse("standalone:canvas_embed_origin_token")
+    params: dict[str, str] = {"canvas_course_id": str(link.canvas_course_id)}
+    if embed:
+        params["embed"] = "1"
+    return f"{url}?{urlencode(params)}"
+
+
+def _apply_no_store(response: HttpResponse) -> HttpResponse:
+    response["Cache-Control"] = "no-store"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
+    return response
+
+
+def _canvas_embed_launch_query_key() -> str:
+    return "bioboost_launch"
+
+
+def _canvas_embed_session_hash(raw_token: str) -> str:
+    return hmac.new(
+        settings.SECRET_KEY.encode("utf-8"),
+        str(raw_token or "").strip().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _canvas_embed_session_token(request: HttpRequest) -> str:
+    return (
+        str(request.headers.get("X-Canvas-Embed-Session") or "").strip()
+        or str(request.GET.get("embed_session") or "").strip()
+        or str(request.POST.get("embed_session") or "").strip()
+    )
+
+
+def _canvas_page_url_with_launch_code(canvas_page_url: str, launch_code: CanvasEmbedLaunchCode) -> str:
+    parts = urlsplit(str(canvas_page_url or "").strip())
+    params = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != _canvas_embed_launch_query_key()]
+    params.append((_canvas_embed_launch_query_key(), str(launch_code.token)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+
+
+def _canvas_embed_launch_page_url(
+    request: HttpRequest,
+    membership: CanvasCourseMembership,
+    *,
+    canvas_page_url: str,
+    launch_code: CanvasEmbedLaunchCode,
+) -> str:
+    launch_url = request.build_absolute_uri(
+        _canvas_launch_url(
+            membership.canvas_course_link,
+            embed=True,
+            canvas_page_url=canvas_page_url,
+            launch_code=str(launch_code.token),
+        )
+    )
+    return create_canvas_embed_launch_page(
+        membership.canvas_course_link,
+        launch_url=launch_url,
+        page_key=str(launch_code.token),
+    )
+
+
+def _issue_canvas_embed_launch_code(membership: CanvasCourseMembership, *, canvas_page_url: str) -> CanvasEmbedLaunchCode:
+    now = timezone.now()
+    CanvasEmbedLaunchCode.objects.filter(
+        membership=membership,
+        canvas_course_link=membership.canvas_course_link,
+        used_at__isnull=True,
+        superseded_at__isnull=True,
+    ).update(superseded_at=now, updated_at=now)
+    return CanvasEmbedLaunchCode.objects.create(
+        membership=membership,
+        canvas_course_link=membership.canvas_course_link,
+        canvas_page_url=str(canvas_page_url or "").strip(),
+        expires_at=CanvasEmbedLaunchCode.default_expiry(),
+    )
+
+
+def _issue_canvas_embed_session(membership: CanvasCourseMembership) -> tuple[CanvasEmbedSession, str]:
+    raw_token = secrets.token_urlsafe(32)
+    embed_session = CanvasEmbedSession.objects.create(
+        membership=membership,
+        canvas_course_link=membership.canvas_course_link,
+        token_hash=_canvas_embed_session_hash(raw_token),
+        expires_at=CanvasEmbedSession.default_expiry(),
+        last_used_at=timezone.now(),
+    )
+    return embed_session, raw_token
+
+
+def _revoke_canvas_embed_session(embed_session: CanvasEmbedSession) -> None:
+    if embed_session.revoked_at is not None:
+        return
+    embed_session.revoked_at = timezone.now()
+    embed_session.save(update_fields=["revoked_at", "updated_at"])
+
+
+def _rotate_canvas_embed_session(embed_session: CanvasEmbedSession) -> tuple[CanvasEmbedSession, str]:
+    membership = embed_session.membership
+    _revoke_canvas_embed_session(embed_session)
+    return _issue_canvas_embed_session(membership)
+
+
+def _canvas_embed_session_for_request(
+    request: HttpRequest,
+    link: CanvasCourseLink,
+) -> tuple[CanvasEmbedSession | None, bool, str]:
+    raw_token = _canvas_embed_session_token(request)
+    if not raw_token:
+        return None, False, ""
+    embed_session = CanvasEmbedSession.objects.select_related("membership__canvas_course_link__course", "membership__canvas_user").filter(
+        token_hash=_canvas_embed_session_hash(raw_token),
+        canvas_course_link=link,
+    ).first()
+    if embed_session is None:
+        return None, False, raw_token
+    if embed_session.revoked_at is not None:
+        return None, False, raw_token
+    if embed_session.expires_at <= timezone.now():
+        if embed_session.revoked_at is None:
+            embed_session.revoked_at = timezone.now()
+            embed_session.save(update_fields=["revoked_at", "updated_at"])
+        return None, True, raw_token
+    embed_session.last_used_at = timezone.now()
+    embed_session.save(update_fields=["last_used_at", "updated_at"])
+    return embed_session, False, raw_token
+
+
+def _canvas_request_client_ip(request: HttpRequest) -> str:
+    forwarded_for = str(request.headers.get("X-Forwarded-For") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return str(request.META.get("REMOTE_ADDR") or "").strip() or "unknown"
+
+
+def _canvas_password_rate_limit_key(request: HttpRequest, identity: CanvasUserIdentity, link: CanvasCourseLink) -> str:
+    return f"standalone:canvas-password-attempts:{identity.pk}:{link.pk}:{_canvas_request_client_ip(request)}"
+
+
+def _canvas_password_rate_limited(request: HttpRequest, identity: CanvasUserIdentity, link: CanvasCourseLink) -> bool:
+    attempts = cache.get(_canvas_password_rate_limit_key(request, identity, link), 0)
+    try:
+        return int(attempts) >= 8
+    except (TypeError, ValueError):
+        return False
+
+
+def _record_canvas_password_failure(request: HttpRequest, identity: CanvasUserIdentity, link: CanvasCourseLink) -> None:
+    key = _canvas_password_rate_limit_key(request, identity, link)
+    attempts = cache.get(key, 0)
+    try:
+        next_attempts = int(attempts) + 1
+    except (TypeError, ValueError):
+        next_attempts = 1
+    cache.set(key, next_attempts, timeout=15 * 60)
+
+
+def _clear_canvas_password_failures(request: HttpRequest, identity: CanvasUserIdentity, link: CanvasCourseLink) -> None:
+    cache.delete(_canvas_password_rate_limit_key(request, identity, link))
+
+
+def _canvas_password_prompt_state(request: HttpRequest) -> dict[str, dict[str, str]]:
+    state = request.session.get(_CANVAS_PASSWORD_PROMPT_SESSION_KEY)
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def _store_canvas_password_prompt_state(request: HttpRequest, state: dict[str, dict[str, str]]) -> None:
+    request.session[_CANVAS_PASSWORD_PROMPT_SESSION_KEY] = state
+    request.session.modified = True
+
+
+def _set_canvas_password_prompt(request: HttpRequest, identity: CanvasUserIdentity, *, kind: str) -> None:
+    state = _canvas_password_prompt_state(request)
+    state[str(identity.pk)] = {
+        "kind": kind,
+        "expires_at": (timezone.now() + timedelta(hours=12)).isoformat(),
+    }
+    _store_canvas_password_prompt_state(request, state)
+
+
+def _pop_canvas_password_prompt(request: HttpRequest, identity: CanvasUserIdentity) -> str:
+    state = _canvas_password_prompt_state(request)
+    entry = state.pop(str(identity.pk), None)
+    _store_canvas_password_prompt_state(request, state)
+    if not isinstance(entry, dict):
+        return ""
+    expires_at = parse_datetime(str(entry.get("expires_at") or ""))
+    if expires_at is None or expires_at <= timezone.now():
+        return ""
+    return str(entry.get("kind") or "").strip()
+
+
+def _clear_canvas_password_prompt(request: HttpRequest, identity: CanvasUserIdentity) -> None:
+    state = _canvas_password_prompt_state(request)
+    if str(identity.pk) in state:
+        state.pop(str(identity.pk), None)
+        _store_canvas_password_prompt_state(request, state)
+
+
+def _canvas_password_proof_state(request: HttpRequest) -> dict[str, dict[str, str]]:
+    state = request.session.get(_CANVAS_PASSWORD_PROOF_SESSION_KEY)
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def _store_canvas_password_proof_state(request: HttpRequest, state: dict[str, dict[str, str]]) -> None:
+    request.session[_CANVAS_PASSWORD_PROOF_SESSION_KEY] = state
+    request.session.modified = True
+
+
+def _mark_canvas_password_magic_proof(request: HttpRequest, identity: CanvasUserIdentity) -> None:
+    state = _canvas_password_proof_state(request)
+    state[str(identity.pk)] = {
+        "expires_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+    }
+    _store_canvas_password_proof_state(request, state)
+
+
+def _canvas_password_magic_proof_valid(request: HttpRequest, identity: CanvasUserIdentity) -> bool:
+    state = _canvas_password_proof_state(request)
+    entry = state.get(str(identity.pk))
+    if not isinstance(entry, dict):
+        return False
+    expires_at = parse_datetime(str(entry.get("expires_at") or ""))
+    if expires_at is None or expires_at <= timezone.now():
+        state.pop(str(identity.pk), None)
+        _store_canvas_password_proof_state(request, state)
+        return False
+    return True
+
+
+def _clear_canvas_password_magic_proof(request: HttpRequest, identity: CanvasUserIdentity) -> None:
+    state = _canvas_password_proof_state(request)
+    if str(identity.pk) in state:
+        state.pop(str(identity.pk), None)
+        _store_canvas_password_proof_state(request, state)
+
+
+def _canvas_auth_state(request: HttpRequest) -> dict[str, dict[str, str]]:
+    state = request.session.get(_CANVAS_SESSION_KEY)
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def _store_canvas_auth_state(request: HttpRequest, state: dict[str, dict[str, str]]) -> None:
+    request.session[_CANVAS_SESSION_KEY] = state
+    request.session.modified = True
+
+
+def _set_canvas_membership_session(request: HttpRequest, membership: CanvasCourseMembership) -> None:
+    state = _canvas_auth_state(request)
+    expires_at = timezone.now() + timedelta(hours=settings.CANVAS_SESSION_EXPIRY_HOURS)
+    state[str(membership.canvas_course_link_id)] = {
+        "membership_id": str(membership.pk),
+        "expires_at": expires_at.isoformat(),
+    }
+    _store_canvas_auth_state(request, state)
+
+
+def _canvas_authenticated_membership(
+    request: HttpRequest,
+    link: CanvasCourseLink,
+) -> tuple[CanvasCourseMembership | None, bool, str, str]:
+    state = _canvas_auth_state(request)
+    entry = state.get(str(link.pk))
+    if not isinstance(entry, dict):
+        membership = None
+        session_expired = False
+    else:
+        expires_at = parse_datetime(str(entry.get("expires_at") or ""))
+        if expires_at is None or expires_at <= timezone.now():
+            state.pop(str(link.pk), None)
+            _store_canvas_auth_state(request, state)
+            membership = None
+            session_expired = True
+        else:
+            membership_id = int(entry.get("membership_id") or 0)
+            membership = CanvasCourseMembership.objects.select_related("canvas_course_link__course", "canvas_user").filter(
+                pk=membership_id,
+                canvas_course_link=link,
+            ).first()
+            if membership is None:
+                state.pop(str(link.pk), None)
+                _store_canvas_auth_state(request, state)
+                session_expired = False
+            else:
+                return membership, False, "session", ""
+    embed_session, embed_expired, raw_token = _canvas_embed_session_for_request(request, link)
+    if embed_session is not None:
+        return embed_session.membership, False, "embed_session", raw_token
+    return None, bool(session_expired or embed_expired), "", raw_token
+
+
+def _canvas_password_prompt_context(request: HttpRequest, identity: CanvasUserIdentity) -> dict[str, str] | None:
+    prompt_kind = _pop_canvas_password_prompt(request, identity)
+    if prompt_kind == "set":
+        return {
+            "title": "Set a password for next time",
+            "message": "You can keep using Canvas magic links, or set a BioBoost password for faster access next time.",
+        }
+    if prompt_kind == "manage":
+        return {
+            "title": "Manage your Canvas sign-in",
+            "message": "You recently signed in with a magic link. If you forgot your password, set a new one now.",
+        }
+    return None
+
+
+def _canvas_app_url_for_request(
+    request: HttpRequest,
+    link: CanvasCourseLink,
+    *,
+    block_id: int | None = None,
+    canvas_page_url: str = "",
+    embed_session_token: str = "",
+) -> str:
+    if _canvas_embed_mode(request):
+        return _canvas_app_url(
+            link,
+            embed=True,
+            parent_origin=link.allowed_iframe_origin,
+            launch_token=_signed_canvas_launch_token(link),
+            origin_token=_canvas_embed_origin_token_for_request(request, link),
+            embed_session_token=embed_session_token,
+            block_id=block_id,
+            canvas_page_url=canvas_page_url,
+        )
+    return _canvas_app_url(link, embed_session_token=embed_session_token, block_id=block_id, canvas_page_url=canvas_page_url)
+
+
 def _demo_access_or_404(token) -> CourseDemoAccess:
     access = get_object_or_404(
         CourseDemoAccess.objects.select_related("course", "course__config"),
@@ -1111,6 +1898,687 @@ def _demo_access_or_404(token) -> CourseDemoAccess:
     if not access.course.config.demo_enabled:
         raise Http404
     return access
+
+
+@login_required
+def course_canvas_links(request: HttpRequest, course_id: int) -> HttpResponse:
+    course = _internal_course_or_404(request.user, course_id)
+    links = list(course.canvas_links.order_by("canvas_course_id"))
+    for link in links:
+        link.canvas_context = _canvas_link_context(request, link)
+        link.edit_form = CanvasCourseLinkForm(instance=link)
+    form = CanvasCourseLinkForm(request.POST or None, include_is_active=False)
+    if request.method == "POST" and form.is_valid():
+        try:
+            require_canvas_api_config()
+            link = form.save(commit=False)
+            link.course = course
+            link.save()
+            sync_canvas_course_link_with_error_state(link)
+        except CanvasAPIError as error:
+            form.add_error(None, str(error))
+            if "link" in locals() and getattr(link, "pk", None):
+                link.delete()
+        else:
+            messages.success(request, f"Linked Canvas course {link.canvas_course_id}.")
+            return redirect("standalone:course_canvas_links", course.pk)
+    context = {
+        "course": course,
+        "links": links,
+        "create_form": form,
+        "canvas_configured": bool(settings.CANVAS_API_URL and settings.CANVAS_API_TOKEN),
+    }
+    return render(request, "standalone/canvas_course_links.html", context)
+
+
+@login_required
+def course_canvas_link_update(request: HttpRequest, link_id: int) -> HttpResponse:
+    if request.method != "POST":
+        raise Http404
+    link = _internal_canvas_link_or_404(request.user, link_id)
+    form = CanvasCourseLinkForm(request.POST, instance=link)
+    if form.is_valid():
+        form.save()
+        messages.success(request, f"Updated Canvas course link {link.canvas_course_id}.")
+    else:
+        for errors in form.errors.values():
+            for error in errors:
+                messages.error(request, error)
+    return redirect("standalone:course_canvas_links", link.course_id)
+
+
+@login_required
+def course_canvas_link_sync(request: HttpRequest, link_id: int) -> HttpResponse:
+    if request.method != "POST":
+        raise Http404
+    link = _internal_canvas_link_or_404(request.user, link_id)
+    try:
+        result = sync_canvas_course_link_with_error_state(link)
+    except CanvasAPIError as error:
+        messages.error(request, str(error))
+    else:
+        messages.success(request, f"Synced {result.membership_count} Canvas membership(s).")
+    return redirect("standalone:course_canvas_links", link.course_id)
+
+
+@ensure_csrf_cookie
+@xframe_options_exempt
+def canvas_launch(request: HttpRequest) -> HttpResponse:
+    canvas_course_id = int(request.GET.get("canvas_course_id") or 0)
+    if canvas_course_id <= 0:
+        raise Http404
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    remembered_return_url = _remember_canvas_page_url(request, link)
+    explicit_return_url = _validated_canvas_return_url(link, _canvas_return_url_hint(request)) or remembered_return_url
+    blocked = _blocked_canvas_embed_response_if_needed(request, link)
+    if blocked is not None:
+        return blocked
+
+    launch_error = ""
+    if canvas_link_is_stale(link):
+        try:
+            sync_canvas_course_link_with_error_state(link)
+            link.refresh_from_db()
+        except CanvasAPIError as error:
+            launch_error = str(error)
+
+    response = render(
+        request,
+        "standalone/canvas_launch.html",
+        {
+            "canvas_link": link,
+            "is_embed_mode": _canvas_embed_mode(request),
+            "lookup_url": reverse("standalone:canvas_lookup"),
+            "send_link_url": reverse("standalone:canvas_send_link"),
+            "exchange_launch_code_url": reverse("standalone:canvas_exchange_launch_code"),
+            "embed_session_refresh_url": reverse("standalone:canvas_embed_session_refresh"),
+            "canvas_inbox_url": canvas_inbox_url(),
+            "allowed_origin": link.allowed_iframe_origin if _canvas_embed_mode(request) else "",
+            "launch_token": _signed_canvas_launch_token(link) if _canvas_embed_mode(request) else "",
+            "origin_token": _canvas_embed_origin_token_for_request(request, link) if _canvas_embed_mode(request) else "",
+            "origin_token_url": _canvas_embed_origin_token_url(link, embed=True) if _canvas_embed_mode(request) else "",
+            "canvas_page_url": explicit_return_url,
+            "launch_error": launch_error or link.last_sync_error or (
+                "This Canvas course link needs a valid Canvas course page URL that includes /courses/"
+                f"{link.canvas_course_id}/ before in-Canvas sign-in will work."
+                if not _validated_canvas_return_url(link, link.canvas_page_url)
+                else ""
+            ),
+            "membership_count": link.memberships.count(),
+        },
+    )
+    if _canvas_embed_mode(request):
+        response["Content-Security-Policy"] = f"frame-ancestors 'self' {link.allowed_iframe_origin}"
+    return _apply_no_store(response)
+
+
+@csrf_exempt
+def canvas_lookup(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    canvas_course_id = int(request.POST.get("canvas_course_id") or 0)
+    query = str(request.POST.get("query") or "").strip()
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_lookup")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    if len(query) < 2:
+        return JsonResponse({"ok": False, "error": "Enter at least two characters."}, status=400)
+    tokens = [token for token in normalized_canvas_search_text(query).split(" ") if token]
+    matches = []
+    for membership in link.memberships.select_related("canvas_user").order_by("canvas_user__sortable_name", "canvas_user__display_name"):
+        if not all(token in membership.canvas_user.search_text for token in tokens):
+            continue
+        matches.append(
+            {
+                "membership_id": membership.pk,
+                "display_name": membership.canvas_user.display_name or membership.canvas_user.sortable_name,
+                "sortable_name": membership.canvas_user.sortable_name,
+                "role": membership.canvas_role,
+                "has_password": membership.canvas_user.has_canvas_password,
+            }
+        )
+        if len(matches) >= 10:
+            break
+    return JsonResponse({"ok": True, "matches": matches})
+
+
+@csrf_exempt
+def canvas_embed_origin_token(request: HttpRequest) -> JsonResponse:
+    if request.method not in {"GET", "POST"}:
+        raise Http404
+    canvas_course_id = int(request.GET.get("canvas_course_id") or request.POST.get("canvas_course_id") or 0)
+    if canvas_course_id <= 0:
+        return JsonResponse({"ok": False, "error": "Missing Canvas course ID."}, status=400)
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if not _canvas_embed_mode(request):
+        return JsonResponse({"ok": False, "error": "Embed mode is required for this handoff."}, status=400)
+    request_origin = _demo_embed_origin_from_request(request)
+    if not _request_origin_matches_app_origin(request, request_origin) and not _canvas_embed_launch_token_authorized(request, link):
+        return JsonResponse(
+            {"ok": False, "error": "This token request must come from the embedded Canvas launch page."},
+            status=403,
+        )
+    parent_origin = _canvas_embed_parent_origin_hint(request)
+    if not parent_origin:
+        return JsonResponse({"ok": False, "error": "Missing parent origin."}, status=400)
+    if parent_origin != link.allowed_iframe_origin:
+        return JsonResponse(
+            {"ok": False, "error": "This Canvas embedding origin is not allowed for this BioBoost course."},
+            status=403,
+        )
+    origin_token = _signed_canvas_embed_origin(link, parent_origin)
+    if not origin_token:
+        return JsonResponse(
+            {"ok": False, "error": "Unable to issue an embed origin token for this request."},
+            status=400,
+        )
+    _store_canvas_embed_origin(request, link, parent_origin)
+    return JsonResponse({"ok": True, "origin_token": origin_token, "parent_origin": parent_origin})
+
+
+@csrf_exempt
+def canvas_password_login(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    canvas_course_id = int(request.POST.get("canvas_course_id") or 0)
+    if canvas_course_id <= 0:
+        return JsonResponse({"ok": False, "error": "Missing Canvas course ID."}, status=400)
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_password_login")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    return JsonResponse(
+        {
+            "ok": False,
+            "error": "Canvas password sign-in has been retired. Request a new Canvas inbox link instead.",
+        },
+        status=410,
+    )
+
+
+@csrf_exempt
+def canvas_exchange_launch_code(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    canvas_course_id = int(request.POST.get("canvas_course_id") or 0)
+    if canvas_course_id <= 0:
+        return JsonResponse({"ok": False, "error": "Missing Canvas course ID."}, status=400)
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_exchange_launch_code")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    launch_code_token = str(request.POST.get("launch_code") or "").strip()
+    if not launch_code_token:
+        return JsonResponse({"ok": False, "error": "Missing launch code."}, status=400)
+    canvas_page_url = _validated_canvas_return_url(link, _canvas_return_url_hint(request)) or _remember_canvas_page_url(request, link)
+    with transaction.atomic():
+        launch_code = get_object_or_404(
+            CanvasEmbedLaunchCode.objects.select_for_update().select_related("membership__canvas_course_link__course", "membership__canvas_user"),
+            token=launch_code_token,
+            canvas_course_link=link,
+        )
+        if not launch_code.is_active:
+            return JsonResponse({"ok": False, "error": "This Canvas launch code has expired. Request a new Canvas inbox link."}, status=410)
+        if canvas_page_url != launch_code.canvas_page_url:
+            return JsonResponse({"ok": False, "error": "This Canvas launch code is not valid for the current Canvas page."}, status=403)
+        launch_code.used_at = timezone.now()
+        launch_code.save(update_fields=["used_at", "updated_at"])
+        _set_canvas_membership_session(request, launch_code.membership)
+        embed_session, raw_token = _issue_canvas_embed_session(launch_code.membership)
+    return JsonResponse(
+        {
+            "ok": True,
+            "app_url": _canvas_app_url_for_request(
+                request,
+                link,
+                canvas_page_url=launch_code.canvas_page_url,
+                embed_session_token=raw_token,
+            ),
+            "embed_session_token": raw_token,
+            "expires_at": embed_session.expires_at.isoformat(),
+        }
+    )
+
+
+@csrf_exempt
+def canvas_embed_session_refresh(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    canvas_course_id = int(request.POST.get("canvas_course_id") or 0)
+    if canvas_course_id <= 0:
+        return JsonResponse({"ok": False, "error": "Missing Canvas course ID."}, status=400)
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_embed_session_refresh")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    embed_session, expired, _raw_token = _canvas_embed_session_for_request(request, link)
+    if embed_session is None:
+        message = "Your Canvas BioBoost session has expired. Request a new Canvas inbox link."
+        if not expired:
+            message = "No Canvas BioBoost session was found for this browser."
+        return JsonResponse({"ok": False, "error": message}, status=403)
+    _set_canvas_membership_session(request, embed_session.membership)
+    rotated_session, next_raw_token = _rotate_canvas_embed_session(embed_session)
+    canvas_page_url = (
+        _validated_canvas_return_url(link, _canvas_return_url_hint(request))
+        or _remember_canvas_page_url(request, link)
+        or _validated_canvas_return_url(link, link.canvas_page_url)
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "app_url": _canvas_app_url_for_request(
+                request,
+                link,
+                canvas_page_url=canvas_page_url,
+                embed_session_token=next_raw_token,
+            ),
+            "embed_session_token": next_raw_token,
+            "expires_at": rotated_session.expires_at.isoformat(),
+        }
+    )
+
+
+@csrf_exempt
+def canvas_send_link(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    membership_id = int(request.POST.get("membership_id") or 0)
+    canvas_course_id = int(request.POST.get("canvas_course_id") or 0)
+    if membership_id <= 0 or canvas_course_id <= 0:
+        return JsonResponse({"ok": False, "error": "Choose one roster entry first."}, status=400)
+    link = _canvas_link_by_course_id_or_404(canvas_course_id)
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_send_link")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    membership = get_object_or_404(
+        CanvasCourseMembership.objects.select_related("canvas_course_link__course", "canvas_user"),
+        pk=membership_id,
+        canvas_course_link=link,
+    )
+    return_to_url = _validated_canvas_return_url(link, _canvas_return_url_hint(request))
+    if return_to_url and return_to_url != str(link.canvas_page_url or "").strip():
+        CanvasCourseLink.objects.filter(pk=link.pk).update(canvas_page_url=return_to_url, updated_at=timezone.now())
+        link.canvas_page_url = return_to_url
+    return_to_url = return_to_url or _remember_canvas_page_url(request, link) or _validated_canvas_return_url(link, link.canvas_page_url)
+    if not return_to_url:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": (
+                    "This Canvas course link needs a valid Canvas course page URL that includes "
+                    f"/courses/{link.canvas_course_id}/. Open BioBoost from the intended Canvas course page, "
+                    "or ask a teacher to update the Canvas link configuration."
+                ),
+            },
+            status=400,
+        )
+    try:
+        require_canvas_api_config()
+        magic_link = issue_canvas_magic_link(membership, return_to_url=return_to_url)
+        launch_code = _issue_canvas_embed_launch_code(membership, canvas_page_url=return_to_url)
+        launch_page_url = _canvas_embed_launch_page_url(
+            request,
+            membership,
+            canvas_page_url=return_to_url,
+            launch_code=launch_code,
+        )
+        send_canvas_magic_link_message(
+            magic_link,
+            absolute_magic_url=launch_page_url,
+        )
+    except CanvasAPIError as error:
+        return JsonResponse({"ok": False, "error": str(error)}, status=400)
+    return JsonResponse(
+        {
+            "ok": True,
+            "expires_at": magic_link.expires_at.isoformat(),
+            "inbox_url": canvas_inbox_url(),
+            "message": "A one-time launch link has been sent to your Canvas inbox.",
+        }
+    )
+
+
+def _canvas_reauth_context(
+    *,
+    link: CanvasCourseLink,
+    title: str,
+    message: str,
+    resend_url: str = "",
+    resent: bool = False,
+    canvas_return_url: str = "",
+) -> dict:
+    return {
+        "canvas_link": link,
+        "title": title,
+        "message": message,
+        "resend_url": resend_url,
+        "canvas_inbox_url": canvas_inbox_url(),
+        "canvas_return_url": canvas_return_url or _validated_canvas_return_url(link, link.canvas_page_url),
+        "launch_url": _canvas_launch_url(link),
+        "resent": resent,
+    }
+
+
+def canvas_magic(request: HttpRequest, token) -> HttpResponse:
+    magic_link = get_object_or_404(
+        CanvasMagicLink.objects.select_related("membership__canvas_course_link__course", "membership__canvas_user"),
+        token=token,
+    )
+    link = magic_link.membership.canvas_course_link
+    if magic_link.is_active:
+        magic_link.used_at = timezone.now()
+        magic_link.save(update_fields=["used_at", "updated_at"])
+        canvas_return_url = _validated_canvas_return_url(link, magic_link.return_to_url) or _validated_canvas_return_url(link, link.canvas_page_url)
+        if not canvas_return_url:
+            response = render(
+                request,
+                "standalone/canvas_magic_link_status.html",
+                _canvas_reauth_context(
+                    link=link,
+                    title="Canvas page required",
+                    message="This Canvas course link needs the full Canvas page URL before sign-in can continue inside Canvas.",
+                ),
+                status=409,
+            )
+            return _apply_no_store(response)
+        launch_code = _issue_canvas_embed_launch_code(magic_link.membership, canvas_page_url=canvas_return_url)
+        response = redirect(_canvas_page_url_with_launch_code(canvas_return_url, launch_code))
+        response.status_code = 303
+        return _apply_no_store(response)
+
+    message = "This login link has expired. Send a new one to your Canvas inbox to continue."
+    if magic_link.used_at is not None:
+        message = "This login link has already been used. Send a new one to your Canvas inbox to continue."
+    if magic_link.superseded_at is not None:
+        message = "A newer login link has already been sent. Use the newest Canvas inbox message, or send another fresh link."
+    response = render(
+        request,
+        "standalone/canvas_magic_link_status.html",
+        _canvas_reauth_context(
+            link=link,
+            title="Re-authentication required",
+            message=message,
+            resend_url=reverse("standalone:canvas_magic_resend", args=[magic_link.token]),
+            canvas_return_url=_validated_canvas_return_url(link, magic_link.return_to_url),
+        ),
+        status=410,
+    )
+    return _apply_no_store(response)
+
+
+def canvas_magic_resend(request: HttpRequest, token) -> HttpResponse:
+    if request.method != "POST":
+        raise Http404
+    magic_link = get_object_or_404(
+        CanvasMagicLink.objects.select_related("membership__canvas_course_link__course", "membership__canvas_user"),
+        token=token,
+    )
+    membership = magic_link.membership
+    link = membership.canvas_course_link
+    canvas_return_url = _validated_canvas_return_url(link, magic_link.return_to_url) or _validated_canvas_return_url(link, link.canvas_page_url)
+    if not canvas_return_url:
+        response = render(
+            request,
+            "standalone/canvas_magic_link_status.html",
+            _canvas_reauth_context(
+                link=link,
+                title="Canvas page required",
+                message="This Canvas course link needs the full Canvas page URL before sign-in can continue inside Canvas.",
+                canvas_return_url="",
+            ),
+            status=409,
+        )
+        return _apply_no_store(response)
+    try:
+        new_magic_link = issue_canvas_magic_link(membership, return_to_url=canvas_return_url)
+        launch_code = _issue_canvas_embed_launch_code(membership, canvas_page_url=canvas_return_url)
+        launch_page_url = _canvas_embed_launch_page_url(
+            request,
+            membership,
+            canvas_page_url=canvas_return_url,
+            launch_code=launch_code,
+        )
+        send_canvas_magic_link_message(
+            new_magic_link,
+            absolute_magic_url=launch_page_url,
+        )
+    except CanvasAPIError as error:
+        response = render(
+            request,
+            "standalone/canvas_magic_link_status.html",
+            _canvas_reauth_context(
+                link=link,
+                title="Re-authentication required",
+                message=str(error),
+                resend_url=reverse("standalone:canvas_magic_resend", args=[magic_link.token]),
+                canvas_return_url=_validated_canvas_return_url(link, magic_link.return_to_url),
+            ),
+            status=400,
+        )
+        return _apply_no_store(response)
+    response = render(
+        request,
+        "standalone/canvas_magic_link_status.html",
+        _canvas_reauth_context(
+            link=link,
+            title="New link sent",
+            message="A new one-time launch link has been sent to your Canvas inbox.",
+            resend_url=reverse("standalone:canvas_magic_resend", args=[new_magic_link.token]),
+            resent=True,
+            canvas_return_url=_validated_canvas_return_url(link, new_magic_link.return_to_url),
+        ),
+    )
+    return _apply_no_store(response)
+
+
+@ensure_csrf_cookie
+@xframe_options_exempt
+def canvas_password_manage(request: HttpRequest, link_id: int) -> HttpResponse:
+    link = get_object_or_404(
+        CanvasCourseLink.objects.select_related("course", "course__config"),
+        pk=link_id,
+        is_active=True,
+    )
+    explicit_return_url = _validated_canvas_return_url(link, _canvas_return_url_hint(request))
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        return _canvas_embed_blocked_response(
+            request,
+            link,
+            reason="This Canvas embedding origin is not allowed for this BioBoost course.",
+        )
+    response = render(
+        request,
+        "standalone/canvas_magic_link_status.html",
+        _canvas_reauth_context(
+            link=link,
+            title="Sign-in managed in Canvas",
+            message="Canvas password sign-in has been retired. Return to the Canvas page and request a new inbox link to continue.",
+            canvas_return_url=explicit_return_url,
+        ),
+        status=410,
+    )
+    if _canvas_embed_mode(request):
+        response["Content-Security-Policy"] = f"frame-ancestors 'self' {link.allowed_iframe_origin}"
+    return _apply_no_store(response)
+
+
+@ensure_csrf_cookie
+@xframe_options_exempt
+def canvas_app(request: HttpRequest, link_id: int) -> HttpResponse:
+    link = get_object_or_404(
+        CanvasCourseLink.objects.select_related("course", "course__config"),
+        pk=link_id,
+        is_active=True,
+    )
+    explicit_return_url = _validated_canvas_return_url(link, _canvas_return_url_hint(request))
+    if _canvas_embed_mode(request) and not _canvas_embed_request_authorized(request, link):
+        return _canvas_embed_blocked_response(
+            request,
+            link,
+            reason="This Canvas embedding origin is not allowed for this BioBoost course.",
+        )
+    membership, session_expired, auth_source, raw_embed_session_token = _canvas_authenticated_membership(request, link)
+    if membership is None:
+        message = "Your Canvas BioBoost session has expired. Return to the Canvas page and request a fresh login link."
+        if not session_expired:
+            message = "Sign in from the Canvas page to open this BioBoost course."
+        response = render(
+            request,
+            "standalone/canvas_magic_link_status.html",
+            _canvas_reauth_context(
+                link=link,
+                title="Re-authentication required",
+                message=message,
+                canvas_return_url=explicit_return_url,
+            ),
+            status=403,
+        )
+        return _apply_no_store(response)
+
+    requested_block_id = int(request.GET.get("block") or 0)
+    active_block_id = (
+        membership.canvas_course_link.course.blocks.filter(pk=requested_block_id).values_list("pk", flat=True).first()
+        if requested_block_id > 0
+        else None
+    )
+    preview_state = serialize_canvas_preview_state(membership, active_block_id=active_block_id)
+    response = render(
+        request,
+        "standalone/student_preview.html",
+        {
+            "course": membership.canvas_course_link.course,
+            "canvas_current_user_name": membership.canvas_user.display_name or membership.canvas_user.sortable_name,
+            "canvas_current_user_role": membership.get_canvas_role_display(),
+            "preview_state": preview_state,
+            "action_url_template": reverse("standalone:canvas_app_action", args=[link.pk, 0, "ACTION"]),
+            "is_canvas_mode": True,
+            "is_student_practice": False,
+            "is_demo_mode": False,
+            "is_embed_mode": _canvas_embed_mode(request),
+            "hide_flag_actions": True,
+            "canvas_home_url": _canvas_launch_url(link, embed=_canvas_embed_mode(request), canvas_page_url=explicit_return_url),
+            "canvas_embed_session_token": raw_embed_session_token if auth_source == "embed_session" else "",
+            "canvas_embed_origin_token": _canvas_embed_origin_token_for_request(request, link) if _canvas_embed_mode(request) else "",
+        },
+    )
+    if _canvas_embed_mode(request):
+        response["Content-Security-Policy"] = f"frame-ancestors 'self' {link.allowed_iframe_origin}"
+    return _apply_no_store(response)
+
+
+def _canvas_preview_payload(
+    membership: CanvasCourseMembership,
+    block: CourseBlock,
+    action: str,
+    request: HttpRequest,
+    *,
+    collection: CourseBlockCollection | None = None,
+) -> JsonResponse:
+    request_data = _parse_json_request_object(request)
+    if request_data is _JSON_REQUEST_INVALID:
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+
+    if action == "quiz":
+        requested_question_type = None
+        coding_only = False
+        force_new = False
+        preferred_objective_id = None
+        if request_data is not _JSON_REQUEST_MISSING:
+            data = request_data
+            requested_question_type = str(data.get("question_type", "")).strip().lower() or None
+            coding_only = bool(data.get("coding_only"))
+            force_new = bool(data.get("force_new"))
+            preferred_objective_id = int(data.get("learning_objective_id") or 0) or None
+        payload = request_canvas_preview_quiz(
+            membership,
+            block,
+            requested_question_type=requested_question_type,
+            coding_only=coding_only,
+            force_new=force_new,
+            preferred_objective_id=preferred_objective_id,
+            collection=collection,
+        )
+        return JsonResponse({"ok": True, "preview": payload})
+
+    if action == "reset":
+        payload = reset_canvas_preview_state(membership)
+        return JsonResponse({"ok": True, "preview": payload})
+
+    if request_data is _JSON_REQUEST_MISSING:
+        return JsonResponse({"ok": False, "error": "Please send valid JSON."}, status=400)
+    data = request_data
+    if action == "answer":
+        selected_answers = data.get("answers")
+        if not isinstance(selected_answers, list):
+            selected_answer = str(data.get("answer", "")).strip()
+            selected_answers = [selected_answer] if selected_answer else []
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = submit_canvas_preview_answer(
+            membership,
+            block,
+            question_id,
+            selected_answers,
+            answer_text=answer_text,
+            collection=collection,
+        )
+        return JsonResponse({"ok": True, "preview": payload})
+    if action == "draft_answer":
+        question_id = int(data.get("question_id") or 0)
+        answer_text = str(data.get("answer_text", "")).strip()
+        payload = draft_canvas_preview_written_answer(
+            membership,
+            block,
+            question_id,
+            answer_text,
+            collection=collection,
+        )
+        return JsonResponse({"ok": True, "alignment": payload})
+    if action == "chat":
+        question = str(data.get("question", "")).strip()
+        if not question:
+            return JsonResponse({"ok": False, "error": "Please enter a course question first."}, status=400)
+        payload = send_canvas_preview_chat_message(membership, block, question, collection=collection)
+        return JsonResponse({"ok": True, "preview": payload})
+    raise Http404
+
+
+@csrf_exempt
+def canvas_app_action(request: HttpRequest, link_id: int, block_id: int, action: str) -> JsonResponse:
+    if request.method != "POST":
+        raise Http404
+    link = get_object_or_404(CanvasCourseLink.objects.select_related("course"), pk=link_id, is_active=True)
+    membership, expired, auth_source, _raw_embed_session_token = _canvas_authenticated_membership(request, link)
+    if membership is None:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": (
+                    "Your Canvas BioBoost session has expired."
+                    if expired
+                    else "Sign in from the Canvas page to continue."
+                ),
+                "reauth_url": _canvas_launch_url(link, embed=_canvas_embed_mode(request), canvas_page_url=_validated_canvas_return_url(link, _canvas_return_url_hint(request))),
+            },
+            status=403,
+        )
+    if _canvas_embed_mode(request) and auth_source == "embed_session" and not _canvas_embed_request_authorized(request, link):
+        _log_canvas_embed_authorization_failure(request, link, endpoint="canvas_app_action")
+        return JsonResponse({"ok": False, "error": "This Canvas launch is not authorized for the current iframe origin."}, status=403)
+    block = get_object_or_404(CourseBlock.objects.select_related("course"), pk=block_id, course=link.course)
+    collection = None
+    data = _parse_json_request_object(request)
+    if isinstance(data, dict):
+        thread_kind = str(data.get("thread_kind", "")).strip().lower()
+        thread_id = int(data.get("thread_id") or 0)
+        if thread_kind == "collection" and thread_id > 0:
+            collection = get_object_or_404(
+                CourseBlockCollection.objects.filter(course=link.course).prefetch_related("blocks"),
+                pk=thread_id,
+            )
+    return _canvas_preview_payload(membership, block, action, request, collection=collection)
 
 
 def _student_sidebar_validation_booking_url(enrollment: Enrollment) -> str:

@@ -1,0 +1,33 @@
+{% extends "standalone/base.html" %}
+{% block title %}Canvas BioBoost Access{% endblock %}
+{% block content %}
+<section class="workspace-page">
+  <div class="workspace-hero">
+    <div class="workspace-hero-copy">
+      <h1>{{ title }}</h1>
+      <p class="lead">{{ message }}</p>
+    </div>
+  </div>
+  <section class="course-section-card">
+    <div class="block-card-content">
+      {% if resent %}
+        <p class="course-setting-help">The old link will no longer work. Use the newest Canvas inbox message instead.</p>
+      {% endif %}
+      <div class="workspace-actions">
+        {% if resend_url %}
+          <form method="post" action="{{ resend_url }}">
+            {% csrf_token %}
+            <button class="button" type="submit">Send new magic link</button>
+          </form>
+        {% endif %}
+        <a class="button secondary" href="{{ canvas_inbox_url }}">Open Canvas inbox</a>
+        {% if canvas_return_url %}
+          <a class="button secondary" href="{{ canvas_return_url }}">Return to Canvas page</a>
+        {% else %}
+          <a class="button secondary" href="{{ launch_url }}">Open BioBoost launcher</a>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+</section>
+{% endblock %}

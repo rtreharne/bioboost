@@ -3,6 +3,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
+from django.contrib.auth.hashers import check_password, is_password_usable, make_password
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -184,6 +185,170 @@ class CourseMagicLink(TimeStampedModel):
     @property
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
+
+
+class CanvasCourseLink(TimeStampedModel):
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="canvas_links")
+    canvas_course_id = models.PositiveBigIntegerField(unique=True)
+    canvas_course_name = models.CharField(max_length=255, blank=True)
+    allowed_iframe_origin = models.CharField(max_length=255)
+    canvas_page_url = models.URLField(max_length=2000, blank=True)
+    is_active = models.BooleanField(default=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_sync_error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["course__title", "canvas_course_id"]
+
+    def __str__(self) -> str:
+        return f"Canvas course {self.canvas_course_id} for {self.course}"
+
+
+class CanvasUserIdentity(TimeStampedModel):
+    canvas_user_id = models.PositiveBigIntegerField(unique=True)
+    login_id_hash = models.CharField(max_length=64, db_index=True)
+    sortable_name = models.CharField(max_length=255, blank=True)
+    display_name = models.CharField(max_length=255, blank=True)
+    search_text = models.TextField(blank=True)
+    password_hash = models.CharField(max_length=255, blank=True)
+    password_set_at = models.DateTimeField(null=True, blank=True)
+    password_updated_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["sortable_name", "display_name", "canvas_user_id"]
+
+    def __str__(self) -> str:
+        return self.display_name or self.sortable_name or f"Canvas user {self.canvas_user_id}"
+
+    @property
+    def has_canvas_password(self) -> bool:
+        return bool(self.password_hash) and is_password_usable(self.password_hash)
+
+    def check_canvas_password(self, raw_password: str) -> bool:
+        if not self.has_canvas_password:
+            return False
+        return check_password(str(raw_password or ""), self.password_hash)
+
+    def set_canvas_password(self, raw_password: str) -> None:
+        now = timezone.now()
+        self.password_hash = make_password(str(raw_password or ""))
+        if self.password_set_at is None:
+            self.password_set_at = now
+        self.password_updated_at = now
+
+    def clear_canvas_password(self) -> None:
+        self.password_hash = ""
+        self.password_set_at = None
+        self.password_updated_at = None
+
+
+class CanvasCourseMembership(TimeStampedModel):
+    class CanvasRole(models.TextChoices):
+        STUDENT = "student", "Student"
+        TEACHER = "teacher", "Teacher"
+        TA = "ta", "Teaching assistant"
+        DESIGNER = "designer", "Designer"
+
+    canvas_course_link = models.ForeignKey(CanvasCourseLink, on_delete=models.CASCADE, related_name="memberships")
+    canvas_user = models.ForeignKey(CanvasUserIdentity, on_delete=models.CASCADE, related_name="course_memberships")
+    canvas_role = models.CharField(max_length=20, choices=CanvasRole.choices)
+    enrollment_state = models.CharField(max_length=30, default="active")
+    practice_state = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["canvas_course_link__canvas_course_id", "canvas_user__sortable_name", "canvas_user__display_name"]
+        unique_together = ("canvas_course_link", "canvas_user")
+
+    def __str__(self) -> str:
+        return f"{self.canvas_user} in Canvas course {self.canvas_course_link.canvas_course_id}"
+
+
+class CanvasMagicLink(TimeStampedModel):
+    membership = models.ForeignKey(CanvasCourseMembership, on_delete=models.CASCADE, related_name="magic_links")
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    expires_at = models.DateTimeField()
+    return_to_url = models.URLField(max_length=2000, blank=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+    sent_canvas_message_id = models.CharField(max_length=100, blank=True)
+    sent_canvas_subject = models.CharField(max_length=255, blank=True)
+    sent_to_canvas_user_id = models.PositiveBigIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Canvas magic link for {self.membership}"
+
+    @classmethod
+    def default_expiry(cls):
+        return timezone.now() + timedelta(hours=settings.CANVAS_MAGIC_LINK_EXPIRY_HOURS)
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_active(self) -> bool:
+        return self.used_at is None and self.superseded_at is None and not self.is_expired
+
+
+class CanvasEmbedLaunchCode(TimeStampedModel):
+    membership = models.ForeignKey(CanvasCourseMembership, on_delete=models.CASCADE, related_name="embed_launch_codes")
+    canvas_course_link = models.ForeignKey(CanvasCourseLink, on_delete=models.CASCADE, related_name="embed_launch_codes")
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    canvas_page_url = models.URLField(max_length=2000)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Canvas embed launch code for {self.membership}"
+
+    @classmethod
+    def default_expiry(cls):
+        max_age_minutes = max(5, int(getattr(settings, "CANVAS_EMBED_LAUNCH_CODE_EXPIRY_MINUTES", 30) or 30))
+        return timezone.now() + timedelta(minutes=max_age_minutes)
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_active(self) -> bool:
+        return self.used_at is None and self.superseded_at is None and not self.is_expired
+
+
+class CanvasEmbedSession(TimeStampedModel):
+    membership = models.ForeignKey(CanvasCourseMembership, on_delete=models.CASCADE, related_name="embed_sessions")
+    canvas_course_link = models.ForeignKey(CanvasCourseLink, on_delete=models.CASCADE, related_name="embed_sessions")
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"Canvas embed session for {self.membership}"
+
+    @classmethod
+    def default_expiry(cls):
+        max_age_hours = max(1, int(getattr(settings, "CANVAS_EMBED_SESSION_EXPIRY_HOURS", settings.CANVAS_SESSION_EXPIRY_HOURS) or settings.CANVAS_SESSION_EXPIRY_HOURS))
+        return timezone.now() + timedelta(hours=max_age_hours)
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and not self.is_expired
 
 
 class CourseDemoAccess(TimeStampedModel):

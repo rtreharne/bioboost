@@ -1,0 +1,100 @@
+{% extends "standalone/base.html" %}
+{% block title %}Canvas Links | {{ course.title }}{% endblock %}
+{% block app_nav_links %}
+  <a href="{% url 'standalone:course_detail' course.pk %}">Course</a>
+  <a href="{% url 'standalone:teacher_dashboard' %}">Dashboard</a>
+{% endblock %}
+{% block app_nav_menu_actions %}
+  <a class="button secondary app-nav-menu-action" href="{% url 'standalone:course_detail' course.pk %}">Course</a>
+{% endblock %}
+{% block content %}
+<section class="workspace-page">
+  <div class="workspace-hero">
+    <div class="workspace-hero-copy">
+      <h1>Canvas links for {{ course.title }}</h1>
+      <p class="lead">Link this BioBoost course to one or more Canvas course IDs, sync the roster, and copy the embed snippet.</p>
+    </div>
+  </div>
+
+  <section class="course-section-card">
+    <div class="section-head compact">
+      <div>
+        <h2>Create Canvas link</h2>
+      </div>
+    </div>
+    <div class="block-card-content">
+      {% if not canvas_configured %}
+        <p class="course-setting-help">Canvas is not configured yet. Add <code>CANVAS_API_URL</code> and <code>CANVAS_API_TOKEN</code> in the environment first.</p>
+      {% endif %}
+      <form method="post" class="stack-form">
+        {% csrf_token %}
+        {{ create_form.non_field_errors }}
+        {% for field in create_form %}
+          <div class="stack-form-field">
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<p class="course-setting-help">{{ field.help_text }}</p>{% endif %}
+            {{ field.errors }}
+          </div>
+        {% endfor %}
+        <button class="button" type="submit">Create and sync link</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="course-section-card">
+    <div class="section-head compact">
+      <div>
+        <h2>Existing links</h2>
+      </div>
+    </div>
+    <div class="block-card-content">
+      {% if links %}
+        {% for link in links %}
+          <article class="course-settings-group" style="margin-bottom:2rem;">
+            <div class="course-settings-group-head">
+              <h3>Canvas course {{ link.canvas_course_id }}</h3>
+              <p>{{ link.canvas_course_name|default:"Course name not synced yet." }}</p>
+            </div>
+            <div class="course-settings-grid">
+              <div class="course-setting-cell course-setting-cell--full">
+                <form method="post" action="{% url 'standalone:course_canvas_link_update' link.pk %}" class="stack-form">
+                  {% csrf_token %}
+                  {% for field in link.edit_form %}
+                    <div class="stack-form-field">
+                      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                      {{ field }}
+                      {% if field.help_text %}<p class="course-setting-help">{{ field.help_text }}</p>{% endif %}
+                    </div>
+                  {% endfor %}
+                  <button class="button secondary" type="submit">Save link</button>
+                </form>
+              </div>
+              <div class="course-setting-cell">
+                <label class="course-setting-label">Roster sync</label>
+                <form method="post" action="{% url 'standalone:course_canvas_link_sync' link.pk %}">
+                  {% csrf_token %}
+                  <button class="button secondary" type="submit">Sync roster now</button>
+                </form>
+                <p class="course-setting-help">Last synced: {% if link.last_synced_at %}{{ link.last_synced_at|date:"d M Y, H:i" }}{% else %}Never{% endif %}</p>
+                {% if link.last_sync_error %}<p class="course-setting-help">{{ link.last_sync_error }}</p>{% endif %}
+              </div>
+              <div class="course-setting-cell course-setting-cell--full">
+                <label class="course-setting-label" for="canvas-link-snippet-{{ link.pk }}">Canvas iframe snippet</label>
+                <textarea id="canvas-link-snippet-{{ link.pk }}" rows="5" readonly>{{ link.canvas_context.iframe_snippet }}</textarea>
+                <p class="course-setting-help">Embed URL: {{ link.canvas_context.embed_url }}</p>
+                <p class="course-setting-help">Replace the existing iframe HTML on the Canvas page after saving. The updated snippet includes the referrer policy needed for in-Canvas inbox sign-in to relaunch BioBoost automatically.</p>
+                {% if not link.canvas_page_url %}
+                  <p class="course-setting-help">Add the full Canvas page URL above, then save the link to generate the updated iframe snippet with <code>canvas_page_url</code>.</p>
+                {% endif %}
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="course-setting-help">No Canvas course links yet.</p>
+      {% endif %}
+    </div>
+  </section>
+</section>
+{% endblock %}

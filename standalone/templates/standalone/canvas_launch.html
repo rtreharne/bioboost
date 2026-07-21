@@ -1,0 +1,627 @@
+{% extends "standalone/base.html" %}
+{% block title %}Canvas Login | {{ canvas_link.course.title }}{% endblock %}
+{% load static %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'website/css/landing.css' %}?v={{ static_asset_version }}">
+  <style>
+    .canvas-launch-title {
+      color: #0f5b4d !important;
+      font-size: clamp(2rem, 4.8vw, 3.1rem) !important;
+      line-height: 0.98;
+      letter-spacing: -0.03em;
+    }
+
+    .canvas-launch-search-ui {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    .canvas-launch-selection[hidden] {
+      display: none !important;
+    }
+
+    .canvas-launch-selection {
+      display: grid;
+      gap: 0.85rem;
+      padding: 1rem;
+      border: 1px solid rgba(22, 160, 133, 0.18);
+      border-radius: 1.15rem;
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: 0 12px 24px rgba(18, 67, 60, 0.08);
+    }
+
+    .canvas-launch-selection-head {
+      display: grid;
+      gap: 0.28rem;
+    }
+
+    .canvas-launch-selection-name {
+      color: #0f5b4d;
+      font-size: 1rem;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .canvas-launch-selection-meta,
+    .canvas-launch-selection-copy,
+    .canvas-launch-selection-help {
+      margin: 0;
+      color: rgba(22, 63, 57, 0.78);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .canvas-launch-selection-actions {
+      display: grid;
+      gap: 0.7rem;
+    }
+
+    .canvas-launch-password-form {
+      display: grid;
+      gap: 0.7rem;
+    }
+
+    .canvas-launch-password-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.7rem;
+    }
+
+    .canvas-launch-text-link {
+      color: #0f5b4d;
+      font-size: 0.88rem;
+      font-weight: 700;
+      text-decoration: underline;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .canvas-launch-text-link:hover,
+    .canvas-launch-text-link:focus-visible {
+      color: #0a453a;
+      outline: none;
+    }
+
+    .canvas-launch-link-button--secondary {
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(22, 160, 133, 0.24);
+      box-shadow: 0 8px 18px rgba(18, 67, 60, 0.08);
+    }
+
+    .canvas-launch-input:focus {
+      outline: none;
+      border-color: rgba(22, 160, 133, 0.42);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.48), 0 0 0 4px rgba(26, 188, 156, 0.16);
+    }
+
+    .canvas-launch-next-steps[hidden] {
+      display: none !important;
+    }
+
+    @media (max-width: 640px) {
+      .canvas-launch-title {
+        font-size: clamp(1.8rem, 8vw, 2.45rem) !important;
+      }
+    }
+  </style>
+{% endblock %}
+{% block app_header %}{% endblock %}
+{% block body_class %}{% if not is_embed_mode %} app-body--canvas-theme{% endif %} app-body--canvas-launch{% endblock %}
+{% block app_shell_class %} canvas-launch-app-shell{% endblock %}
+{% block app_footer %}{% endblock %}
+{% block content %}
+<main
+  class="landing-shell canvas-launch-shell"
+  data-canvas-launch-root
+  data-canvas-course-id="{{ canvas_link.canvas_course_id }}"
+  data-lookup-url="{{ lookup_url }}"
+  data-send-link-url="{{ send_link_url }}"
+  data-exchange-launch-code-url="{{ exchange_launch_code_url }}"
+  data-embed-session-refresh-url="{{ embed_session_refresh_url }}"
+  data-embed="{% if is_embed_mode %}1{% else %}0{% endif %}"
+  data-allowed-origin="{{ allowed_origin|default:'' }}"
+  data-launch-token="{{ launch_token|default:'' }}"
+  data-origin-token="{{ origin_token|default:'' }}"
+  data-origin-token-url="{{ origin_token_url|default:'' }}"
+  data-canvas-page-url="{{ canvas_page_url|default:'' }}"
+>
+  <section
+    class="landing-hero canvas-launch-hero"
+    style="background-image: url('{% static "standalone/img/bioboost_background.png" %}');"
+    aria-label="BioBoost Canvas sign-in"
+  >
+    <div class="landing-backdrop"></div>
+    <section class="landing-card canvas-launch-card">
+      <h1 class="landing-title canvas-launch-title">{{ canvas_link.course.title }}</h1>
+      {% if canvas_link.course.summary %}
+        <p class="landing-copy canvas-launch-description">{{ canvas_link.course.summary }}</p>
+      {% endif %}
+      <p class="landing-copy">BioBoost now signs you in through Canvas. If this browser has a recent Canvas BioBoost session, we&apos;ll open it automatically. Otherwise, choose your name below and we&apos;ll send a one-time launch link to your Canvas inbox for this course.</p>
+
+      <section class="landing-loader canvas-launch-panel" aria-label="Canvas sign-in launcher">
+        {% if launch_error %}
+          <p class="canvas-launch-status canvas-launch-status--error">{{ launch_error }}</p>
+        {% endif %}
+        <div id="canvas-launch-search-ui" class="canvas-launch-search-ui">
+          <label class="canvas-launch-label" for="canvas-name-search">Your name</label>
+          <input id="canvas-name-search" class="canvas-launch-input" type="text" autocomplete="off" placeholder="Start typing your name">
+          <div id="canvas-launch-status" class="canvas-launch-status" aria-live="polite"></div>
+          <div id="canvas-launch-results" class="canvas-launch-results"></div>
+          <div id="canvas-launch-selection" class="canvas-launch-selection" hidden></div>
+        </div>
+        <div id="canvas-launch-next-steps" class="canvas-launch-next-steps" hidden>
+          <a class="canvas-launch-link-button" href="{{ canvas_inbox_url }}" target="_top" rel="noopener">Open Canvas inbox</a>
+        </div>
+      </section>
+
+      <section class="landing-powered-by" aria-label="Powered by KnowHow">
+        <p class="landing-powered-by__label">Powered by</p>
+        <a
+          class="landing-powered-by__link"
+          href="https://libguides.liverpool.ac.uk/knowhow"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <img
+            class="landing-powered-by__image"
+            src="{% static 'website/img/knowhow_pink_square.png' %}"
+            alt="KnowHow improve your academic skills"
+          >
+        </a>
+      </section>
+    </section>
+  </section>
+</main>
+<script>
+  (function () {
+    const root = document.querySelector("[data-canvas-launch-root]");
+    if (!root) return;
+    const input = document.getElementById("canvas-name-search");
+    const statusNode = document.getElementById("canvas-launch-status");
+    const resultsNode = document.getElementById("canvas-launch-results");
+    const selectionNode = document.getElementById("canvas-launch-selection");
+    const searchUi = document.getElementById("canvas-launch-search-ui");
+    const nextSteps = document.getElementById("canvas-launch-next-steps");
+    const panel = root.querySelector(".canvas-launch-panel");
+    const courseId = root.dataset.canvasCourseId || "";
+    const lookupUrl = root.dataset.lookupUrl || "";
+    const sendLinkUrl = root.dataset.sendLinkUrl || "";
+    const exchangeLaunchCodeUrl = root.dataset.exchangeLaunchCodeUrl || "";
+    const embedSessionRefreshUrl = root.dataset.embedSessionRefreshUrl || "";
+    const embed = root.dataset.embed || "0";
+    const embedMode = embed === "1";
+    const allowedOrigin = root.dataset.allowedOrigin || "";
+    const launchToken = root.dataset.launchToken || "";
+    const originTokenUrl = root.dataset.originTokenUrl || "";
+    const explicitCanvasPageUrl = root.dataset.canvasPageUrl || "";
+    let originToken = root.dataset.originToken || "";
+    let canvasEmbedSessionToken = "";
+    let lastQuery = "";
+    let debounceTimer = 0;
+    let selectedMembershipId = "";
+    let selectedMatch = null;
+    let originTokenPromise = null;
+    let linkSent = false;
+    let searchUiRemoved = false;
+
+    function setStatus(message) {
+      if (statusNode) statusNode.textContent = String(message || "");
+    }
+
+    function embedSessionStorageKey() {
+      return courseId ? `quizanchor:canvas-embed-session:${courseId}` : "";
+    }
+
+    function storeEmbedSessionToken(token) {
+      canvasEmbedSessionToken = String(token || "").trim();
+      const storageKey = embedSessionStorageKey();
+      if (!storageKey) {
+        return;
+      }
+      try {
+        if (canvasEmbedSessionToken) {
+          window.localStorage.setItem(storageKey, canvasEmbedSessionToken);
+        } else {
+          window.localStorage.removeItem(storageKey);
+        }
+      } catch (_error) {
+        return;
+      }
+    }
+
+    function loadEmbedSessionToken() {
+      const storageKey = embedSessionStorageKey();
+      if (!storageKey) {
+        return "";
+      }
+      try {
+        return window.localStorage.getItem(storageKey) || "";
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    function clearResults() {
+      resultsNode.innerHTML = "";
+      renderSelection(null);
+      if (!linkSent) {
+        nextSteps.hidden = true;
+      }
+      selectedMembershipId = "";
+    }
+
+    function setLinkSentState(active) {
+      linkSent = Boolean(active);
+      if (linkSent && searchUi && !searchUiRemoved) {
+        searchUi.remove();
+        searchUiRemoved = true;
+      } else if (searchUi && !searchUiRemoved) {
+        searchUi.hidden = false;
+      }
+      if (nextSteps) {
+        nextSteps.hidden = !linkSent;
+      }
+      if (panel) {
+        panel.classList.toggle("canvas-launch-panel--sent", linkSent);
+      }
+      if (linkSent) {
+        resultsNode.innerHTML = "";
+        renderSelection(null);
+        setStatus("");
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value || "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[char] || char));
+    }
+
+    function normalizeOriginCandidate(value) {
+      if (!value || value === "null") return "";
+      try {
+        const parsed = new URL(value, window.location.origin);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+        return parsed.origin;
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    function canvasEmbedParentOriginCandidates() {
+      const candidates = [];
+      const pushCandidate = (candidate) => {
+        const normalized = normalizeOriginCandidate(candidate);
+        if (normalized && !candidates.includes(normalized)) {
+          candidates.push(normalized);
+        }
+      };
+      if (window.location.ancestorOrigins) {
+        Array.from(window.location.ancestorOrigins).forEach(pushCandidate);
+      }
+      pushCandidate(document.referrer);
+      pushCandidate(allowedOrigin);
+      return candidates;
+    }
+
+    function sanitizeCanvasPageUrl(value) {
+      const candidate = String(value || "").trim();
+      if (!candidate) return "";
+      const normalized = normalizeOriginCandidate(candidate);
+      if (!normalized || normalized !== allowedOrigin) {
+        return "";
+      }
+      try {
+        const parsed = new URL(candidate, window.location.origin);
+        const expectedCoursePath = `/courses/${String(courseId || "").trim()}`;
+        const normalizedPath = `/${String(parsed.pathname || "/").replace(/^\/+/, "")}`;
+        if (!expectedCoursePath || (normalizedPath !== expectedCoursePath && !normalizedPath.startsWith(`${expectedCoursePath}/`))) {
+          return "";
+        }
+        parsed.searchParams.delete("bioboost_launch");
+        return parsed.toString();
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    function canvasReturnUrlCandidate() {
+      const referrerCandidate = sanitizeCanvasPageUrl(document.referrer);
+      if (referrerCandidate) {
+        return referrerCandidate;
+      }
+      return sanitizeCanvasPageUrl(explicitCanvasPageUrl);
+    }
+
+    function canvasLaunchCodeFromReferrer() {
+      const rawReferrer = String(document.referrer || "").trim();
+      if (!rawReferrer) {
+        return "";
+      }
+      try {
+        const parsed = new URL(rawReferrer, window.location.origin);
+        const normalized = normalizeOriginCandidate(parsed.toString());
+        if (!normalized || normalized !== allowedOrigin) {
+          return "";
+        }
+        return String(parsed.searchParams.get("bioboost_launch") || "").trim();
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    function canvasLaunchCodeFromLocation() {
+      try {
+        const params = new URLSearchParams(window.location.search || "");
+        return String(params.get("launch_code") || params.get("bioboost_launch") || "").trim();
+      } catch (_error) {
+        return "";
+      }
+    }
+
+    async function fetchCanvasEmbedOriginToken() {
+      if (!embedMode || originToken) {
+        return originToken;
+      }
+      if (!originTokenUrl) {
+        return "";
+      }
+      if (originTokenPromise) {
+        return originTokenPromise;
+      }
+      originTokenPromise = (async () => {
+        const parentOrigins = canvasEmbedParentOriginCandidates();
+        for (const parentOrigin of parentOrigins) {
+          try {
+            const tokenUrl = new URL(originTokenUrl, window.location.origin);
+            tokenUrl.searchParams.set("parent_origin", parentOrigin);
+            const response = await fetch(tokenUrl.toString(), {
+              credentials: "same-origin",
+              headers: {
+                "X-Requested-With": "XMLHttpRequest",
+              },
+            });
+            if (!response.ok) {
+              continue;
+            }
+            const payload = await response.json();
+            if (payload && payload.ok && payload.origin_token) {
+              originToken = String(payload.origin_token);
+              return originToken;
+            }
+          } catch (_error) {
+            continue;
+          }
+        }
+        return "";
+      })();
+      const nextToken = await originTokenPromise;
+      if (!nextToken) {
+        originTokenPromise = null;
+      }
+      return nextToken;
+    }
+
+    async function postForm(url, payload) {
+      const originTokenValue = embedMode ? await fetchCanvasEmbedOriginToken() : "";
+      const parentOriginValue = embedMode ? (allowedOrigin || canvasEmbedParentOriginCandidates()[0] || "") : "";
+      const body = new URLSearchParams(payload);
+      if (embedMode && parentOriginValue) {
+        body.set("parent_origin", parentOriginValue);
+      }
+      if (embedMode) {
+        const returnUrlValue = canvasReturnUrlCandidate();
+        if (returnUrlValue) {
+          body.set("canvas_page_url", returnUrlValue);
+        }
+      }
+      if (embedMode && launchToken) {
+        body.set("launch_token", launchToken);
+      }
+      if (embedMode && originTokenValue) {
+        body.set("origin_token", originTokenValue);
+      }
+      if (canvasEmbedSessionToken) {
+        body.set("embed_session", canvasEmbedSessionToken);
+      }
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          "X-Requested-With": "XMLHttpRequest",
+          ...(originTokenValue ? { "X-Canvas-Embed-Origin-Token": originTokenValue } : {}),
+          ...(canvasEmbedSessionToken ? { "X-Canvas-Embed-Session": canvasEmbedSessionToken } : {}),
+        },
+        body: body.toString(),
+      });
+      const responseText = await response.text();
+      let data = null;
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch (_error) {
+        throw new Error(responseText.includes("CSRF")
+          ? "Canvas blocked the iframe cookie needed for this request. Please reload and try again."
+          : "The server returned an unexpected response.");
+      }
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Request failed.");
+      }
+      return data;
+    }
+
+    async function openCanvasApp(responsePayload) {
+      const nextToken = String(responsePayload?.embed_session_token || "").trim();
+      if (nextToken) {
+        storeEmbedSessionToken(nextToken);
+      }
+      if (responsePayload && responsePayload.app_url) {
+        window.location.assign(responsePayload.app_url);
+        return;
+      }
+      throw new Error("The server did not return an app launch URL.");
+    }
+
+    async function trySilentCanvasSessionRefresh() {
+      if (!embedMode || !embedSessionRefreshUrl) {
+        return false;
+      }
+      const storedToken = loadEmbedSessionToken();
+      if (!storedToken) {
+        return false;
+      }
+      canvasEmbedSessionToken = storedToken;
+      setStatus("Opening your recent Canvas BioBoost session...");
+      try {
+        const response = await postForm(embedSessionRefreshUrl, {
+          canvas_course_id: courseId,
+          embed: embed,
+        });
+        await openCanvasApp(response);
+        return true;
+      } catch (error) {
+        storeEmbedSessionToken("");
+        setStatus("");
+        return false;
+      }
+    }
+
+    async function tryLaunchCodeExchange() {
+      if (!embedMode || !exchangeLaunchCodeUrl) {
+        return false;
+      }
+      const launchCode = canvasLaunchCodeFromLocation() || canvasLaunchCodeFromReferrer();
+      if (!launchCode) {
+        return false;
+      }
+      setStatus("Opening BioBoost from Canvas...");
+      try {
+        const response = await postForm(exchangeLaunchCodeUrl, {
+          canvas_course_id: courseId,
+          launch_code: launchCode,
+          embed: embed,
+        });
+        await openCanvasApp(response);
+        return true;
+      } catch (error) {
+        setStatus(error.message || "Unable to open BioBoost from the Canvas page right now.");
+        return false;
+      }
+    }
+
+    async function sendMagicLinkForSelection() {
+      if (!selectedMembershipId) {
+        setStatus("Choose your Canvas enrollment first.");
+        return;
+      }
+      setStatus("Sending your one-time launch link to the Canvas inbox...");
+      try {
+        await postForm(sendLinkUrl, {
+          canvas_course_id: courseId,
+          membership_id: selectedMembershipId,
+          embed: embed,
+        });
+        setLinkSentState(true);
+      } catch (error) {
+        setStatus(error.message || "Unable to send the Canvas launch link right now.");
+      }
+    }
+
+    function renderSelection(match) {
+      selectedMatch = match || null;
+      if (!selectionNode) return;
+      if (!selectedMatch || linkSent) {
+        selectionNode.hidden = true;
+        selectionNode.innerHTML = "";
+        return;
+      }
+      selectedMembershipId = String(selectedMatch.membership_id || "");
+      const displayName = escapeHtml(selectedMatch.display_name || selectedMatch.sortable_name || "Canvas enrollment");
+      const role = escapeHtml(selectedMatch.role || "");
+      const sortableName = selectedMatch.sortable_name && selectedMatch.sortable_name !== selectedMatch.display_name
+        ? `<p class="canvas-launch-selection-meta">${escapeHtml(selectedMatch.sortable_name)}</p>`
+        : "";
+      selectionNode.hidden = false;
+      selectionNode.innerHTML = `
+        <div class="canvas-launch-selection-head">
+          <div class="canvas-launch-selection-name">${displayName}${role ? ` · ${role}` : ""}</div>
+          ${sortableName}
+          <p class="canvas-launch-selection-copy">Send a one-time launch link to your Canvas inbox. Open it from Canvas and BioBoost will relaunch inside Canvas.</p>
+        </div>
+        <div class="canvas-launch-selection-actions">
+          <button class="canvas-launch-link-button" type="button" data-canvas-send-link>Send magic link</button>
+          <p class="canvas-launch-selection-help">The link will arrive in your Canvas inbox for this course.</p>
+        </div>
+      `;
+      selectionNode.querySelectorAll("[data-canvas-send-link]").forEach((node) => {
+        node.addEventListener("click", sendMagicLinkForSelection);
+      });
+    }
+
+    function renderMatches(matches) {
+      clearResults();
+      if (!Array.isArray(matches) || !matches.length) {
+        setStatus("No matching Canvas roster entries yet.");
+        return;
+      }
+      setStatus("Select your Canvas enrollment to continue.");
+      matches.forEach((match) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "canvas-launch-result";
+        const primaryName = match.display_name + (match.role ? ` · ${match.role}` : "");
+        const secondaryName = match.sortable_name && match.sortable_name !== match.display_name ? match.sortable_name : "";
+        button.innerHTML = `
+          <span class="canvas-launch-result__name">${primaryName}</span>
+          ${secondaryName ? `<span class="canvas-launch-result__meta">${secondaryName}</span>` : ""}
+        `;
+        button.addEventListener("click", async () => {
+          renderSelection(match);
+          setStatus("Send a one-time Canvas inbox link to continue.");
+        });
+        resultsNode.appendChild(button);
+      });
+    }
+
+    void (async () => {
+      if (await trySilentCanvasSessionRefresh()) {
+        return;
+      }
+      await tryLaunchCodeExchange();
+    })();
+
+    input?.addEventListener("input", () => {
+      const query = String(input.value || "").trim();
+      if (linkSent) return;
+      clearTimeout(debounceTimer);
+      clearResults();
+      if (query.length < 5) {
+        setStatus("Type at least five characters to search the synced Canvas roster.");
+        return;
+      }
+      debounceTimer = window.setTimeout(async () => {
+        lastQuery = query;
+        setStatus("Searching Canvas roster...");
+        try {
+          const data = await postForm(lookupUrl, {
+            canvas_course_id: courseId,
+            query: query,
+            embed: embed,
+          });
+          if (query !== lastQuery) return;
+          renderMatches(data.matches || []);
+        } catch (error) {
+          setStatus(error.message || "Unable to search the Canvas roster right now.");
+        }
+      }, 250);
+    });
+  })();
+</script>
+{% endblock %}
